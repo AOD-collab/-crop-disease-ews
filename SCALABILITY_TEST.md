@@ -135,6 +135,15 @@ bookkeeping loop at most every 0.5 s, never by the photo workers (60 photos: 3.5
 `photos` vs 3.98 s / 3.69 s with `off`). The run's `config_json` records which mode was used
 (`LIVE_OUTPUT`). `--log-file` keeps a copy of the window's output.
 
+**Why the EWS-Spark window stays quiet during a test:** the test never goes through
+Spark (its events are on their own topic and processed by the test's worker; Spark
+skips any test event) — that is the isolation. The **EWS-KafkaMonitor** window does
+show the test's Kafka traffic, as one summary line per second:
+
+```
+[kafka 18:33:49] TEST topic 'maize-disease-images-scalability-test': +60 event(s) (offsets 60-119; 60 for scale-20261010-183344-72dc); 120 since start; test worker committed up to offset 60 (60 behind; it commits every few seconds) — processed by the scalability test, not Spark
+```
+
 ### Photos from a custom folder
 
 Any folder on this computer (dashboard: *Photo source → Custom folder*).

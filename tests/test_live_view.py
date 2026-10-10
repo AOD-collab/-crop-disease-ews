@@ -96,3 +96,43 @@ def test_run_all_opens_the_kafka_monitor_window():
     src = open(run_all.__file__, encoding="utf-8").read()
     assert 'start_service("EWS-KafkaMonitor", ["python", "-m", "kafka.monitor"])' in src
     assert "--no-kafka-monitor" in src
+
+
+def test_test_topic_summary_counts_runs_offsets_and_position():
+    from kafka import monitor
+    summary = monitor.TestTopicSummary()
+    assert summary.line() is None                                       # nothing arrived
+    for offset in range(100, 160):
+        summary.add(json.dumps({"run_id": "scale-A", "item_id": str(offset)}).encode(), offset)
+    line = summary.line(consumed_to=130)
+    assert "+60 event(s) (offsets 100-159; 60 for scale-A); 60 since start" in line
+    assert "committed up to offset 130 (30 behind" in line and "not Spark" in line
+    assert summary.line() is None                                       # reset after each line
+    summary.add(b"not json", 160)
+    assert "1 for unreadable" in summary.line()
+
+
+class _FakeConsumer:
+    def __init__(self, topics):
+        self.topics, self.assigned = topics, []
+
+    def list_topics(self, timeout=None):
+        from types import SimpleNamespace
+        return SimpleNamespace(topics={t: SimpleNamespace(error=None, partitions={p: None for p in parts})
+                                       for t, parts in self.topics.items()})
+
+    def incremental_assign(self, tps):
+        self.assigned += [(tp.topic, tp.partition, tp.offset) for tp in tps]
+
+
+def test_monitor_assigns_partitions_without_a_group_and_catches_new_topics():
+    from confluent_kafka import OFFSET_BEGINNING, OFFSET_END
+    from kafka import monitor
+    fake = _FakeConsumer({"live": [0]})
+    assigner = monitor.Assigner(fake, ["live", "test"], from_start=False)
+    assert assigner.refresh() and fake.assigned == [("live", 0, OFFSET_END)]   # existing: newest only
+    assert assigner.missing() == ["test"]
+    fake.topics["test"] = [0]                                                  # the test creates its topic
+    assigner.refresh()
+    assert ("test", 0, OFFSET_BEGINNING) in fake.assigned                       # all of it is new
+    assert assigner.missing() == [] and assigner.refresh() == []               # nothing twice

@@ -372,9 +372,13 @@ EWS-Spark         [spark 13:57:42] [kafka]  batch 37: 1 photo event(s) received 
 ```
 
 `EWS-KafkaMonitor` (`python -m kafka.monitor`, `--from-start` to also list what is
-already in the topic) is read-only: its own consumer group, no committed offsets,
-and Spark keeps its position in its own checkpoint, so it cannot take or delay an
-event. Skip it with `run_all.py --no-kafka-monitor`; turn Spark's per-photo lines
+already in the topic) is read-only: it reads by direct partition assignment (no
+consumer group, no committed offsets), and Spark keeps its position in its own
+checkpoint, so it cannot take or delay an event. It also watches the scalability
+test's own topic and prints a one-line summary per second while a test runs
+(events published, and how far the test's worker has read them); `--live-only`
+leaves that out. Test photos never appear in the EWS-Spark window: the test is
+processed by its own worker, not by Spark. Skip it with `run_all.py --no-kafka-monitor`; turn Spark's per-photo lines
 off with `SPARK_LIVE_LOG=false` (errors and `[ALERT]` lines always print). The
 scalability test has its own live window (SCALABILITY_TEST.md).
 
