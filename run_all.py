@@ -208,6 +208,8 @@ def main() -> int:
                         "not needed with Google sign-in)")
     p.add_argument("--no-mail", action="store_true", help=argparse.SUPPRESS)  # old flag, now the default
     p.add_argument("--no-drive", action="store_true", help="don't start the Google Drive -> Kafka watcher")
+    p.add_argument("--no-kafka-monitor", action="store_true",
+                   help="don't open the read-only EWS-KafkaMonitor window (live view of the Kafka topic)")
     p.add_argument("--api", action="store_true", help="also start the REST API (uvicorn on :8000) — off by default, run it yourself")
     p.add_argument("--reload", action="store_true", help="with --api: run uvicorn under --reload")
     p.add_argument("--reset", action="store_true", help="factory-reset pipeline data first (keeps users/admins)")
@@ -325,6 +327,10 @@ def main() -> int:
 
     if not args.no_spark:
         services.append(start_service("EWS-Spark", ["python", "-m", "spark.streaming_job"]))
+
+    if not args.no_kafka_monitor:
+        # read-only window: each farmer-photo event as it reaches Kafka (kafka/monitor.py)
+        services.append(start_service("EWS-KafkaMonitor", ["python", "-m", "kafka.monitor"]))
 
     if not args.no_dashboard:
         if port_in_use(8501):

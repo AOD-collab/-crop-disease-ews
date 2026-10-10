@@ -45,6 +45,7 @@ mode** with a file source standing in for Kafka. What is NOT exercised in
 this environment is an actual multi-node cluster and a live Kafka broker.
 """
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
@@ -73,6 +74,8 @@ from spark.preprocessing import (
     replay_state,
 )
 from storage.database import ProcessingStatus, init_db
+from api.image_storage import is_drive_path
+from spark import live_log
 
 CHECKPOINT_DIR = str(SPARK_CHECKPOINT_ROOT / KAFKA_TOPIC)
 
@@ -162,6 +165,8 @@ def foreach_batch_sink(batch_df, batch_id):
         return
     # Stateless dedupe of THIS micro-batch only (see parse_events).
     events = [row.asDict() for row in batch_df.dropDuplicates(["image_id"]).collect()]
+    started = time.monotonic()
+    live_log.batch_started(batch_id, len(events))
     # Several photos at once: they overlap instead of queueing. dropDuplicates
     # above means no two threads ever get the same image_id.
     if len(events) <= 1 or SPARK_PARALLEL_PHOTOS <= 1:
@@ -175,18 +180,24 @@ def foreach_batch_sink(batch_df, batch_id):
     # An upload that failed (Drive down) only logs; the photo is left
     # COMPLETED with result_published_at empty, which System Status counts
     # and `python -m storage.requeue_stuck` re-sends.
-    for upload in uploads:
-        if upload is not None:
-            upload.result()
+    statuses = [upload.result() if upload is not None else None for upload in uploads]
+    live_log.batch_committed(batch_id, ok=statuses.count(ProcessingStatus.COMPLETED),
+                             failed=statuses.count(ProcessingStatus.FAILED), skipped=statuses.count(None),
+                             seconds=time.monotonic() - started)
 
 
 # Drive result uploads run here, in the background (see _process_one).
 _UPLOADS = ThreadPoolExecutor(max_workers=max(1, SPARK_DRIVE_UPLOAD_WORKERS), thread_name_prefix="drive-upload")
 
 
-def _upload_result(event, status, error, processed_image) -> None:
-    """Sends one photo's result (or failure) to Drive. Never raises."""
-    publish_result_to_drive_safely(event, status, error, processed_image=processed_image)
+def _upload_result(event, status, error, processed_image):
+    """Sends one photo's result (or failure) to Drive. Never raises.
+    Returns the photo's status (for the batch line in the console)."""
+    started = time.monotonic()
+    file_id = publish_result_to_drive_safely(event, status, error, processed_image=processed_image)
+    if is_drive_path(event.get("image_path") or ""):
+        live_log.result_delivered(event, file_id is not None, time.monotonic() - started)
+    return status
 
 
 def _process_one(event: dict):
@@ -220,6 +231,7 @@ def _process_one(event: dict):
     # this row actually reached the foreachBatch sink; spark_started_at
     # is right before per-row processing begins.
     kafka_received_at = datetime.now(timezone.utc)
+    photo_started = time.monotonic()
     image_id = event.get("image_id")
     if image_id:
         mark_processing(image_id)
@@ -250,6 +262,7 @@ def _process_one(event: dict):
         except Exception as db_error:  # noqa: BLE001 - don't take the other photos down with it
             print(f"[streaming_job] Could not record the failure for {image_id}: {db_error}")
 
+    live_log.photo_done(event, status.value, result, error, time.monotonic() - photo_started)
     processed = result.get("processed_image_jpeg") if result else None
     return _UPLOADS.submit(_upload_result, event, status, error, processed)
 

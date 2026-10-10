@@ -247,7 +247,8 @@ def register_drive_file(meta: dict, backend=None, folder_email: str = None) -> d
 
         try:
             submit_image_for_processing(session, image, backend=backend)
-            print(f"[drive_watcher] {image_id} -> Kafka topic '{KAFKA_TOPIC}' (Drive file {file_id})")
+            print(f"[drive_watcher] new photo {image_id[:8]} from {owner_email} "
+                  f"({image.location or 'no location'}) -> Kafka topic '{KAFKA_TOPIC}' (Drive file {file_id})")
             return {"image_id": image_id, "status": "registered"}
         except Exception as e:  # submit_image_for_processing already marked it FAILED
             print(f"[drive_watcher] {image_id} could not be published to Kafka: {e}")

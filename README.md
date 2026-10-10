@@ -357,6 +357,27 @@ mode, factory reset). Every time on the Performance page is in seconds.
    worker process — never the topic, Spark job or tables above (section 32).
 ```
 
+### Watching the real-time pipeline live
+
+`python run_all.py` opens one console window per component. Together they show a
+farmer photo moving through the pipeline as it happens:
+
+```
+EWS-DriveWatcher  [drive_watcher] new photo 1c94cbc2 from ana@gmail.com (Baucau) -> Kafka topic 'maize-disease-images' (Drive file …)
+EWS-KafkaMonitor  [kafka 13:57:41] p0 offset 812: photo 1c94cbc2 from ana@gmail.com (Baucau), uploaded 10/10/2026 13:57 TLT, Drive file -> waiting for Spark
+EWS-Spark         [spark 13:57:42] [kafka]  batch 37: 1 photo event(s) received from Kafka
+                  [spark 13:57:45] [photo]  1c94cbc2  ana@gmail.com  Baucau  -> common_rust 91%  risk HIGH  (download 1.93s  preprocess 0.14s  cnn 0.05s  render 0.30s  total 2.81s)
+                  [spark 13:57:46] [drive]  1c94cbc2  result + processed image delivered to ana@gmail.com's Drive (0.84s)
+                  [spark 13:57:46] [spark]  batch 37 committed: 1 ok, 0 failed, 0 skipped in 3.95s
+```
+
+`EWS-KafkaMonitor` (`python -m kafka.monitor`, `--from-start` to also list what is
+already in the topic) is read-only: its own consumer group, no committed offsets,
+and Spark keeps its position in its own checkpoint, so it cannot take or delay an
+event. Skip it with `run_all.py --no-kafka-monitor`; turn Spark's per-photo lines
+off with `SPARK_LIVE_LOG=false` (errors and `[ALERT]` lines always print). The
+scalability test has its own live window (SCALABILITY_TEST.md).
+
 ## 18. Installation
 
 ```bash
