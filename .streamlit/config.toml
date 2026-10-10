@@ -1,0 +1,23 @@
+[theme]
+base = "light"
+# Maize palette — green + yellow (kept in sync with dashboard/app.py
+# COLOR_* constants and its _inject_style() CSS).
+# Stalk green as primaryColor: Streamlit also uses it as TEXT (links,
+# selected options), and green passes contrast on the light background,
+# while corn yellow is used only as a FILL (active menu button, accents).
+primaryColor = "#2E7D32"
+backgroundColor = "#F6F8F1"
+secondaryBackgroundColor = "#E4EEDA"
+textColor = "#1F2A1E"
+font = "sans serif"
+
+# Dark counterpart: corn yellow reads well as text and fill on dark green.
+# The person viewing picks light/dark via Streamlit's Settings > Theme menu.
+[theme.dark]
+primaryColor = "#F5C518"
+backgroundColor = "#122018"
+secondaryBackgroundColor = "#1B2E23"
+textColor = "#EEF3EA"
+
+[browser]
+gatherUsageStats = false

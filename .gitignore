@@ -1,0 +1,54 @@
+# Secrets / local config
+.env
+# Google Drive OAuth (central account) — laptop/server only, never commit
+storage/google_client_secret.json
+storage/google_drive_token.json
+storage/google_drive_folders.json
+storage/drive_watcher_state.json
+test.txt
+
+# Local database + storage
+storage/app.db
+storage/images/
+storage/mail_outbox/
+storage/local_queue/
+storage/spark_checkpoints/
+# kept for good on this laptop, ~1.3 MB per photo — never in git
+storage/downloaded_photos/
+storage/scalability_reports/
+
+# Model weights: binary (43 MB) — kept on disk, not in git, so the repository
+# (and code reviews of it) stays source code. Remove the *.pt line to commit it.
+ml/trained_model/backups/
+ml/trained_model/*.pt
+
+# Archived old copies of code/docs/logos — on disk only
+backup/
+
+# Capstone documents (binary office/PDF files) — on disk only
+*.pdf
+*.docx
+*.pptx
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Exports / generated reports
+powerbi_export/*.csv
+
+# Process bookkeeping
+.run_all.pids.json
+
+# Tooling
+.claude/settings.local.json
+.idea/
+
+# Android
+android_app/local.properties
+android_app/.idea/
+android_app/.gradle/
+android_app/app/build/
+android_app/build/

@@ -1,0 +1,68 @@
+# Local infrastructure for the demo: Kafka (run_all.py already calls
+# `docker compose up -d` expecting a broker on localhost:9092 — this file
+# was previously missing entirely, so that step silently failed) and
+# PostgreSQL (DIT manual 5.3 — PostgreSQL, not SQLite, for the demo).
+#
+# SQLite + the local Kafka file-queue fallback remain the defaults for local
+# dev/testing (config/settings.py, tests/conftest.py) — this compose file is
+# only needed for a real demo/submission run against real infrastructure.
+#
+# Usage:
+#   docker compose up -d
+#   python -m storage.init_db          # creates tables + bootstrap admin
+#
+# Then point the app at Postgres (.env or shell) and turn the Kafka
+# fallback off so a broker outage is loud instead of silent:
+#   DATABASE_URL=postgresql+psycopg2://ews_user:ews_password@127.0.0.1:5432/crop_disease
+#   KAFKA_USE_LOCAL_FALLBACK=false
+services:
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: crop-disease-ews-kafka
+    restart: unless-stopped
+    ports:
+      - "9092:9092"
+    environment:
+      # Single-node KRaft mode (no separate Zookeeper container needed).
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:29092,CONTROLLER://:29093,PLAINTEXT_HOST://:9092
+      # PLAINTEXT_HOST advertises localhost:9092 — what KAFKA_BOOTSTRAP_SERVERS
+      # (config/settings.py, default "localhost:9092") expects from the host.
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      CLUSTER_ID: "MkU3OEVBNTcwNTJENDM2Qk"
+      # Keep Kafka's log on a named volume so topic data and consumer
+      # offsets survive `docker compose down` / restarts.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    user: root
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+
+  postgres:
+    image: postgres:16
+    container_name: crop-disease-ews-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ews_user
+      POSTGRES_PASSWORD: ews_password
+      POSTGRES_DB: crop_disease
+    ports:
+      # Bound to localhost only: the API, Spark and Tableau Desktop all run
+      # on this machine, so there's no reason to expose the database (and
+      # its default password) to everyone on the same Wi-Fi.
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - crop_disease_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ews_user -d crop_disease"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  kafka_data:
+  crop_disease_pg_data:

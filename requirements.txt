@@ -1,0 +1,45 @@
+# --- API / web ---
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic
+python-dotenv  # loads a local .env in config/settings.py (dev convenience)
+
+# --- Database (SQLite for local dev, PostgreSQL in production — see
+# config/settings.py DATABASE_URL and README "Database") ---
+sqlalchemy
+psycopg2-binary
+
+# --- Auth ---
+pyjwt
+bcrypt
+
+# --- Streaming ---
+confluent-kafka
+pyspark
+
+# --- Image processing / ML ---
+Pillow
+numpy
+# Plain `pip install torch` gives the CPU-only build. For the NVIDIA GPU
+# (RTX 3050, used automatically by ml/inference.py — MODEL_DEVICE=auto):
+#   pip install --force-reinstall --no-deps torch==2.13.0 torchvision==0.28.0 --index-url https://download.pytorch.org/whl/cu130
+torch
+torchvision
+
+# --- Analytics / dashboard ---
+pandas
+streamlit
+plotly
+
+# --- Testing ---
+pytest
+httpx
+piexif
+
+# --- Scalability/performance testing (scripts/scalability_test.py,
+# scripts/perf_report.py) ---
+psutil
+requests
+google-auth            # Google Drive API access (storage/drive_client.py)
+google-auth-oauthlib   # one-time OAuth consent (scripts/drive_authorize.py)

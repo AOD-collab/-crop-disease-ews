@@ -1,0 +1,792 @@
+r"""
+Scalability test runner (Demo 2). Started by the dashboard's "Scalability
+test" page as a background process, or by hand:
+
+    python -m scalability.run preview
+    python -m scalability.run prepare --size 100
+    python -m scalability.run start --size 100
+    python -m scalability.run start --size 100 --iterations 3
+    python -m scalability.run start --size 5000 --source-dir D:\photos
+    python -m scalability.run preview --source-dir D:\photos
+    python -m scalability.run start --replay-of <run_id>
+    python -m scalability.run report --run-id <run_id>
+    python -m scalability.run cleanup --run-id <run_id>
+    python -m scalability.run delete --run-id <run_id>
+    python -m scalability.run list
+
+The test is ISOLATED from the live pipeline (scalability/worker.py): it has
+its own Kafka topic and consumer group, this process is its worker, and it
+writes only to scale_test_runs / scale_test_items and to
+SCALABILITY_REPORTS_DIR/<run_id>/. No Image, Prediction or Drive result is
+ever created for a test photo, so nothing of a test can reach a farmer, the
+dashboard's farmer pages, Tableau or the labelling folder.
+
+What `start` does:
+  1. Lists the Drive collection (scalability/dataset.py), takes the oldest
+     `size` valid photos (or the photos of the run being replayed). With
+     --source-dir it scans that folder instead and takes the first `size`
+     photos by path.
+  2. Verifies or downloads each photo's local copy (Drive only).
+  3. Stages every ready photo as a hard link in
+     SCALABILITY_REPORTS_DIR/<run_id>/images/<item_id>.<ext> plus one
+     scale_test_items row (a fresh item id, never a farmer's image_id).
+  4. Waits until no farmer photo is being processed (real time first), then
+     starts the clock: publishes one event per photo to the TEST topic,
+     consumes them, and processes each with the live pipeline's own
+     preprocessing + CNN code, SCALABILITY_WORKERS at a time. New photos
+     wait while farmer photos are being processed.
+  5. Stops the clock when every photo is COMPLETED or FAILED and writes the
+     summary + CSV files.
+"""
+
+import argparse
+import json
+import os
+import queue as stdlib_queue
+import secrets
+import shutil
+import sys
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import psutil  # noqa: E402
+
+from config import settings  # noqa: E402
+from config.settings import IMAGE_STORAGE_PATH  # noqa: E402
+from storage import drive_client  # noqa: E402
+from storage.database import (  # noqa: E402
+    SessionLocal, init_db, Image, Prediction, ProcessingEvent, RejectedEvent, User, Role, UserStatus,
+    ScaleTestRun, ScaleTestItem, SCALE_TEST_SOURCE, SCALE_TEST_USERNAME, now_utc,
+)
+from api.auth import hash_password  # noqa: E402
+from scalability import dataset, report, worker  # noqa: E402
+from scalability.monitor import ResourceMonitor, gpu_name, spark_job_running  # noqa: E402
+
+REPORTS_DIR = report.REPORTS_DIR
+LOCK_FILE = REPORTS_DIR / "_lock.json"
+PREPARE_STATUS_FILE = REPORTS_DIR / "_prepare_status.json"
+# Where runs from before the isolation (2026-10-10) staged their photos;
+# only clean-up still looks here.
+LEGACY_STAGING_ROOT = IMAGE_STORAGE_PATH / "scalability"
+SCALE_TEST_EMAIL = "scalability-test@system.local"
+ACTIVE_STATUSES = ("PREPARING", "RUNNING")
+CHUNK = 500
+
+
+class RunError(Exception):
+    pass
+
+
+def log(msg: str) -> None:
+    print(f"[scalability {datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def run_dir(run_id: str) -> Path:
+    """Everything one run keeps on disk: images/ (its staged photos),
+    the before/after pair, and the CSV files."""
+    return REPORTS_DIR / run_id
+
+
+# --------------------------------------------------------------- one job at a time
+def _pid_alive(pid) -> bool:
+    try:
+        return bool(pid) and psutil.pid_exists(int(pid))
+    except (ValueError, TypeError):
+        return False
+
+
+def active_job():
+    """{"pid", "kind", "run_id", "started_at"} of the job holding the lock,
+    or None. A lock left behind by a dead process is ignored."""
+    try:
+        info = json.loads(LOCK_FILE.read_text())
+    except (OSError, ValueError):
+        return None
+    return info if _pid_alive(info.get("pid")) else None
+
+
+def _acquire_lock(kind: str, run_id: str = None) -> None:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    holder = active_job()
+    if holder:
+        raise RunError(f"another scalability job is running ({holder['kind']}, pid {holder['pid']})")
+    LOCK_FILE.unlink(missing_ok=True)     # stale
+    try:
+        fd = os.open(LOCK_FILE, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        raise RunError("another scalability job just started")
+    with os.fdopen(fd, "w") as f:
+        json.dump({"pid": os.getpid(), "kind": kind, "run_id": run_id,
+                   "started_at": now_utc().isoformat()}, f)
+
+
+def _release_lock() -> None:
+    try:
+        if json.loads(LOCK_FILE.read_text()).get("pid") == os.getpid():
+            LOCK_FILE.unlink()
+    except (OSError, ValueError):
+        pass
+
+
+def reap_dead_runs() -> int:
+    """Runs still PREPARING/RUNNING whose runner process is gone -> ABORTED."""
+    n = 0
+    with SessionLocal() as s:
+        for run in s.query(ScaleTestRun).filter(ScaleTestRun.status.in_(ACTIVE_STATUSES)).all():
+            if not _pid_alive(run.pid):
+                run.status, run.finished_at = "ABORTED", now_utc()
+                run.error_message = "the runner process ended before the run finished"
+                n += 1
+        s.commit()
+    return n
+
+
+# --------------------------------------------------------------- helpers
+def _source_label(source_dir) -> str:
+    return f"custom folder {source_dir}" if source_dir else "Google Drive"
+
+
+def _collection(source_dir=None):
+    """The run's photo source: the Google Drive collection, or a custom
+    folder on this computer when `source_dir` is given."""
+    if source_dir:
+        try:
+            return dataset.enumerate_folder(source_dir, staging_root=REPORTS_DIR)
+        except FileNotFoundError as e:
+            raise RunError(str(e))
+    return dataset.enumerate_collection()
+
+
+def _benchmark_config(source_dir=None, series=None) -> dict:
+    return {
+        **(series or {}),
+        "KAFKA_TOPIC": settings.SCALABILITY_KAFKA_TOPIC,
+        "KAFKA_CONSUMER_GROUP": settings.SCALABILITY_CONSUMER_GROUP,
+        "WORKERS": settings.SCALABILITY_WORKERS,
+        "ANALYSIS_MAX_PX": settings.ANALYSIS_MAX_PX,
+        "MODEL_DEVICE": settings.IMAGE_MODEL.get("device"),
+        "MODEL_PATH": Path(settings.IMAGE_MODEL["weights_path"]).name,
+        "GPU": gpu_name(),
+        "CPU_LOGICAL_CORES": psutil.cpu_count(),
+        "RAM_GB": round(psutil.virtual_memory().total / 2**30, 1),
+        "IMAGE_SOURCE": (f"photos in the custom folder {source_dir}" if source_dir
+                         else "verified local copies of the Google Drive originals"),
+        **({"SOURCE_DIR": str(source_dir)} if source_dir else {}),
+    }
+
+
+def _test_queue():
+    """The test's own Kafka topic + consumer group (tests replace this)."""
+    try:
+        return worker.KafkaTestQueue()
+    except Exception as e:  # noqa: BLE001
+        raise RunError(f"Kafka is not reachable at {settings.KAFKA_BOOTSTRAP_SERVERS} "
+                       f"(test topic {settings.SCALABILITY_KAFKA_TOPIC}): {e}")
+
+
+def _live_gate():
+    """Real-time priority (tests replace this)."""
+    return worker.LiveGate()
+
+
+def _link_or_copy(src: Path, dst: Path) -> str:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.link(src, dst)                     # same file, no extra disk space
+        return "hardlink"
+    except OSError:
+        shutil.copy2(src, dst)                # e.g. local copies on another drive
+        return "copy"
+
+
+def _chunks(seq, n=CHUNK):
+    for i in range(0, len(seq), n):
+        yield seq[i:i + n]
+
+
+def _set_phase(run_id: str, phase: str, **fields) -> None:
+    with SessionLocal() as s:
+        run = s.get(ScaleTestRun, run_id)
+        run.phase = phase
+        for k, v in fields.items():
+            setattr(run, k, v)
+        s.commit()
+
+
+# --------------------------------------------------------------- preview / prepare
+def preview(source_dir=None) -> dict:
+    col = _collection(source_dir)
+    if source_dir:
+        n = len(col.candidates)
+        return {**col.as_dict(), "with_local_copy": n, "missing_local_copy": 0}
+    return {**col.as_dict(), **dataset.local_copy_counts(col.candidates)}
+
+
+def _write_prepare_status(**fields) -> None:
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = PREPARE_STATUS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"pid": os.getpid(), **fields}, default=str))
+    tmp.replace(PREPARE_STATUS_FILE)
+
+
+def prepare(size: int, workers: int = 8) -> dict:
+    """Step 2 on its own: verify/download local copies of the first `size`
+    valid photos, without starting a run."""
+    _acquire_lock("prepare")
+    try:
+        _write_prepare_status(phase="Listing the Drive collection", done=0, total=0)
+        col = dataset.enumerate_collection()
+        chosen = col.candidates[:size]
+        last = [0.0]
+
+        def progress(done, total):
+            if time.monotonic() - last[0] > 1 or done == total:
+                last[0] = time.monotonic()
+                _write_prepare_status(phase="Preparing local copies", done=done, total=total)
+
+        prep = dataset.prepare_local_copies(chosen, workers=workers, progress=progress)
+        result = {**col.as_dict(), "selected": len(chosen), **prep}
+        _write_prepare_status(phase="Finished", done=len(chosen), total=len(chosen), finished=True, result=result)
+        log(f"prepare: {json.dumps(result)}")
+        return result
+    except Exception as e:
+        _write_prepare_status(phase="Failed", finished=True, error=str(e))
+        raise
+    finally:
+        _release_lock()
+
+
+# --------------------------------------------------------------- the run
+def start(size: int = None, replay_of: str = None, workers: int = 8, stall_seconds: float = 600,
+          run_id: str = None, source_dir: str = None, series: dict = None, _locked: bool = False) -> str:
+    """Runs one complete test iteration and returns its run_id (see module
+    docstring). `source_dir`: take the photos from this folder instead of
+    Google Drive. `series`: {"SERIES_ID", "ITERATION", "ITERATIONS"} when
+    this run is one iteration of start_series(), stored in config_json."""
+    init_db()
+    reap_dead_runs()
+    if replay_of:
+        with SessionLocal() as s:
+            old = s.get(ScaleTestRun, replay_of)
+            if old is None:
+                raise RunError(f"unknown run {replay_of}")
+            size = s.query(ScaleTestItem).filter(ScaleTestItem.run_id == replay_of).count()
+            # a replay uses the same source as the run it repeats
+            source_dir = json.loads(old.config_json or "{}").get("SOURCE_DIR")
+    if not size or size < 1:
+        raise RunError("size must be at least 1")
+    if source_dir:
+        source_dir = str(Path(source_dir).expanduser().resolve())
+        if not Path(source_dir).is_dir():
+            raise RunError(f"folder not found: {source_dir}")
+    run_id = run_id or f"scale-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"
+    if not _locked:
+        _acquire_lock("run", run_id)
+    monitor = gate = queue = None
+    try:
+        worker.lower_priority()
+        with SessionLocal() as s:
+            s.add(ScaleTestRun(run_id=run_id, status="PREPARING",
+                               phase="Scanning the folder" if source_dir else "Listing the Drive collection",
+                               pid=os.getpid(), requested_size=size, replay_of=replay_of, publish_results=False,
+                               config_json=json.dumps(_benchmark_config(source_dir, series))))
+            s.commit()
+        log(f"{run_id}: started (size {size}, source {_source_label(source_dir)}"
+            + (f", replay of {replay_of}" if replay_of else "") + ")")
+
+        # 1. dataset ---------------------------------------------------------
+        col = _collection(source_dir)
+        selection = {**col.as_dict(), "source": "folder" if source_dir else "google_drive",
+                     "source_dir": source_dir}
+        if replay_of:
+            with SessionLocal() as s:
+                wanted = [r[0] for r in s.query(ScaleTestItem.source_drive_file_id)
+                          .filter(ScaleTestItem.run_id == replay_of).all()]
+            by_file = {c.drive_file_id: c for c in col.candidates}
+            chosen = [by_file[f] for f in wanted if f in by_file]
+            selection["replay_missing_from_drive"] = len(wanted) - len(chosen)
+        else:
+            chosen = col.candidates[:size]
+        selection.update(requested=size, selected=len(chosen))
+        if not chosen:
+            raise RunError(f"no valid photos in the folder {source_dir}" if source_dir
+                           else "no valid photos in the Google Drive collection")
+
+        # 2. local copies ----------------------------------------------------
+        last = [0.0]
+
+        def progress(done, total):
+            if time.monotonic() - last[0] > 2 or done == total:
+                last[0] = time.monotonic()
+                _set_phase(run_id, f"Preparing local copies: {done} of {total}")
+
+        prep = dataset.prepare_local_copies(chosen, workers=workers, progress=progress)
+        selection.update(prep)
+        ready = [c for c in chosen if c.local_path]
+        if not ready:
+            raise RunError("no photo has a valid local copy")
+
+        # 3. staging: the run's own folder, its own item ids ----------------
+        _set_phase(run_id, "Staging test images", selection_json=json.dumps(selection))
+        images_dir = run_dir(run_id) / "images"
+        paths = {}
+        staged = []
+        for c in ready:
+            item_id = str(uuid.uuid4())
+            ext = ".png" if c.mime_type == "image/png" else ".jpg"     # e.g. IMG_1.JPEG -> .jpg
+            paths[item_id] = images_dir / f"{item_id}{ext}"
+            _link_or_copy(Path(c.local_path), paths[item_id])
+            staged.append((item_id, c))
+        # where each photo was taken (EXIF GPS is read from the file) — before the timer
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            places = list(pool.map(lambda ic: worker.photo_location(paths[ic[0]], ic[1].location,
+                                                                     ic[1].device_gps), staged))
+        with SessionLocal() as s:
+            for chunk in _chunks(list(zip(staged, places))):
+                for (item_id, c), place in chunk:
+                    s.add(ScaleTestItem(
+                        image_id=item_id, run_id=run_id, source_image_id=c.image_id,
+                        source_drive_file_id=c.drive_file_id, source_user_id=c.user_id,
+                        local_copy_status=c.local_copy_status, download_seconds=c.download_seconds,
+                        size_bytes=c.size, status="STAGED", **place,
+                    ))
+                s.commit()
+        ids = list(paths)
+
+        # 4. wait for real time, then the measured iteration ----------------
+        gate = _live_gate().start()
+        if gate.paused:
+            _set_phase(run_id, "Waiting: farmer photos are being processed")
+            log(f"{run_id}: waiting until farmer photos are processed")
+            gate.wait()
+        _set_phase(run_id, "Loading the CNN")
+        worker.warm_up()                        # model loading is not measured
+        queue = _test_queue()
+        _set_phase(run_id, "Processing", status="RUNNING")
+        # The live Spark job shares the GPU; recorded so a slow iteration can
+        # be explained (a 7 s stall on 2026-10-10 happened with it running).
+        spark_running = spark_job_running()
+        monitor = ResourceMonitor().start()
+        t0 = time.monotonic()
+        published_at = now_utc()
+        with SessionLocal() as s:
+            for chunk in _chunks(ids):
+                s.query(ScaleTestItem).filter(ScaleTestItem.image_id.in_(chunk)).update(
+                    {ScaleTestItem.status: "PUBLISHED", ScaleTestItem.published_at: published_at},
+                    synchronize_session=False)
+            s.commit()
+        events = [{"run_id": run_id, "item_id": i} for i in ids]
+        failures = queue.send_many(events)
+        done = set()
+        if failures:
+            _record(run_id, {events[i]["item_id"]: ("FAILED", f"Kafka publish failed: {err}", None, None)
+                             for i, err in failures.items()})
+            done.update(events[i]["item_id"] for i in failures)
+        log(f"{run_id}: published {len(events) - len(failures)} event(s) to {settings.SCALABILITY_KAFKA_TOPIC}")
+
+        def handle(item_id, received_at):
+            gate.wait()                         # farmer photos first
+            try:
+                timings, prediction = worker.process_photo(paths[item_id])
+            except Exception as e:  # noqa: BLE001 - this photo only
+                return item_id, ("FAILED", f"{type(e).__name__}: {e}"[:2000], {"received_at": received_at}, None)
+            t_start, t_end = timings.pop("_t0"), timings.pop("_t1")
+            timings["contended"] = gate.overlapped(t_start, t_end)
+            return item_id, ("COMPLETED", None, {"received_at": received_at, **timings}, prediction)
+
+        # Finished photos arrive on this queue (a done-callback per photo), so
+        # the loop only ever touches photos that just finished. It used to
+        # rescan every submitted photo twice every 50 ms and write the phase
+        # to the database each time — at 10,000 photos that main-thread work
+        # competed with the workers for the GIL inside the measured time.
+        finished = stdlib_queue.Queue()
+        submitted = set()
+        pending = {}                    # finished, not yet written to the database
+        last_change = last_flush = last_phase = time.monotonic()
+        with ThreadPoolExecutor(max_workers=max(1, settings.SCALABILITY_WORKERS)) as pool:
+            while len(done) < len(ids):
+                if len(submitted) + len(failures) < len(ids):
+                    for event in queue.poll(0.05):
+                        item_id = event.get("item_id")
+                        if event.get("run_id") != run_id or item_id not in paths or item_id in submitted:
+                            continue            # another run's leftover, or a duplicate delivery
+                        submitted.add(item_id)
+                        pool.submit(handle, item_id, now_utc()).add_done_callback(
+                            lambda f: finished.put(f.result()))
+                    wait_s = 0.0
+                else:
+                    wait_s = 0.25               # everything is in the pool: just wait for results
+                try:
+                    item_id, outcome = finished.get(timeout=wait_s) if wait_s else finished.get_nowait()
+                    pending[item_id] = outcome
+                    while True:
+                        item_id, outcome = finished.get_nowait()
+                        pending[item_id] = outcome
+                except stdlib_queue.Empty:
+                    pass
+                now = time.monotonic()
+                if pending:
+                    last_change = now
+                if pending and (now - last_flush >= 0.5 or len(done) + len(pending) >= len(ids)):
+                    _record(run_id, pending)
+                    done.update(pending)
+                    pending = {}
+                    last_flush = now
+                if now - last_phase >= 1.0:
+                    last_phase = now
+                    if gate.paused:
+                        _set_phase(run_id, "Paused: farmer photos are being processed")
+                    else:
+                        _set_phase(run_id, f"Processing: {len(done)} of {len(ids)} done")
+                if gate.paused:
+                    last_change = now           # waiting for farmers is not a stall
+                elif not pending and now - last_change > stall_seconds:
+                    log(f"{run_id}: no progress for {stall_seconds:.0f}s, stopping the wait")
+                    break
+        t1 = time.monotonic()
+        samples = monitor.stop()
+        monitor = None
+        gate.stop()
+        if pending:                     # finished while the loop was stopping on a stall
+            _record(run_id, pending)
+            done.update(pending)
+
+        # 5. pictures, after the timer: the before/after pair + the gallery --
+        comparison = _save_pictures(run_id, ids, paths, series)
+
+        # 6. summary -----------------------------------------------------------
+        finalize(run_id, samples=samples, execution_seconds=t1 - t0,
+                 live_overlap=gate.overlapped(t0, t1), paused_seconds=gate.paused_seconds(t0, t1),
+                 comparison=comparison, published=len(events) - len(failures), publish_failed=len(failures),
+                 status="COMPLETED" if len(done) >= len(ids) else "INCOMPLETE",
+                 spark_job_running=spark_running or spark_job_running())
+        return run_id
+    except Exception as e:
+        log(f"{run_id}: FAILED: {e}")
+        with SessionLocal() as s:
+            run = s.get(ScaleTestRun, run_id)
+            if run is not None:
+                run.status, run.error_message, run.finished_at = "FAILED", str(e)[:2000], now_utc()
+                run.phase = "Failed"
+                s.commit()
+        raise
+    finally:
+        if monitor is not None:
+            monitor.stop()
+        if gate is not None:
+            gate.stop()
+        if queue is not None:
+            queue.close()
+        if not _locked:
+            _release_lock()
+
+
+def _record(run_id: str, outcomes: dict) -> None:
+    """Stores finished photos' measurements and CNN results (scale_test_items
+    only) in ONE bulk UPDATE, instead of a SELECT + UPDATE per photo.
+    `outcomes`: {item_id: (status, error, timings, prediction)}, item_ids of
+    this run (the caller only ever passes ids it staged for `run_id`)."""
+    completed_at = now_utc()
+    rows = []
+    for item_id, (status, error, timings, prediction) in outcomes.items():
+        timings = dict(timings or {})
+        received = timings.pop("received_at", None)
+        rows.append({
+            "image_id": item_id, "status": status, "error_message": error,
+            "spark_received_at": received,          # = when the test worker received the event
+            "completed_at": completed_at,
+            "pipeline_seconds": timings.get("processing_s"),
+            "timings_json": json.dumps(timings) if timings else None,
+            **(prediction or {}),
+        })
+    with SessionLocal() as s:
+        s.bulk_update_mappings(ScaleTestItem, rows)
+        s.commit()
+
+
+def _save_pictures(run_id: str, ids: list, paths: dict, series: dict = None) -> dict:
+    """Everything a run shows as pictures, made AFTER its timer stopped so
+    none of it is in the measurement: the before/after pair (first photo
+    that completed) and, for the gallery, one small before/after preview per
+    photo (scalability/worker.save_previews). Later iterations of a series
+    repeat iteration 1's photos, so only iteration 1 saves previews.
+    Returns the comparison pair, or {}."""
+    out = run_dir(run_id)
+    with SessionLocal() as s:
+        completed = {i for (i,) in s.query(ScaleTestItem.image_id).filter(
+            ScaleTestItem.run_id == run_id, ScaleTestItem.status == "COMPLETED")}
+    comparison = {}
+    first_ok = next((i for i in ids if i in completed), None)
+    if first_ok:
+        try:
+            from spark.preprocessing import prepare_image
+            comparison = worker.save_comparison(paths[first_ok], prepare_image(paths[first_ok].read_bytes()), out)
+        except Exception as e:  # noqa: BLE001
+            log(f"{run_id}: could not save the before/after pair: {e}")
+    if series and series.get("ITERATION", 1) != 1:
+        return comparison
+    _set_phase(run_id, "Saving preview images")
+    failed = []
+
+    def one(item_id):
+        try:
+            worker.save_previews(paths[item_id], out, item_id)
+        except Exception as e:  # noqa: BLE001 - e.g. a photo the CNN could not read either
+            failed.append(f"{item_id}: {e}")
+
+    with ThreadPoolExecutor(max_workers=max(1, settings.SCALABILITY_WORKERS)) as pool:
+        list(pool.map(one, ids))
+    if failed:
+        log(f"{run_id}: {len(failed)} preview(s) could not be made, e.g. {failed[0]}")
+    return comparison
+
+
+def start_series(size: int, iterations: int = 1, **kwargs) -> list:
+    """Runs the same test `iterations` times and returns the run_ids.
+    Iteration 1 selects `size` unique photos; every later iteration is a
+    replay of it: the same photos, each staged again under a NEW item id in
+    its own run folder, so iterations never share images or measurements.
+    The workload is therefore size x iterations photo processings of `size`
+    unique photos. Stops at the first iteration that fails."""
+    if iterations < 1:
+        raise RunError("iterations must be at least 1")
+    series_id = f"series-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"
+    _acquire_lock("run", series_id)
+    try:
+        run_ids = []
+        for n in range(1, iterations + 1):
+            series = {"SERIES_ID": series_id, "ITERATION": n, "ITERATIONS": iterations}
+            log(f"{series_id}: iteration {n} of {iterations}")
+            if n == 1:
+                run_ids.append(start(size, series=series, _locked=True, **kwargs))
+            else:
+                kwargs.pop("source_dir", None)        # a replay uses iteration 1's own source
+                run_ids.append(start(replay_of=run_ids[0], series=series, _locked=True, **kwargs))
+        return run_ids
+    finally:
+        _release_lock()
+
+
+def _load_items(session, run_id):
+    return session.query(ScaleTestItem).filter(ScaleTestItem.run_id == run_id).all()
+
+
+def finalize(run_id: str, *, samples: list, execution_seconds: float, live_overlap: bool,
+             paused_seconds: float, comparison: dict, published: int, publish_failed: int,
+             status: str, spark_job_running: bool = None) -> dict:
+    with SessionLocal() as s:
+        run = s.get(ScaleTestRun, run_id)
+        items = _load_items(s, run_id)
+        selection = json.loads(run.selection_json or "{}")
+        summary = {
+            "run_id": run_id, "status": status, "requested_size": run.requested_size,
+            "replay_of": run.replay_of, "source": selection.get("source") or "google_drive",
+            "source_dir": selection.get("source_dir"), "selected": selection.get("selected"),
+            "published": published, "publish_failed": publish_failed,
+            "completed": sum(i.status == "COMPLETED" for i in items),
+            "failed": sum(i.status == "FAILED" for i in items),
+            "not_finished": sum(i.status in ("STAGED", "PUBLISHED") for i in items),
+            # timer: first event published to the test topic -> last photo finished
+            "execution_seconds": round(execution_seconds, 3),
+            "live_overlap": live_overlap,
+            "paused_seconds": round(paused_seconds, 3),
+            # the live Spark job was running (sharing the GPU) during this iteration
+            "spark_job_running": spark_job_running,
+            "comparison": comparison or None,
+            "config": json.loads(run.config_json or "{}"),
+            **report.summarize_samples(samples),
+        }
+        run.status, run.phase, run.finished_at = status, "Finished", now_utc()
+        run.summary_json = json.dumps(summary, default=str)
+        s.commit()
+        out = report.write_reports(run, items, samples, summary)
+    log(f"{run_id}: {status}. {summary['completed']} ok, {summary['failed']} failed in "
+        f"{summary['execution_seconds']}s"
+        + (" (live farmer processing overlapped: left out of the averages)" if live_overlap else "")
+        + f". Files: {out}")
+    return summary
+
+
+def regenerate_report(run_id: str) -> Path:
+    """Rewrites the CSV files from the stored summary + items. Resource
+    samples are read back from the old resources.csv when it still exists."""
+    import csv
+    with SessionLocal() as s:
+        run = s.get(ScaleTestRun, run_id)
+        if run is None or not run.summary_json:
+            raise RunError(f"run {run_id} has no finished summary")
+        items = _load_items(s, run_id)
+        samples = []
+        path = run_dir(run_id) / "resources.csv"
+        if path.exists():
+            with open(path, encoding="utf-8") as f:
+                samples = list(csv.DictReader(f))
+        return report.write_reports(run, items, samples, json.loads(run.summary_json))
+
+
+# --------------------------------------------------------------- reset
+def _is_active(run) -> bool:
+    return run.status in ACTIVE_STATUSES and _pid_alive(run.pid)
+
+
+def cleanup(run_id: str, drive_results: bool = False) -> dict:
+    """Removes a run's staged photos (hard links). For runs from before the
+    isolation, also the Image / Prediction / ProcessingEvent / RejectedEvent
+    rows they created in the production tables and, with drive_results,
+    their result folder in Drive. Keeps the measurements, the before/after
+    pair and the CSV files. Never touches the Drive originals, the local
+    copies, the model, training data or any farmer."""
+    reap_dead_runs()
+    with SessionLocal() as s:
+        run = s.get(ScaleTestRun, run_id)
+        if run is None:
+            raise RunError(f"unknown run {run_id}")
+        if _is_active(run):
+            raise RunError("the run is still in progress")
+        ids = [i.image_id for i in _load_items(s, run_id)]
+        counts = {"images": 0, "predictions": 0, "processing_events": 0, "rejected_events": 0}
+        for chunk in _chunks(ids):
+            # legacy runs only: rows that really are this run's test images
+            test_ids = [r[0] for r in s.query(Image.image_id).filter(
+                Image.image_id.in_(chunk), Image.source == SCALE_TEST_SOURCE).all()]
+            if not test_ids:
+                continue
+            counts["predictions"] += s.query(Prediction).filter(
+                Prediction.image_id.in_(test_ids)).delete(synchronize_session=False)
+            counts["processing_events"] += s.query(ProcessingEvent).filter(
+                ProcessingEvent.image_id.in_(test_ids)).delete(synchronize_session=False)
+            counts["rejected_events"] += s.query(RejectedEvent).filter(
+                RejectedEvent.image_id.in_(test_ids)).delete(synchronize_session=False)
+            counts["images"] += s.query(Image).filter(
+                Image.image_id.in_(test_ids)).delete(synchronize_session=False)
+        comparison = (json.loads(run.summary_json or "{}").get("comparison") or {}).get("before")
+        run.data_cleaned_at = now_utc()
+        folder_id = run.drive_results_folder_id
+        s.commit()
+
+    for staged, root in ((LEGACY_STAGING_ROOT / run_id, LEGACY_STAGING_ROOT),
+                         (run_dir(run_id) / "images", run_dir(run_id))):
+        staged = staged.resolve()
+        if staged.exists() and staged.is_relative_to(root.resolve()):
+            keep = (run_dir(run_id) / comparison).resolve() if comparison else None
+            for f in staged.iterdir():           # hard links / copies only; the originals stay
+                if f.resolve() != keep:
+                    f.unlink()
+    counts["staged_files_removed"] = True
+
+    if drive_results and folder_id:
+        try:
+            resp = drive_client._request("PATCH", f"{drive_client.DRIVE_API}/files/{folder_id}",
+                                         params={"fields": "id"}, json={"trashed": True})
+            drive_client._check(resp, f"trash results folder of {run_id}")
+            counts["drive_results_folder"] = "moved to the central account's trash"
+        except Exception as e:  # noqa: BLE001
+            counts["drive_results_folder"] = f"FAILED: {e}"
+    log(f"{run_id}: cleaned up {counts}")
+    return counts
+
+
+def delete(run_id: str, drive_results: bool = False) -> dict:
+    """cleanup() plus the run's measurements and its whole folder."""
+    counts = cleanup(run_id, drive_results)
+    with SessionLocal() as s:
+        s.query(ScaleTestItem).filter(ScaleTestItem.run_id == run_id).delete(synchronize_session=False)
+        s.query(ScaleTestRun).filter(ScaleTestRun.run_id == run_id).delete(synchronize_session=False)
+        s.commit()
+    out = run_dir(run_id).resolve()
+    if out.parent == REPORTS_DIR.resolve() and out.exists():
+        shutil.rmtree(out)
+    log(f"{run_id}: deleted")
+    return counts
+
+
+# --------------------------------------------------------------- legacy system account
+def _test_user_id(session) -> str:
+    """The inactive system account that owned test images before the
+    isolation; kept so old runs' rows stay valid until cleaned up."""
+    user = session.query(User).filter(User.username == SCALE_TEST_USERNAME).first()
+    if user is None:
+        user = User(username=SCALE_TEST_USERNAME, email=SCALE_TEST_EMAIL,
+                    full_name="Scalability test (system account)",
+                    password_hash=hash_password(secrets.token_urlsafe(32)),
+                    role=Role.USER, status=UserStatus.INACTIVE, email_verified=False)
+        session.add(user)
+        session.commit()
+    return user.user_id
+
+
+# --------------------------------------------------------------- CLI
+def _main(argv=None) -> int:
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    pv = sub.add_parser("preview", help="count the valid photos in the Drive collection (or a folder)")
+    pv.add_argument("--source-dir", help="count the photos in this folder instead of Google Drive")
+    sp = sub.add_parser("prepare", help="verify/download local copies without running a test")
+    sp.add_argument("--size", type=int, required=True)
+    sp.add_argument("--workers", type=int, default=8)
+    st = sub.add_parser("start", help="run a scalability test")
+    st.add_argument("--size", type=int)
+    st.add_argument("--iterations", type=int, default=1,
+                    help="run the test this many times on the same photos (new item ids each time)")
+    st.add_argument("--replay-of", help="reuse the photo selection of this run (new run_id)")
+    st.add_argument("--source-dir", help="take the photos from this folder (and its subfolders) "
+                                         "instead of Google Drive")
+    st.add_argument("--workers", type=int, default=8, help="parallel downloads during preparation")
+    st.add_argument("--stall-minutes", type=float, default=10,
+                    help="stop waiting after this long without a single photo finishing")
+    st.add_argument("--run-id", help=argparse.SUPPRESS)
+    for name in ("report", "cleanup", "delete"):
+        c = sub.add_parser(name)
+        c.add_argument("--run-id", required=True)
+        if name != "report":
+            c.add_argument("--drive-results", action="store_true",
+                           help="also move a legacy run's result folder in Drive to the trash")
+    sub.add_parser("list")
+    args = p.parse_args(argv)
+
+    init_db()
+    try:
+        if args.cmd == "preview":
+            print(json.dumps(preview(args.source_dir), indent=2))
+        elif args.cmd == "prepare":
+            prepare(args.size, args.workers)
+        elif args.cmd == "start":
+            if not args.size and not args.replay_of:
+                p.error("give --size or --replay-of")
+            if args.source_dir and args.replay_of:
+                p.error("--replay-of reuses the replayed run's own source; leave out --source-dir")
+            if args.iterations > 1:
+                if args.replay_of or args.run_id:
+                    p.error("--iterations can't be combined with --replay-of")
+                start_series(args.size, args.iterations, workers=args.workers,
+                             stall_seconds=args.stall_minutes * 60, source_dir=args.source_dir)
+            else:
+                start(args.size, replay_of=args.replay_of, workers=args.workers,
+                      stall_seconds=args.stall_minutes * 60, run_id=args.run_id, source_dir=args.source_dir)
+        elif args.cmd == "report":
+            print(regenerate_report(args.run_id))
+        elif args.cmd == "cleanup":
+            print(json.dumps(cleanup(args.run_id, args.drive_results), indent=2))
+        elif args.cmd == "delete":
+            print(json.dumps(delete(args.run_id, args.drive_results), indent=2))
+        elif args.cmd == "list":
+            reap_dead_runs()
+            with SessionLocal() as s:
+                for r in s.query(ScaleTestRun).order_by(ScaleTestRun.started_at).all():
+                    sm = json.loads(r.summary_json or "{}")
+                    print(f"{r.run_id}  {r.status:<10} size={r.requested_size:<6} "
+                          f"ok={sm.get('completed')} failed={sm.get('failed')} "
+                          f"execution={sm.get('execution_seconds')}s")
+    except RunError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(_main())

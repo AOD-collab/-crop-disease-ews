@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="captured_images" path="images/" />
+    <!-- Camera photos waiting in the upload queue (UploadQueue.ownedDir):
+         filesDir, not cacheDir, so Android can't clear them before upload. -->
+    <files-path name="queued_images" path="upload_queue/" />
+</paths>

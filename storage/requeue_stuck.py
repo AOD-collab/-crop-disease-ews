@@ -1,0 +1,256 @@
+"""
+Reconciliation / re-queue tool for images stranded between ingestion and
+processing.
+
+Background
+----------
+`api/server.py` marks an image `INGESTED` the moment its upload event is
+published to Kafka. Turning that into a prediction (`COMPLETED`) is a
+separate process — `spark/streaming_job.py`. If the Spark consumer is not
+running when the event is published (crash, never started, killed by
+`run_all.py --stop`), or if the Kafka topic is wiped underneath a stale
+Spark checkpoint, the image sits at `INGESTED` forever with no event left
+on the transport to replay.
+
+This tool finds those rows and gets them unstuck. Two modes:
+
+    (default)  re-publish the upload event to Kafka via kafka.producer.
+               Use this when a Spark consumer IS running (or is about to
+               be started with an empty/fresh checkpoint) — the event goes
+               back on the topic and Spark processes it normally.
+
+    --inline   process the image here and now, in-process, using the exact
+               same spark/preprocessing.process_event + persist_result the
+               Spark foreachBatch sink calls. No broker, no Spark JVM, no
+               checkpoint involved. Use this for a one-shot backfill of
+               events that are genuinely gone from Kafka.
+
+Only non-terminal rows are ever touched (INGESTED, UPLOADED, and — with
+--include-failed — rows that FAILED specifically at the Kafka-publish
+step). COMPLETED images are never re-queued, so --inline cannot create a
+duplicate prediction for an already-processed image.
+
+Examples
+--------
+    python -m storage.requeue_stuck --dry-run
+    python -m storage.requeue_stuck --all --inline        # backfill everything now
+    python -m storage.requeue_stuck --older-than 300        # re-publish rows stuck > 5 min
+    python -m storage.requeue_stuck --all --include-failed  # also retry Kafka-publish failures
+"""
+
+import argparse
+import sys
+from datetime import timedelta
+
+from storage.database import (
+    SessionLocal, Image, ProcessingStatus, now_utc, init_db, SCALE_TEST_SOURCE,
+)
+from api.image_storage import resolve_image_path, to_stored_path, is_drive_path, drive_file_id_from_path
+
+# Statuses that mean "the pipeline still owes this image a result".
+STUCK_STATUSES = {ProcessingStatus.INGESTED, ProcessingStatus.UPLOADED}
+
+# FAILED rows worth retrying with --include-failed: the failure was in the
+# transport or in locating the file, not in the image itself — a retry
+# (plus path rebasing) can legitimately still produce a prediction.
+_RETRYABLE_FAILURE_MARKERS = (
+    "Kafka publish failed",
+    "Image file not found on disk",
+    "Image file missing on disk",
+    "Image file not found in Google Drive",
+)
+
+
+def _event_from_image(img: Image) -> dict:
+    """Rebuild the exact event dict api/server.py publishes on upload."""
+    return {
+        "image_id": img.image_id,
+        "user_id": img.user_id,
+        "location": img.location,
+        "image_path": img.image_path,
+        "drive_file_id": drive_file_id_from_path(img.image_path) if is_drive_path(img.image_path) else None,
+        "captured_at": img.captured_at.isoformat() if img.captured_at else None,
+        "uploaded_at": img.uploaded_at.isoformat() if img.uploaded_at else None,
+    }
+
+
+def find_stuck(session, older_than_seconds: int, include_failed: bool, ignore_age: bool):
+    rows = session.query(Image).all()
+    cutoff = now_utc() - timedelta(seconds=older_than_seconds)
+    out = []
+    for img in rows:
+        if img.source == SCALE_TEST_SOURCE:
+            continue  # belongs to a scalability-test run; re-sending it would skew that run
+        eligible = img.status in STUCK_STATUSES
+        if include_failed and img.status == ProcessingStatus.FAILED:
+            msg = img.error_message or ""
+            eligible = eligible or any(msg.startswith(m) for m in _RETRYABLE_FAILURE_MARKERS)
+        if not eligible:
+            continue
+        if not ignore_age:
+            stamp = img.ingested_at or img.uploaded_at or img.created_at
+            # stored naive-UTC in SQLite; compare on the same basis
+            stamp_cmp = stamp.replace(tzinfo=cutoff.tzinfo) if stamp and stamp.tzinfo is None else stamp
+            if stamp_cmp and stamp_cmp > cutoff:
+                continue
+        out.append(img)
+    return out
+
+
+def _mark_failed(session, image_id: str, message: str):
+    img = session.get(Image, image_id)
+    if img is None:
+        return
+    img.status = ProcessingStatus.FAILED
+    img.error_message = message
+    session.commit()
+
+
+def rebase_paths(session, images, dry_run: bool) -> int:
+    """Heal stale image_path values (project moved between hosts/folders):
+    if the stored path can be resolved to a real file, rewrite it to the
+    portable project-relative form. Returns how many rows were healed.
+    `images` must be live objects on `session`."""
+    healed = 0
+    for img in images:
+        if is_drive_path(img.image_path):
+            continue  # Google Drive images have no local path to rebase
+        try:
+            real = resolve_image_path(img.image_path)
+        except FileNotFoundError:
+            continue
+        portable = to_stored_path(real)
+        if portable != img.image_path:
+            print(f"  path rebased  {img.image_id}: {img.image_path} -> {portable}")
+            if not dry_run:
+                img.image_path = portable
+            healed += 1
+    if healed and not dry_run:
+        session.commit()
+    return healed
+
+
+def republish(images, dry_run: bool) -> int:
+    if not images:
+        return 0
+    if dry_run:
+        for img in images:
+            print(f"  would re-publish  {img.image_id}  ({img.status.value})")
+        return 0
+
+    from kafka.config import KAFKA_TOPIC
+    from kafka.producer import get_backend
+
+    backend = get_backend(KAFKA_TOPIC)
+    done = 0
+    for img in images:
+        try:
+            if not is_drive_path(img.image_path):  # Drive files are checked by Spark
+                resolve_image_path(img.image_path)
+        except FileNotFoundError:
+            print(f"  SKIP {img.image_id}: image file missing at {img.image_path} -> marking FAILED")
+            with SessionLocal() as s:
+                _mark_failed(s, img.image_id, f"Image file missing on disk at re-queue time: {img.image_path}")
+            continue
+        backend.send(_event_from_image(img))
+        print(f"  re-published  {img.image_id}")
+        done += 1
+    print(f"\nRe-published {done} event(s) to Kafka topic '{KAFKA_TOPIC}'.")
+    print("A Spark consumer (python -m spark.streaming_job) must be running to turn these into predictions.")
+    return done
+
+
+def process_inline(images, dry_run: bool) -> int:
+    if not images:
+        return 0
+    if dry_run:
+        for img in images:
+            print(f"  would process inline  {img.image_id}  ({img.status.value})")
+        return 0
+
+    from spark.preprocessing import (
+        process_event, persist_result, InvalidEvent, publish_result_to_drive_safely,
+    )
+
+    done = 0
+    failed = 0
+    for img in images:
+        event = _event_from_image(img)
+        try:
+            result = process_event(event)
+            persist_result(event, result, ProcessingStatus.COMPLETED)
+            publish_result_to_drive_safely(
+                event, ProcessingStatus.COMPLETED, processed_image=result.get("processed_image_jpeg"),
+            )
+            print(f"  processed  {img.image_id}  -> {result['predicted_class']} "
+                  f"(risk {result['risk_level']} {result['risk_score']})")
+            done += 1
+        except InvalidEvent as e:
+            persist_result(event, None, ProcessingStatus.FAILED, error_message=str(e))
+            publish_result_to_drive_safely(event, ProcessingStatus.FAILED, str(e))
+            print(f"  FAILED (invalid)  {img.image_id}: {e}")
+            failed += 1
+        except Exception as e:
+            persist_result(event, None, ProcessingStatus.FAILED, error_message=str(e))
+            publish_result_to_drive_safely(event, ProcessingStatus.FAILED, str(e))
+            print(f"  FAILED  {img.image_id}: {e}")
+            failed += 1
+    print(f"\nProcessed inline: {done} completed, {failed} failed.")
+    return done
+
+
+def main() -> int:
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument("--older-than", type=int, default=120,
+                   help="only touch rows stuck for at least this many seconds (default: 120)")
+    p.add_argument("--all", action="store_true",
+                   help="ignore --older-than; act on every stuck row regardless of age")
+    p.add_argument("--include-failed", action="store_true",
+                   help="also retry rows that FAILED at the Kafka-publish step")
+    p.add_argument("--inline", action="store_true",
+                   help="process now via spark.preprocessing instead of re-publishing to Kafka")
+    p.add_argument("--dry-run", action="store_true",
+                   help="list what would be done and exit")
+    args = p.parse_args()
+    init_db()
+
+    with SessionLocal() as session:
+        stuck = find_stuck(session, args.older_than, args.include_failed, args.all)
+        # detach a lightweight view so we don't hold the session open during processing
+        view = [
+            session.get(Image, s.image_id) for s in stuck
+        ]
+        summary = [(i.image_id, i.status.value) for i in view]
+
+    if not summary:
+        print("No stuck images found. Nothing to do.")
+        return 0
+
+    print(f"Found {len(summary)} stuck image(s):")
+    for image_id, status in summary:
+        print(f"  {image_id}  {status}")
+    print()
+
+    ids = [iid for iid, _ in summary]
+
+    with SessionLocal() as session:
+        live = [session.get(Image, iid) for iid in ids]
+        healed = rebase_paths(session, live, args.dry_run)
+    if healed:
+        print(f"  ({healed} stale image_path value(s) rebased to this project)\n")
+
+    with SessionLocal() as session:
+        images = [session.get(Image, iid) for iid in ids]
+        if args.inline:
+            process_inline(images, args.dry_run)
+        else:
+            republish(images, args.dry_run)
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
