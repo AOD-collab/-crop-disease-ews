@@ -300,3 +300,52 @@ def local_copy_counts(candidates: list) -> dict:
     file. Used by the dashboard preview."""
     present = sum(downloaded_photo_path(c.user_id, c.image_id) is not None for c in candidates)
     return {"with_local_copy": present, "missing_local_copy": len(candidates) - present}
+
+
+# --------------------------------------------------------------- local photos (default)
+# The default photo source: the farmer photos already on this laptop, i.e. the
+# copies Spark keeps of every Drive upload (DOWNLOADED_PHOTOS_DIR/<user_id>/
+# <image_id>.jpg, api/image_storage.store_downloaded_photo). Google Drive is
+# never contacted: the photos are read from disk, and where each was taken
+# (municipality, the phone's GPS) comes from its row in the database.
+LOCAL_SOURCE = "local"
+
+
+def local_photos_dir() -> Path:
+    from config.settings import DOWNLOADED_PHOTOS_DIR
+    return Path(DOWNLOADED_PHOTOS_DIR)
+
+
+def enumerate_local_photos(staging_root=None, workers: int = 8) -> Collection:
+    """Every valid photo in local_photos_dir() (same type/size rules and
+    same-content check as a custom folder), oldest upload first. Each keeps
+    the farmer's image_id, user_id, location and device GPS from the images
+    table when it still has a row there (a factory reset removes the rows,
+    not the photos: those photos are kept, without a location)."""
+    from storage.database import Image
+    root = local_photos_dir()
+    if not root.is_dir():
+        return Collection(candidates=[], total_files=0)
+    col = enumerate_folder(root, staging_root=staging_root, workers=workers)
+    image_ids = [Path(c.image_id).stem for c in col.candidates]
+    rows = {}
+    with SessionLocal() as s:
+        for start in range(0, len(image_ids), 500):
+            for img in s.query(Image).filter(Image.image_id.in_(image_ids[start:start + 500])):
+                rows[img.image_id] = img
+            s.expunge_all()
+    for c in col.candidates:
+        rel = Path(c.image_id)                                # "<user_id>/<image_id>.jpg"
+        c.image_id = rel.stem
+        c.user_id = rel.parent.name if rel.parent.name else None
+        c.local_copy_status = "local copy"
+        img = rows.get(c.image_id)
+        if img is not None:
+            c.user_id = img.user_id
+            c.location = img.location
+            c.created_time = img.uploaded_at.isoformat() if img.uploaded_at else None
+            if img.gps_source == "device" and img.gps_latitude is not None and img.gps_longitude is not None:
+                c.device_gps = (img.gps_latitude, img.gps_longitude)
+    # oldest upload first (like the Drive collection); photos without a row last
+    col.candidates.sort(key=lambda c: (c.created_time is None, c.created_time or "", c.image_id))
+    return col

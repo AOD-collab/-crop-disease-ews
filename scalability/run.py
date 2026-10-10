@@ -190,22 +190,32 @@ def reap_dead_runs() -> int:
 
 
 # --------------------------------------------------------------- helpers
-def _source_label(source_dir) -> str:
-    return f"custom folder {source_dir}" if source_dir else "Google Drive"
+def _source(source_dir=None, from_drive=False) -> str:
+    """"folder" (a custom folder), "google_drive" (only when asked for
+    explicitly) or "local" (the default: the farmer photos already on this
+    laptop, no Google Drive)."""
+    return "folder" if source_dir else "google_drive" if from_drive else dataset.LOCAL_SOURCE
 
 
-def _collection(source_dir=None):
-    """The run's photo source: the Google Drive collection, or a custom
-    folder on this computer when `source_dir` is given."""
+def _source_label(source_dir, from_drive=False) -> str:
+    return {"folder": f"custom folder {source_dir}", "google_drive": "Google Drive",
+            "local": f"local photos in {dataset.local_photos_dir()}"}[_source(source_dir, from_drive)]
+
+
+def _collection(source_dir=None, from_drive=False):
+    """The run's photo source (see _source). Only from_drive=True contacts
+    Google Drive."""
     if source_dir:
         try:
             return dataset.enumerate_folder(source_dir, staging_root=REPORTS_DIR)
         except FileNotFoundError as e:
             raise RunError(str(e))
-    return dataset.enumerate_collection()
+    if from_drive:
+        return dataset.enumerate_collection()
+    return dataset.enumerate_local_photos(staging_root=REPORTS_DIR)
 
 
-def _benchmark_config(source_dir=None, series=None) -> dict:
+def _benchmark_config(source_dir=None, series=None, from_drive=False) -> dict:
     return {
         **(series or {}),
         "KAFKA_TOPIC": settings.SCALABILITY_KAFKA_TOPIC,
@@ -218,8 +228,11 @@ def _benchmark_config(source_dir=None, series=None) -> dict:
         "CPU_LOGICAL_CORES": psutil.cpu_count(),
         "RAM_GB": round(psutil.virtual_memory().total / 2**30, 1),
         "LIVE_OUTPUT": _live_mode,
-        "IMAGE_SOURCE": (f"photos in the custom folder {source_dir}" if source_dir
-                         else "verified local copies of the Google Drive originals"),
+        "SOURCE": _source(source_dir, from_drive),
+        "IMAGE_SOURCE": {"folder": f"photos in the custom folder {source_dir}",
+                         "google_drive": "verified local copies of the Google Drive originals",
+                         "local": f"farmer photos stored on this laptop ({dataset.local_photos_dir()}), "
+                                  "no Google Drive"}[_source(source_dir, from_drive)],
         **({"SOURCE_DIR": str(source_dir)} if source_dir else {}),
     }
 
@@ -263,9 +276,9 @@ def _set_phase(run_id: str, phase: str, **fields) -> None:
 
 
 # --------------------------------------------------------------- preview / prepare
-def preview(source_dir=None) -> dict:
-    col = _collection(source_dir)
-    if source_dir:
+def preview(source_dir=None, from_drive=False) -> dict:
+    col = _collection(source_dir, from_drive)
+    if not from_drive:
         n = len(col.candidates)
         return {**col.as_dict(), "with_local_copy": n, "missing_local_copy": 0}
     return {**col.as_dict(), **dataset.local_copy_counts(col.candidates)}
@@ -307,7 +320,8 @@ def prepare(size: int, workers: int = 8) -> dict:
 
 # --------------------------------------------------------------- the run
 def start(size: int = None, replay_of: str = None, workers: int = 8, stall_seconds: float = 600,
-          run_id: str = None, source_dir: str = None, series: dict = None, _locked: bool = False) -> str:
+          run_id: str = None, source_dir: str = None, series: dict = None, _locked: bool = False,
+          from_drive: bool = False) -> str:
     """Runs one complete test iteration and returns its run_id (see module
     docstring). `source_dir`: take the photos from this folder instead of
     Google Drive. `series`: {"SERIES_ID", "ITERATION", "ITERATIONS"} when
@@ -320,8 +334,12 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
             if old is None:
                 raise RunError(f"unknown run {replay_of}")
             size = s.query(ScaleTestItem).filter(ScaleTestItem.run_id == replay_of).count()
-            # a replay uses the same source as the run it repeats
-            source_dir = json.loads(old.config_json or "{}").get("SOURCE_DIR")
+            # a replay uses the same source as the run it repeats — except that
+            # runs from before the local source (no "SOURCE") were Drive runs:
+            # they are replayed from the same photos' local copies.
+            old_config = json.loads(old.config_json or "{}")
+            source_dir = old_config.get("SOURCE_DIR")
+            from_drive = old_config.get("SOURCE") == "google_drive"
     if not size or size < 1:
         raise RunError("size must be at least 1")
     if source_dir:
@@ -336,30 +354,35 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
         worker.lower_priority()
         with SessionLocal() as s:
             s.add(ScaleTestRun(run_id=run_id, status="PREPARING",
-                               phase="Scanning the folder" if source_dir else "Listing the Drive collection",
+                               phase={"folder": "Scanning the folder", "google_drive": "Listing the Drive collection",
+                                      "local": "Scanning the local photos"}[_source(source_dir, from_drive)],
                                pid=os.getpid(), requested_size=size, replay_of=replay_of, publish_results=False,
-                               config_json=json.dumps(_benchmark_config(source_dir, series))))
+                               config_json=json.dumps(_benchmark_config(source_dir, series, from_drive))))
             s.commit()
-        log(f"{run_id}: started (size {size}, source {_source_label(source_dir)}"
+        log(f"{run_id}: started (size {size}, source {_source_label(source_dir, from_drive)}"
             + (f", replay of {replay_of}" if replay_of else "") + ")")
 
         # 1. dataset ---------------------------------------------------------
-        col = _collection(source_dir)
-        selection = {**col.as_dict(), "source": "folder" if source_dir else "google_drive",
-                     "source_dir": source_dir}
+        col = _collection(source_dir, from_drive)
+        selection = {**col.as_dict(), "source": _source(source_dir, from_drive), "source_dir": source_dir}
         if replay_of:
             with SessionLocal() as s:
-                wanted = [r[0] for r in s.query(ScaleTestItem.source_drive_file_id)
-                          .filter(ScaleTestItem.run_id == replay_of).all()]
+                wanted = s.query(ScaleTestItem.source_drive_file_id, ScaleTestItem.source_image_id).filter(
+                    ScaleTestItem.run_id == replay_of).all()
+            # same file (Drive id / content hash), else the same farmer photo
+            # (image_id): an old Drive run replayed from the local copies
             by_file = {c.drive_file_id: c for c in col.candidates}
-            chosen = [by_file[f] for f in wanted if f in by_file]
+            by_image = {c.image_id: c for c in col.candidates}
+            chosen = [c for c in (by_file.get(f) or by_image.get(i) for f, i in wanted) if c is not None]
             selection["replay_missing_from_drive"] = len(wanted) - len(chosen)
         else:
             chosen = col.candidates[:size]
         selection.update(requested=size, selected=len(chosen))
         if not chosen:
-            raise RunError(f"no valid photos in the folder {source_dir}" if source_dir
-                           else "no valid photos in the Google Drive collection")
+            raise RunError({"folder": f"no valid photos in the folder {source_dir}",
+                            "google_drive": "no valid photos in the Google Drive collection",
+                            "local": f"no valid photos in {dataset.local_photos_dir()}"}[
+                               _source(source_dir, from_drive)])
 
         # 2. local copies ----------------------------------------------------
         last = [0.0]
@@ -644,6 +667,7 @@ def start_series(size: int, iterations: int = 1, **kwargs) -> list:
                 run_ids.append(start(size, series=series, _locked=True, **kwargs))
             else:
                 kwargs.pop("source_dir", None)        # a replay uses iteration 1's own source
+                kwargs.pop("from_drive", None)
                 run_ids.append(start(replay_of=run_ids[0], series=series, _locked=True, **kwargs))
         return run_ids
     finally:
@@ -827,7 +851,8 @@ def _main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     pv = sub.add_parser("preview", help="count the valid photos in the Drive collection (or a folder)")
-    pv.add_argument("--source-dir", help="count the photos in this folder instead of Google Drive")
+    pv.add_argument("--source-dir", help="count the photos in this folder instead of the local photos")
+    pv.add_argument("--from-drive", action="store_true", help="count the Google Drive collection instead")
     sp = sub.add_parser("prepare", help="verify/download local copies without running a test")
     sp.add_argument("--size", type=int, required=True)
     sp.add_argument("--workers", type=int, default=8)
@@ -837,7 +862,10 @@ def _main(argv=None) -> int:
                     help="run the test this many times on the same photos (new item ids each time)")
     st.add_argument("--replay-of", help="reuse the photo selection of this run (new run_id)")
     st.add_argument("--source-dir", help="take the photos from this folder (and its subfolders) "
-                                         "instead of Google Drive")
+                                         "instead of the farmer photos stored on this laptop")
+    st.add_argument("--from-drive", action="store_true",
+                    help="take the photos from the Google Drive collection (downloads missing copies) "
+                         "instead of the farmer photos stored on this laptop (the default)")
     st.add_argument("--workers", type=int, default=8, help="parallel downloads during preparation")
     st.add_argument("--stall-minutes", type=float, default=10,
                     help="stop waiting after this long without a single photo finishing")
@@ -872,22 +900,26 @@ def _main(argv=None) -> int:
     init_db()
     try:
         if args.cmd == "preview":
-            print(json.dumps(preview(args.source_dir), indent=2))
+            print(json.dumps(preview(args.source_dir, args.from_drive), indent=2))
         elif args.cmd == "prepare":
             prepare(args.size, args.workers)
         elif args.cmd == "start":
             if not args.size and not args.replay_of:
                 p.error("give --size or --replay-of")
-            if args.source_dir and args.replay_of:
-                p.error("--replay-of reuses the replayed run's own source; leave out --source-dir")
+            if (args.source_dir or args.from_drive) and args.replay_of:
+                p.error("--replay-of reuses the replayed run's own source; leave out --source-dir/--from-drive")
+            if args.source_dir and args.from_drive:
+                p.error("choose one source: --source-dir or --from-drive")
             if args.iterations > 1:
                 if args.replay_of or args.run_id:
                     p.error("--iterations can't be combined with --replay-of")
                 start_series(args.size, args.iterations, workers=args.workers,
-                             stall_seconds=args.stall_minutes * 60, source_dir=args.source_dir)
+                             stall_seconds=args.stall_minutes * 60, source_dir=args.source_dir,
+                             from_drive=args.from_drive)
             else:
                 start(args.size, replay_of=args.replay_of, workers=args.workers,
-                      stall_seconds=args.stall_minutes * 60, run_id=args.run_id, source_dir=args.source_dir)
+                      stall_seconds=args.stall_minutes * 60, run_id=args.run_id, source_dir=args.source_dir,
+                      from_drive=args.from_drive)
         elif args.cmd == "report":
             print(regenerate_report(args.run_id))
         elif args.cmd == "cleanup":

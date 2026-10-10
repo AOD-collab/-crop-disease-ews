@@ -146,7 +146,7 @@ def test_run_is_isolated_from_production(collection, test_topic, downloads):
     production_before, queue_before = _production_counts(), _production_queue_lines()
     review_before = set(settings.REVIEW_DIR.glob("*")) if settings.REVIEW_DIR.exists() else set()
 
-    run_id = runner.start(4)
+    run_id = runner.start(4, from_drive=True)
 
     with SessionLocal() as s:
         run = s.get(ScaleTestRun, run_id)
@@ -203,7 +203,7 @@ def test_production_spark_job_skips_test_events():
 
 
 def test_replay_reuses_local_copies_with_new_ids(collection, test_topic, monkeypatch):
-    first = runner.start(3)
+    first = runner.start(3, from_drive=True)
 
     def no_download(*a, **k):
         raise AssertionError("replay must not download")
@@ -224,7 +224,7 @@ def test_kafka_publish_failure_is_recorded_and_not_counted(collection, monkeypat
     topic = InMemoryTestTopic(fail_indexes={0})
     monkeypatch.setattr(runner, "_test_queue", lambda: topic)
     monkeypatch.setattr(runner, "_live_gate", lambda: worker.LiveGate(check=lambda: False, interval=0.05))
-    run_id = runner.start(3)
+    run_id = runner.start(3, from_drive=True)
     with SessionLocal() as s:
         run = s.get(ScaleTestRun, run_id)
         items = s.query(ScaleTestItem).filter(ScaleTestItem.run_id == run_id).all()
@@ -237,7 +237,7 @@ def test_kafka_publish_failure_is_recorded_and_not_counted(collection, monkeypat
 
 
 def test_cleanup_and_delete_keep_originals(collection, test_topic):
-    run_id = runner.start(2)
+    run_id = runner.start(2, from_drive=True)
     with SessionLocal() as s:
         items = s.query(ScaleTestItem).filter(ScaleTestItem.run_id == run_id).all()
         pair = json.loads(s.get(ScaleTestRun, run_id).summary_json)["comparison"]
@@ -473,7 +473,7 @@ def test_run_keeps_cnn_result_and_place_for_the_disease_charts(drive, test_topic
     without_gps, _ = drive.phone_upload("carol@gmail.com", make_leaf_jpeg_bytes(101), location="Dili")
     _scan()
     before = _production_counts()
-    run_id = runner.start(2)
+    run_id = runner.start(2, from_drive=True)
 
     with SessionLocal() as s:
         items = {i.source_image_id: i for i in s.query(ScaleTestItem).filter(ScaleTestItem.run_id == run_id)}
@@ -559,7 +559,7 @@ def test_only_one_job_at_a_time(collection, test_topic):
     runner._acquire_lock("run", "other")
     try:
         with pytest.raises(runner.RunError):
-            runner.start(1)
+            runner.start(1, from_drive=True)
         with pytest.raises(runner.RunError):
             runner.start_series(1, 2)
     finally:
@@ -654,3 +654,98 @@ def test_dashboard_launch_in_a_console_window_or_hidden(monkeypatch, tmp_path):
     page._launch(["start", "--size", "5"], console=False)
     argv, kw = calls[-1]
     assert "--keep-open" not in argv and kw["creationflags"] & subprocess.CREATE_NO_WINDOW
+
+
+# --------------------------------------------------- default source: local photos, no Google Drive
+@pytest.fixture()
+def local_photos_dir(tmp_path, monkeypatch):
+    import api.image_storage
+    path = tmp_path / "downloaded_photos"
+    monkeypatch.setattr(settings, "DOWNLOADED_PHOTOS_DIR", path)
+    monkeypatch.setattr(api.image_storage, "DOWNLOADED_PHOTOS_DIR", path)
+    return path
+
+
+def _forbid_drive(monkeypatch):
+    def forbidden(*a, **k):
+        raise AssertionError("the scalability test contacted Google Drive")
+    for name in ("list_subfolders", "list_files_in_folders", "download_file", "get_file_metadata",
+                 "images_folder_id"):
+        monkeypatch.setattr(drive_client, name, forbidden)
+
+
+def test_default_source_is_local_photos_without_google_drive(collection, test_topic, local_photos_dir,
+                                                             monkeypatch):
+    drive_run = runner.start(5, from_drive=True)          # leaves the local copies Spark would keep
+    _forbid_drive(monkeypatch)
+    run_id = runner.start(5)
+    with SessionLocal() as s:
+        run = s.get(ScaleTestRun, run_id)
+        items = s.query(ScaleTestItem).filter(ScaleTestItem.run_id == run_id).all()
+        drive_items = s.query(ScaleTestItem).filter(ScaleTestItem.run_id == drive_run).all()
+        farmer = {i.image_id: i for i in s.query(Image)}
+    summary, config = json.loads(run.summary_json), json.loads(run.config_json)
+    assert run.status == "COMPLETED" and summary["completed"] == 5 and summary["source"] == "local"
+    assert config["SOURCE"] == "local" and "no Google Drive" in config["IMAGE_SOURCE"]
+    assert {i.source_image_id for i in items} == {i.source_image_id for i in drive_items}
+    for i in items:
+        assert i.source_drive_file_id.startswith("local:") and i.local_copy_status == "local copy"
+        assert i.source_user_id == farmer[i.source_image_id].user_id
+        assert i.location == farmer[i.source_image_id].location
+    # oldest upload first, like the Drive collection
+    order = [i.source_image_id for i in sorted(items, key=lambda i: i.source_image_id)]
+    assert sorted(order, key=lambda i: farmer[i].uploaded_at) == [
+        c.image_id for c in runner.dataset.enumerate_local_photos().candidates]
+
+
+def test_old_drive_run_is_replayed_from_local_copies(collection, test_topic, local_photos_dir, monkeypatch):
+    first = runner.start(3, from_drive=True)
+    with SessionLocal() as s:                               # as recorded before the local source existed
+        run = s.get(ScaleTestRun, first)
+        cfg = json.loads(run.config_json)
+        cfg.pop("SOURCE", None)
+        run.config_json = json.dumps(cfg)
+        s.commit()
+    _forbid_drive(monkeypatch)
+    second = runner.start(replay_of=first)
+    with SessionLocal() as s:
+        a = {i.source_image_id for i in s.query(ScaleTestItem).filter(ScaleTestItem.run_id == first)}
+        b = s.query(ScaleTestItem).filter(ScaleTestItem.run_id == second).all()
+        summary = json.loads(s.get(ScaleTestRun, second).summary_json)
+    assert summary["status"] == "COMPLETED" and summary["source"] == "local"
+    assert {i.source_image_id for i in b} == a and summary["completed"] == 3
+
+
+def test_local_photos_without_a_database_row_still_count(local_photos_dir, test_topic, monkeypatch):
+    from api.image_storage import store_downloaded_photo
+    _forbid_drive(monkeypatch)
+    store_downloaded_photo("someuser", "orphan-photo-1", make_leaf_jpeg_bytes(90))
+    store_downloaded_photo("someuser", "orphan-photo-2", make_leaf_jpeg_bytes(91))
+    preview = runner.preview()
+    assert preview["valid"] == 2 and preview["missing_local_copy"] == 0
+    run_id = runner.start(2)
+    with SessionLocal() as s:
+        items = s.query(ScaleTestItem).filter(ScaleTestItem.run_id == run_id).all()
+    assert {i.source_image_id for i in items} == {"orphan-photo-1", "orphan-photo-2"}
+    assert all(i.status == "COMPLETED" and i.location is None for i in items)
+
+
+def test_no_local_photos_is_a_clear_error(local_photos_dir, test_topic, monkeypatch):
+    _forbid_drive(monkeypatch)
+    with pytest.raises(runner.RunError, match="no valid photos in"):
+        runner.start(5)
+
+
+def test_page_offers_local_photos_not_google_drive(local_photos_dir, drive, monkeypatch):  # noqa: F811
+    from api.image_storage import store_downloaded_photo
+    _forbid_drive(monkeypatch)
+    store_downloaded_photo("someuser", "photo-1", make_leaf_jpeg_bytes(90))
+    from tests.test_dashboard_users import _logged_in, _seed_admin_and_farmer
+    _seed_admin_and_farmer()
+    at = _logged_in("Scalability Test")
+    radio = at.radio(key="scale_source")
+    assert radio.value == "Local photos on this laptop" and "Google Drive" not in radio.options
+    [b for b in at.button if b.label == "Check the local photos"][0].click().run()
+    assert not at.exception, at.exception
+    assert "Prepare local copies" not in [b.label for b in at.button]
+    assert [b for b in at.button if b.label == "Start test"]

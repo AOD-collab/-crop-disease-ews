@@ -29,7 +29,6 @@ import streamlit as st
 from config.settings import BASE_DIR
 from config.localtime import format_local
 from kafka.config import broker_reachable
-from storage import drive_client
 from storage.database import SessionLocal, ScaleTestRun, ScaleTestItem
 from scalability import run as runner
 from scalability.report import REPORTS_DIR, series_averages, items_frame
@@ -113,7 +112,9 @@ def _active_panel():
 
 def _setup_section(busy: bool):
     st.subheader("Run a test")
-    use_folder = st.radio("Photo source", ["Google Drive", "Custom folder"], horizontal=True,
+    # Google Drive is not a choice here: the test reads photos already on this
+    # laptop (`python -m scalability.run start --from-drive` still can).
+    use_folder = st.radio("Photo source", ["Local photos on this laptop", "Custom folder"], horizontal=True,
                           key="scale_source") == "Custom folder"
     source_dir = None
     if use_folder:
@@ -121,22 +122,24 @@ def _setup_section(busy: bool):
                                    placeholder=r"e.g. D:\maize_photos").strip().strip('"') or None
         can_check = source_dir is not None
     else:
-        can_check = drive_client.is_configured()
-        if not can_check:
-            st.caption("Google Drive is not set up.")
-    if st.button("Check the folder" if use_folder else "Check the Drive collection", icon="🔎",
+        can_check = True
+        st.caption(f"The farmer photos already stored on this laptop ({runner.dataset.local_photos_dir()}). "
+                   "Nothing is downloaded from Google Drive.")
+    source = "folder" if use_folder else "local"
+    if st.button("Check the folder" if use_folder else "Check the local photos", icon="🔎",
                  disabled=not can_check):
-        with st.spinner("Scanning the folder…" if use_folder else "Listing every farmer's Drive folder…"):
+        with st.spinner("Scanning the folder…" if use_folder else "Scanning the local photos…"):
             try:
-                st.session_state["scale_preview"] = {**runner.preview(source_dir), "source_dir": source_dir}
+                st.session_state["scale_preview"] = {**runner.preview(source_dir), "source_dir": source_dir,
+                                                     "source": source}
             except Exception as e:  # noqa: BLE001
-                st.error(f"Could not read {'the folder' if use_folder else 'the Drive collection'}: {e}")
+                st.error(f"Could not read {'the folder' if use_folder else 'the local photos'}: {e}")
     pv = st.session_state.get("scale_preview")
-    if not pv or pv.get("source_dir") != source_dir:       # a check of the other source doesn't count
-        return
+    if not pv or pv.get("source_dir") != source_dir or pv.get("source") != source:
+        return                                              # a check of the other source doesn't count
     valid = pv["valid"]
     if not valid:
-        st.warning(f"There are no valid photos in {'this folder' if use_folder else 'the Drive collection'}.")
+        st.warning(f"There are no valid photos in {'this folder' if use_folder else 'the local photos'}.")
         return
     options = [n for n in SIZES if n < valid] + [valid]
     labels = {n: f"{n:,}" if n != valid else f"All available ({valid:,})" for n in options}
@@ -154,14 +157,7 @@ def _setup_section(busy: bool):
         help="Opens an EWS-ScalabilityTest window (like the Spark and Kafka windows) with a line per "
              "Kafka step and per photo, and the speed every 2 seconds. It is still the separate test "
              "process on its own Kafka topic: the live Spark job and farmer photos are not affected.")
-    col1, col2 = st.columns(2)
-    if not use_folder and col1.button(
-            "Prepare local copies", icon="⬇️", disabled=busy,
-            help="Verify the photos' local copies and download only the missing ones. "
-                 "Optional: Start test does this too, before its timer starts."):
-        _launch(["prepare", "--size", str(size)], console=console)
-        st.rerun()
-    if col2.button("Start test", icon="▶️", type="primary", disabled=busy or not _kafka_up()):
+    if st.button("Start test", icon="▶️", type="primary", disabled=busy or not _kafka_up()):
         _launch(["start", "--size", str(size), "--iterations", str(iterations)]
                 + (["--source-dir", source_dir] if source_dir else [])
                 + (["--live", "progress"] if size * iterations > 2000 else []), console=console)

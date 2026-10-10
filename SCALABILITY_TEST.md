@@ -6,6 +6,15 @@ preprocessing (`spark/preprocessing.prepare_image`) and CNN
 from the real-time pipeline** (Demo 1) so that a test never touches farmer
 submissions, predictions or results.
 
+**Photo source (since 10 October 2026): the photos on this laptop, not Google
+Drive.** By default a test reads the farmer photos already stored locally in
+`storage/downloaded_photos/<user_id>/<image_id>.jpg` (the copies Spark keeps of
+every upload) and takes each photo's municipality and phone GPS from its
+database row. Google Drive is never contacted. Alternatives: `--source-dir` (any
+folder) or, only when asked for explicitly, `--from-drive` (the old Drive
+collection, which downloads missing copies). Earlier Drive runs are replayed from
+the same photos' local copies.
+
 ## How it is isolated
 
 ```
@@ -51,9 +60,9 @@ processing. To give farmers priority:
 ## Running it
 
 Dashboard → **Scalability test**:
-1. *Check the Drive collection* (or a custom folder)
+1. Photo source *Local photos on this laptop* (default) or *Custom folder* → *Check*
 2. choose the number of **unique photos** and the number of **iterations**
-3. *Prepare local copies* (optional, Drive only), then *Start test* (needs the Kafka broker)
+3. *Start test* (needs the Kafka broker)
 
 The results show the **latest test** only:
 
@@ -91,11 +100,11 @@ share images or measurements.
 From PowerShell in `A:\final\crop_disease_image_system`:
 
 ```powershell
-python -m scalability.run preview                          # what the Drive collection holds
-python -m scalability.run prepare --size 572               # optional: download all local copies now
-python -m scalability.run start --size 100                 # one iteration
+python -m scalability.run preview                          # the photos stored on this laptop
+python -m scalability.run start --size 100                 # one iteration, local photos (default)
 python -m scalability.run start --size 100 --iterations 3  # same 100 photos, 3 timed iterations
 python -m scalability.run start --size 5000 --source-dir D:\maize_photos
+python -m scalability.run start --size 100 --from-drive    # only if you want the Google Drive collection
 python -m scalability.run list
 python -m scalability.run report --run-id <run_id>         # rewrite the CSV files
 ```
