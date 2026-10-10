@@ -100,6 +100,32 @@ python -m scalability.run list
 python -m scalability.run report --run-id <run_id>         # rewrite the CSV files
 ```
 
+### Watching it live in a command prompt
+
+Like the Spark and Kafka windows of `run_all.py`, a test can be watched as it runs.
+From the dashboard, leave **Show the test live in a command prompt window** ticked: Start test
+opens an `EWS-ScalabilityTest` window (it stays open until you press Enter). From a command prompt:
+
+```
+python -m scalability.run start --size 100 --iterations 3
+python -m scalability.run start --size 10000 --live progress     # big runs: progress lines only
+```
+
+```
+[scalability 17:40:48] [timer]    started — publishing 12 event(s) to Kafka topic 'maize-disease-images-scalability-test' (the live topic 'maize-disease-images' is not touched)
+[scalability 17:40:49] [kafka]    consumed 12 event(s) (12 of 12 received)
+[scalability 17:40:49] [cnn]       1/12  7c92a3ad  preprocess 0.323s  cnn 0.240s  -> northern_leaf_blight 84%  risk HIGH
+[scalability 17:42:51] [progress] 24/60 done  11.55 photos/s  in workers 28  waiting in Kafka 0  elapsed 2.1s
+[scalability 17:40:51] scale-20261010-174030-cf35: COMPLETED. 12 ok, 0 failed in 1.266s.
+```
+
+`--live photos` (default) shows a line per photo, `progress` only the Kafka/progress/pause lines,
+`off` only the start and end. Watching changes nothing about the isolation above (own topic, own
+consumer, pauses for farmer photos) and does not slow the measurement: the lines are written by the
+bookkeeping loop at most every 0.5 s, never by the photo workers (60 photos: 3.53 s / 3.52 s with
+`photos` vs 3.98 s / 3.69 s with `off`). The run's `config_json` records which mode was used
+(`LIVE_OUTPUT`). `--log-file` keeps a copy of the window's output.
+
 ### Photos from a custom folder
 
 Any folder on this computer (dashboard: *Photo source → Custom folder*).

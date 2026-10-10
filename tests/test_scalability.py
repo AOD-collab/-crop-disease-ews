@@ -570,3 +570,87 @@ def test_test_topic_can_never_be_the_production_topic(monkeypatch):
     monkeypatch.setattr(settings, "SCALABILITY_KAFKA_TOPIC", settings.KAFKA_TOPIC)
     with pytest.raises(ValueError, match="production Kafka topic"):
         worker.KafkaTestQueue()
+
+
+# --------------------------------------------------- live console output (--live)
+@pytest.fixture()
+def live_mode():
+    yield runner.set_live
+    runner.set_live("photos")
+
+
+def test_live_console_shows_kafka_and_every_photo(photo_folder, test_topic, capsys, live_mode):
+    live_mode("photos")
+    run_id = runner.start(10, source_dir=str(photo_folder))
+    out = capsys.readouterr().out
+    assert "[timer]    started — publishing 4 event(s)" in out
+    assert f"'{settings.KAFKA_TOPIC}' is not touched" in out
+    assert "[kafka]    consumed" in out and "(4 of 4 received)" in out
+    photo_lines = [line for line in out.splitlines() if "[cnn]" in line and "/4  " in line]
+    assert len(photo_lines) == 4 and all("preprocess" in line and "cnn " in line for line in photo_lines)
+    with SessionLocal() as s:
+        cfg = json.loads(s.get(ScaleTestRun, run_id).config_json)
+    assert cfg["LIVE_OUTPUT"] == "photos"
+
+
+def test_live_progress_mode_has_no_photo_lines(photo_folder, test_topic, capsys, live_mode, monkeypatch):
+    live_mode("progress")
+    monkeypatch.setattr(runner, "PROGRESS_EVERY_S", 0.0)          # every loop turn
+    runner.start(10, source_dir=str(photo_folder))
+    out = capsys.readouterr().out
+    assert "[progress]" in out and "photos/s" in out
+    assert not [line for line in out.splitlines() if "[cnn]" in line and "preprocess" in line]
+
+
+def test_live_off_keeps_the_old_quiet_output(photo_folder, test_topic, capsys, live_mode):
+    live_mode("off")
+    runner.start(10, source_dir=str(photo_folder))
+    out = capsys.readouterr().out
+    assert "COMPLETED. 4 ok" in out
+    assert "[kafka]" not in out and "[progress]" not in out and "[cnn]" not in out
+
+
+def test_live_mode_is_validated():
+    with pytest.raises(runner.RunError):
+        runner.set_live("loud")
+
+
+def test_photo_line_formats_results_failures_and_overlap():
+    ok = ("COMPLETED", None, {"preprocess_s": 0.1234, "cnn_s": 0.05, "contended": True},
+          {"predicted_class": "common_rust", "prediction_confidence": 0.973, "risk_level": "HIGH"})
+    line = runner._photo_line(7, 120, "abcdef0123456789", ok)
+    assert "  7/120  abcdef01" in line and "preprocess 0.123s" in line and "common_rust 97%" in line
+    assert "risk HIGH" in line and "excluded" in line
+    bad = runner._photo_line(1, 2, "deadbeef00", ("FAILED", "OSError: broken file", {}, None))
+    assert "FAILED  OSError: broken file" in bad
+
+
+def test_cli_log_file_gets_a_copy_of_the_console(tmp_path, monkeypatch, capsys):
+    import sys as _sys
+    log = tmp_path / "logs" / "run.log"
+    monkeypatch.setattr(_sys, "stdout", _sys.stdout)                # restored after _tee_to replaces it
+    monkeypatch.setattr(_sys, "stderr", _sys.stderr)
+    assert runner._main(["list", ]) == 0                            # no --log-file on list: unchanged
+    runner._tee_to(str(log))
+    runner.log("hello from the test")
+    _sys.stdout.flush()
+    assert "hello from the test" in log.read_text(encoding="utf-8")
+
+
+def test_dashboard_launch_in_a_console_window_or_hidden(monkeypatch, tmp_path):
+    import subprocess
+    from dashboard import scalability_page as page
+    calls = []
+    monkeypatch.setattr(page, "LOG_DIR", tmp_path)
+    monkeypatch.setattr(page.subprocess, "Popen", lambda argv, **kw: calls.append((argv, kw)))
+    monkeypatch.setattr(page.sys, "platform", "win32")
+
+    log = page._launch(["start", "--size", "5"], console=True)
+    argv, kw = calls[-1]
+    assert argv[-3:] == ["--log-file", log, "--keep-open"]
+    assert kw["creationflags"] & subprocess.CREATE_NEW_CONSOLE
+    assert "stdout" not in kw                                      # the window shows it; --log-file keeps a copy
+
+    page._launch(["start", "--size", "5"], console=False)
+    argv, kw = calls[-1]
+    assert "--keep-open" not in argv and kw["creationflags"] & subprocess.CREATE_NO_WINDOW

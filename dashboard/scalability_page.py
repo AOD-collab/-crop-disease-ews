@@ -43,17 +43,25 @@ GALLERY_PAGE_SIZE = 24
 GALLERY_COLUMNS = 4
 
 
-def _launch(args: list) -> str:
+def _launch(args: list, console: bool = False) -> str:
     """Starts `python -m scalability.run <args>` in the background; returns
-    its log file."""
+    its log file. `console` (Windows): in its own command prompt window
+    titled EWS-ScalabilityTest, showing the test live like the Spark and
+    Kafka windows, and still writing the same log file. It stays the same
+    separate process either way, on the test's own Kafka topic."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"{args[0]}_{datetime.now():%Y%m%d_%H%M%S}.log"
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    if console and sys.platform == "win32":
+        subprocess.Popen([sys.executable, "-u", "-m", "scalability.run", *args,
+                          "--log-file", str(log_path), "--keep-open"], cwd=BASE_DIR, env=env,
+                         creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP)
+        return str(log_path)
     kwargs = {}
     if sys.platform == "win32":
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     else:
         kwargs["start_new_session"] = True
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
     with open(log_path, "wb") as log:
         subprocess.Popen([sys.executable, "-u", "-m", "scalability.run", *args], cwd=BASE_DIR,
                          stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env, **kwargs)
@@ -141,16 +149,22 @@ def _setup_section(busy: bool):
                "test IDs. The test runs apart from farmer processing and pauses while farmer photos are "
                "being processed, but it shares this laptop's CPU, memory and GPU.")
 
+    console = sys.platform == "win32" and st.checkbox(
+        "Show the test live in a command prompt window", value=True, key="scale_console",
+        help="Opens an EWS-ScalabilityTest window (like the Spark and Kafka windows) with a line per "
+             "Kafka step and per photo, and the speed every 2 seconds. It is still the separate test "
+             "process on its own Kafka topic: the live Spark job and farmer photos are not affected.")
     col1, col2 = st.columns(2)
     if not use_folder and col1.button(
             "Prepare local copies", icon="⬇️", disabled=busy,
             help="Verify the photos' local copies and download only the missing ones. "
                  "Optional: Start test does this too, before its timer starts."):
-        _launch(["prepare", "--size", str(size)])
+        _launch(["prepare", "--size", str(size)], console=console)
         st.rerun()
     if col2.button("Start test", icon="▶️", type="primary", disabled=busy or not _kafka_up()):
         _launch(["start", "--size", str(size), "--iterations", str(iterations)]
-                + (["--source-dir", source_dir] if source_dir else []))
+                + (["--source-dir", source_dir] if source_dir else [])
+                + (["--live", "progress"] if size * iterations > 2000 else []), console=console)
         st.rerun()
     if not _kafka_up():
         from config.settings import KAFKA_BOOTSTRAP_SERVERS

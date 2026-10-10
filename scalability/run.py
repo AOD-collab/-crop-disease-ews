@@ -86,6 +86,49 @@ def log(msg: str) -> None:
     print(f"[scalability {datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+# Live console output while a test runs (`start --live`), so the test can be
+# watched in a command prompt like the Spark and Kafka windows:
+#   photos   (default) Kafka / gate / progress lines + one line per finished photo
+#   progress Kafka / gate lines + a progress line every 2 s (for big runs)
+#   off      only the start / end lines, as before
+# Lines are collected and written in ONE console write at most every 0.5 s,
+# from the loop that already does the bookkeeping — never from the photo
+# workers — so watching does not slow the measured processing.
+LIVE_MODES = ("photos", "progress", "off")
+_live_mode = "photos"
+PROGRESS_EVERY_S = 2.0
+
+
+def set_live(mode: str) -> None:
+    global _live_mode
+    if mode not in LIVE_MODES:
+        raise RunError(f"--live must be one of {', '.join(LIVE_MODES)}")
+    _live_mode = mode
+
+
+def _emit(lines: list) -> None:
+    """Writes the collected live lines at once (one console write)."""
+    if lines and _live_mode != "off":
+        stamp = datetime.now().strftime("%H:%M:%S")
+        sys.stdout.write("".join(f"[scalability {stamp}] {line}\n" for line in lines))
+        sys.stdout.flush()
+
+
+def _photo_line(n: int, total: int, item_id: str, outcome) -> str:
+    status, error, timings, prediction = outcome
+    timings, prediction = timings or {}, prediction or {}
+    head = f"[cnn]      {n:>{len(str(total))}}/{total}  {item_id[:8]}"
+    if status != "COMPLETED":
+        return f"{head}  FAILED  {(error or '')[:120]}"
+    conf = prediction.get("prediction_confidence")
+    result = (f"{prediction.get('predicted_class')}"
+              + (f" {conf * 100:.0f}%" if isinstance(conf, (int, float)) else "")
+              + f"  risk {prediction.get('risk_level')}")
+    flag = "  (overlapped farmer processing — excluded)" if timings.get("contended") else ""
+    return (f"{head}  preprocess {timings.get('preprocess_s', 0):.3f}s  cnn {timings.get('cnn_s', 0):.3f}s"
+            f"  -> {result}{flag}")
+
+
 def run_dir(run_id: str) -> Path:
     """Everything one run keeps on disk: images/ (its staged photos),
     the before/after pair, and the CSV files."""
@@ -174,6 +217,7 @@ def _benchmark_config(source_dir=None, series=None) -> dict:
         "GPU": gpu_name(),
         "CPU_LOGICAL_CORES": psutil.cpu_count(),
         "RAM_GB": round(psutil.virtual_memory().total / 2**30, 1),
+        "LIVE_OUTPUT": _live_mode,
         "IMAGE_SOURCE": (f"photos in the custom folder {source_dir}" if source_dir
                          else "verified local copies of the Google Drive originals"),
         **({"SOURCE_DIR": str(source_dir)} if source_dir else {}),
@@ -324,6 +368,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
             if time.monotonic() - last[0] > 2 or done == total:
                 last[0] = time.monotonic()
                 _set_phase(run_id, f"Preparing local copies: {done} of {total}")
+                _emit([f"[prepare]  local copies {done} of {total} ready (before the timer)"])
 
         prep = dataset.prepare_local_copies(chosen, workers=workers, progress=progress)
         selection.update(prep)
@@ -365,6 +410,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
             log(f"{run_id}: waiting until farmer photos are processed")
             gate.wait()
         _set_phase(run_id, "Loading the CNN")
+        _emit([f"[cnn]      loading and warming up the model (not measured), {len(ids)} photo(s) staged"])
         worker.warm_up()                        # model loading is not measured
         queue = _test_queue()
         _set_phase(run_id, "Processing", status="RUNNING")
@@ -381,6 +427,8 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
                     synchronize_session=False)
             s.commit()
         events = [{"run_id": run_id, "item_id": i} for i in ids]
+        _emit([f"[timer]    started — publishing {len(events)} event(s) to Kafka topic "
+               f"'{settings.SCALABILITY_KAFKA_TOPIC}' (the live topic '{settings.KAFKA_TOPIC}' is not touched)"])
         failures = queue.send_many(events)
         done = set()
         if failures:
@@ -407,7 +455,10 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
         finished = stdlib_queue.Queue()
         submitted = set()
         pending = {}                    # finished, not yet written to the database
-        last_change = last_flush = last_phase = time.monotonic()
+        last_change = last_flush = last_phase = last_progress = last_emit = time.monotonic()
+        live = []                       # console lines collected until the next write
+        received = 0                    # events consumed since the last write
+        was_paused = False
         with ThreadPoolExecutor(max_workers=max(1, settings.SCALABILITY_WORKERS)) as pool:
             while len(done) < len(ids):
                 if len(submitted) + len(failures) < len(ids):
@@ -416,6 +467,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
                         if event.get("run_id") != run_id or item_id not in paths or item_id in submitted:
                             continue            # another run's leftover, or a duplicate delivery
                         submitted.add(item_id)
+                        received += 1
                         pool.submit(handle, item_id, now_utc()).add_done_callback(
                             lambda f: finished.put(f.result()))
                     wait_s = 0.0
@@ -434,9 +486,34 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
                     last_change = now
                 if pending and (now - last_flush >= 0.5 or len(done) + len(pending) >= len(ids)):
                     _record(run_id, pending)
+                    if _live_mode != "off":
+                        if received:
+                            live.append(f"[kafka]    consumed {received} event(s) "
+                                        f"({len(submitted)} of {len(ids)} received)")
+                            received = 0
+                        if _live_mode == "photos":
+                            for n, (item_id, outcome) in enumerate(pending.items(), len(done) + 1):
+                                live.append(_photo_line(n, len(ids), item_id, outcome))
                     done.update(pending)
                     pending = {}
                     last_flush = now
+                if _live_mode != "off":
+                    if gate.paused != was_paused:
+                        was_paused = gate.paused
+                        live.append("[gate]     PAUSED — a farmer photo is being processed by the live "
+                                    "pipeline; it goes first" if was_paused else "[gate]     resumed")
+                    if now - last_progress >= PROGRESS_EVERY_S:
+                        last_progress = now
+                        elapsed = now - t0
+                        live.append(f"[progress] {len(done)}/{len(ids)} done  "
+                                    f"{len(done) / elapsed if elapsed > 0 else 0:.2f} photos/s  "
+                                    f"in workers {len(submitted) - len(done) - len(pending)}  "
+                                    f"waiting in Kafka {len(ids) - len(submitted) - len(failures)}  "
+                                    f"elapsed {elapsed:.1f}s")
+                    if live and (now - last_emit >= 0.5 or len(done) >= len(ids)):
+                        _emit(live)
+                        live = []
+                        last_emit = now
                 if now - last_phase >= 1.0:
                     last_phase = now
                     if gate.paused:
@@ -449,6 +526,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
                     log(f"{run_id}: no progress for {stall_seconds:.0f}s, stopping the wait")
                     break
         t1 = time.monotonic()
+        _emit(live)
         samples = monitor.stop()
         monitor = None
         gate.stop()
@@ -721,6 +799,30 @@ def _test_user_id(session) -> str:
 
 
 # --------------------------------------------------------------- CLI
+class _Tee:
+    """stdout that also goes to a log file — a run shown in a console window
+    keeps the log file it would have had when started in the background."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, text):
+        for st in self.streams:
+            st.write(text)
+        return len(text)
+
+    def flush(self):
+        for st in self.streams:
+            st.flush()
+
+
+def _tee_to(path: str) -> None:
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "a", encoding="utf-8", buffering=1)
+    sys.stdout = _Tee(sys.stdout, f)
+    sys.stderr = _Tee(sys.stderr, f)
+
+
 def _main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -740,6 +842,14 @@ def _main(argv=None) -> int:
     st.add_argument("--stall-minutes", type=float, default=10,
                     help="stop waiting after this long without a single photo finishing")
     st.add_argument("--run-id", help=argparse.SUPPRESS)
+    st.add_argument("--live", choices=LIVE_MODES, default="photos",
+                    help="what to show while it runs: one line per photo (default), "
+                         "only progress lines (for very large runs), or nothing")
+    for c in (sp, st):
+        c.add_argument("--log-file", help="also write everything shown here to this file")
+        c.add_argument("--keep-open", action="store_true",
+                       help="wait for Enter before exiting (a console window opened by the dashboard "
+                            "stays readable after the test)")
     for name in ("report", "cleanup", "delete"):
         c = sub.add_parser(name)
         c.add_argument("--run-id", required=True)
@@ -748,6 +858,16 @@ def _main(argv=None) -> int:
                            help="also move a legacy run's result folder in Drive to the trash")
     sub.add_parser("list")
     args = p.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):         # "—" in the live lines, any console / log
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+    if getattr(args, "keep_open", False) and sys.platform == "win32":
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleTitleW(f"EWS-ScalabilityTest ({args.cmd})")
+    if getattr(args, "live", None):
+        set_live(args.live)
+    if getattr(args, "log_file", None):
+        _tee_to(args.log_file)
 
     init_db()
     try:
@@ -784,8 +904,24 @@ def _main(argv=None) -> int:
                           f"execution={sm.get('execution_seconds')}s")
     except RunError as e:
         print(f"ERROR: {e}", file=sys.stderr)
+        _wait_for_enter(args)
         return 1
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        _wait_for_enter(args)
+        return 1
+    _wait_for_enter(args)
     return 0
+
+
+def _wait_for_enter(args) -> None:
+    if getattr(args, "keep_open", False):
+        try:
+            input("\nTest finished — results are on the dashboard's Scalability Test page. "
+                  "Press Enter to close this window.")
+        except EOFError:
+            pass
 
 
 if __name__ == "__main__":
