@@ -127,3 +127,43 @@ def test_empty_db_still_returns_expected_columns():
     assert df.empty
     assert "image_id" in df.columns
     assert "prediction_id" not in df.columns
+
+
+def _seed_predictions(rows):
+    """rows: (location, predicted_class or None, predicted_at UTC or None)."""
+    with SessionLocal() as s:
+        s.add(User(user_id="u1", username="farmer", email="farmer@example.com",
+                   password_hash="x", role=Role.USER))
+        for n, (location, cls, when) in enumerate(rows):
+            s.add(Image(image_id=f"img{n}", user_id="u1", location=location, image_path=f"x{n}.jpg",
+                        uploaded_at=when or datetime.now(timezone.utc), status=ProcessingStatus.COMPLETED))
+            if cls:
+                s.add(Prediction(image_id=f"img{n}", predicted_class=cls, prediction_confidence=0.9,
+                                 risk_score=0.5, risk_level=RiskLevel.MEDIUM, predicted_at=when))
+        s.commit()
+
+
+def test_disease_trend_by_location_counts_per_municipality_day_and_disease():
+    utc = timezone.utc
+    _seed_predictions([
+        ("Dili", "healthy", datetime(2026, 10, 9, 10, 0, tzinfo=utc)),       # 9 Oct 19:00 TLT
+        ("Dili", "common_rust", datetime(2026, 10, 9, 16, 30, tzinfo=utc)),  # 10 Oct 01:30 TLT (UTC+9)
+        ("Dili", "common_rust", datetime(2026, 10, 10, 2, 0, tzinfo=utc)),   # 10 Oct 11:00 TLT
+        ("Baucau", "gray_leaf_spot", datetime(2026, 10, 10, 2, 0, tzinfo=utc)),
+        (None, "healthy", datetime(2026, 10, 10, 2, 0, tzinfo=utc)),
+        ("Ermera", None, None),                                                # no prediction: not counted
+    ])
+    out = analytics.disease_trend_by_location()
+    rows = {(r.location, r.day.strftime("%Y-%m-%d"), r.predicted_class): r.photos for r in out.itertuples()}
+    assert rows == {
+        ("Baucau", "2026-10-10", "gray_leaf_spot"): 1,
+        ("Dili", "2026-10-09", "healthy"): 1,
+        ("Dili", "2026-10-10", "common_rust"): 2,          # both on the Timor-Leste date 10 Oct
+        (analytics.UNKNOWN_LOCATION, "2026-10-10", "healthy"): 1,
+    }
+    assert list(out.columns) == ["location", "day", "predicted_class", "photos"]
+
+
+def test_disease_trend_by_location_empty():
+    out = analytics.disease_trend_by_location()
+    assert out.empty and list(out.columns) == ["location", "day", "predicted_class", "photos"]

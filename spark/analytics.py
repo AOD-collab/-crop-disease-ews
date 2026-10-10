@@ -186,6 +186,27 @@ def disease_trend() -> pd.DataFrame:
     return df.sort_values("predicted_at")[["predicted_at", "location", "predicted_class"]]
 
 
+def disease_trend_by_location(df: pd.DataFrame = None) -> pd.DataFrame:
+    """Per municipality, per day (Timor-Leste Time) and per disease: how
+    many photos the CNN classified — the Analytics page's "Disease trend by
+    municipality". Columns: location, day, predicted_class, photos. Photos
+    without a location are grouped under UNKNOWN_LOCATION; photos without a
+    prediction don't count. Sorted by location, then day."""
+    df = images_with_predictions() if df is None else df
+    done = df.dropna(subset=["predicted_at", "predicted_class"])
+    cols = ["location", "day", "predicted_class", "photos"]
+    if done.empty:
+        return pd.DataFrame(columns=cols)
+    location = done["location"].fillna("").astype(str).str.strip().replace("", UNKNOWN_LOCATION)
+    when = pd.to_datetime(done["predicted_at"])
+    if when.dt.tz is not None:
+        when = when.dt.tz_localize(None)            # keep the Timor-Leste wall-clock date
+    day = when.dt.normalize()
+    out = (done.assign(location=location, day=day)
+           .groupby(["location", "day", "predicted_class"]).size().reset_index(name="photos"))
+    return out.sort_values(["location", "day", "predicted_class"]).reset_index(drop=True)[cols]
+
+
 def location_summary() -> pd.DataFrame:
     df = images_with_predictions()
     if df.empty:

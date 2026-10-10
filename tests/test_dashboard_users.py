@@ -346,3 +346,16 @@ def test_open_session_ends_when_admin_is_deactivated():
     assert not at.exception, at.exception
     assert "admin_user" not in at.session_state
     assert any("sign in again" in w.value for w in at.warning)
+
+
+def test_analytics_shows_disease_trend_per_municipality_not_risk_trend(drive):
+    _seed_admin_and_farmer()
+    share("farmer1@gmail.com")
+    image_id, _ = drive.phone_upload("farmer1@gmail.com", make_leaf_jpeg_bytes())
+    _scan()
+    _run_spark(_event_for(image_id))
+    at = _logged_in("Analytics")
+    headers = [h.value for h in at.subheader]
+    assert any("Disease Trend by Municipality" in h for h in headers)
+    assert not any(h.endswith("Risk Trend") for h in headers)
+    assert any("Photos per disease per day" in c.value for c in at.caption)

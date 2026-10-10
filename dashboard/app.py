@@ -317,7 +317,7 @@ _PAGE_HEAD = {
     "Images": ("Image management", "Find, compare and track every farmer photo, and manage the local photo "
                                    "cache."),
     "Risk Alerts": ("Risk alerts", "Leaves rated high risk, newest first."),
-    "Analytics": ("Analytics", "Disease and risk trends by municipality over time."),
+    "Analytics": ("Analytics", "Disease trends in every municipality over time, and the overall risk picture."),
     "Performance": ("Performance", "How long each step of the pipeline takes."),
     "System Status": ("System status", "Whether every part of the pipeline is running right now."),
     "Label Photos": ("Label photos", "Put farmer photos in the right disease class so the next training learns from them."),
@@ -1000,14 +1000,25 @@ elif page == "Analytics":
                 ].sort_values("predicted_at", ascending=False),
                 use_container_width=True, column_config=TIME_COLUMNS,
             )
-    rt = analytics.risk_trend()
+    # Disease trend in every municipality (replaced the risk-score trend):
+    # photos per disease per day, one panel per municipality.
+    rt = analytics.disease_trend_by_location(df)
     if not rt.empty:
-        st.subheader("📈 Risk Trend")
-        st.plotly_chart(
-            px.line(rt, x="predicted_at", y="risk_score", color="location", markers=True,
-                    color_discrete_sequence=CATEGORICAL_HUES),
-            use_container_width=True,
-        )
+        st.subheader("📈 Disease Trend by Municipality")
+        places = rt.groupby("location")["photos"].sum().sort_values(ascending=False).index.tolist()
+        st.caption(f"Photos per disease per day (Timor-Leste Time) in each of the {len(places)} "
+                   f"municipalit{'y' if len(places) == 1 else 'ies'}, most photos first. Each panel has its "
+                   "own scale so small municipalities stay readable — compare panels by their numbers.")
+        fig = px.bar(rt, x="day", y="photos", color="predicted_class", facet_col="location",
+                     facet_col_wrap=3, category_orders={"location": places},
+                     color_discrete_map=DISEASE_COLOR_MAP, color_discrete_sequence=CATEGORICAL_HUES,
+                     labels={"day": "Day", "photos": "Photos", "predicted_class": "Disease"},
+                     height=max(320, 260 * -(-len(places) // 3)), facet_row_spacing=0.12)
+        fig.for_each_annotation(lambda a: a.update(text=a.text.split("=", 1)[-1]))   # "location=Dili" -> "Dili"
+        fig.update_yaxes(matches=None, showticklabels=True)
+        fig.update_xaxes(showticklabels=True, tickformat="%d/%m", dtick="D1")
+        fig.update_layout(barmode="stack", legend_title_text="Disease")
+        st.plotly_chart(fig, use_container_width=True)
     rdist = analytics.risk_distribution()
     if not rdist.empty:
         st.subheader("🥧 Risk Distribution")
