@@ -50,7 +50,7 @@ from storage.database import (  # noqa: E402
     SessionLocal, init_db, Image, User, Role, UserStatus, ProcessingStatus, ProcessingMode,
     RejectedEvent, get_processing_mode, now_utc,
 )
-from storage.pipeline_submit import submit_image_for_processing  # noqa: E402
+from storage.pipeline_submit import submit_image_for_processing, UPLOAD_REJECTED_PREFIX  # noqa: E402
 from api.image_storage import to_drive_path  # noqa: E402
 from api.auth import hash_password, normalize_email  # noqa: E402
 
@@ -228,7 +228,7 @@ def register_drive_file(meta: dict, backend=None, folder_email: str = None) -> d
 
         if problems:
             image.status = ProcessingStatus.FAILED
-            image.error_message = "Upload rejected: " + "; ".join(problems)
+            image.error_message = UPLOAD_REJECTED_PREFIX + "; ".join(problems)
             session.commit()
             print(f"[drive_watcher] {image_id} rejected: {image.error_message}")
             session.close()

@@ -30,7 +30,8 @@ from storage.database import (
     SCALE_TEST_USERNAME,
 )
 from storage.reset import factory_reset
-from storage.pipeline_submit import submit_image_for_processing
+from storage.pipeline_submit import submit_image_for_processing, is_upload_rejected
+from storage.requeue_stuck import count_owed
 from config.localtime import format_local, now_local
 
 # Table columns: same "28/09/2026 21:37" Timor-Leste Time as everywhere else.
@@ -159,11 +160,14 @@ def _login_form():
         session = SessionLocal()
         try:
             user = session.query(User).filter(User.username == username).first()
-            if user is None or not verify_password(password, user.password_hash):
+            if user is None or not verify_password(password, user.password_hash) or user.is_deleted:
                 st.error("Invalid username or password.")
                 return
             if user.role != Role.ADMIN:
                 st.error("This dashboard is for ADMIN accounts only.")
+                return
+            if user.status != UserStatus.ACTIVE:
+                st.error("This account is not active.")
                 return
             st.session_state["admin_user"] = {"user_id": user.user_id, "username": user.username}
             st.rerun()
@@ -172,6 +176,20 @@ def _login_form():
 
 
 _inject_style()
+
+def _admin_still_allowed(user_id: str) -> bool:
+    """Re-checked on every page load: an admin deleted, deactivated or
+    demoted after signing in loses the open dashboard session too (the
+    login form alone used to be the only check)."""
+    with SessionLocal() as s:
+        user = s.get(User, user_id)
+        return (user is not None and not user.is_deleted
+                and user.role == Role.ADMIN and user.status == UserStatus.ACTIVE)
+
+
+if "admin_user" in st.session_state and not _admin_still_allowed(st.session_state["admin_user"]["user_id"]):
+    del st.session_state["admin_user"]
+    st.warning("Your admin access was removed or deactivated. Please sign in again.")
 
 if "admin_user" not in st.session_state:
     login_screen()
@@ -490,9 +508,12 @@ def _system_status() -> dict:
             pending = s_.query(Image).filter(Image.status == ProcessingStatus.PENDING_REVIEW).count()
             failed = (s_.query(Image).filter(Image.status == ProcessingStatus.FAILED,
                                              Image.uploaded_at >= now_utc() - timedelta(hours=24)).count())
+            undelivered = count_owed(s_)["undelivered"]
         lines = [f"{stuck} photo(s) waiting longer than 2 minutes",
                  f"{pending} photo(s) held for review (manual mode)",
-                 f"{failed} failed in the last 24 hours"]
+                 f"{failed} failed in the last 24 hours",
+                 f"{undelivered} finished result(s) not delivered to the farmer's Google Drive"]
+        stuck += undelivered
         if stuck:
             lines.append("To re-send them: `python -m storage.requeue_stuck --all`")
         out["backlog"] = ("warn" if stuck else "ok", lines)
@@ -501,7 +522,9 @@ def _system_status() -> dict:
     return out
 
 
-df = load_data()
+# Only the pages below use the full images x predictions table; the others
+# no longer load it on every rerun.
+df = load_data() if page in ("Overview", "Real-Time Monitoring", "Risk Alerts", "Analytics") else None
 
 if page == "Overview":
     # Real numbers only. The mockup this page's layout follows also shows
@@ -622,7 +645,10 @@ if page == "Overview":
                     # Only offer "Reprocess" where it actually means
                     # something — there's no "Flag for Review" feature in
                     # this system, so that mockup action isn't reproduced.
-                    if img.status in (ProcessingStatus.FAILED, ProcessingStatus.PENDING_REVIEW):
+                    # Not for an upload the Drive watcher refused (inactive
+                    # account, someone else's folder, ...): that stays refused.
+                    if (img.status in (ProcessingStatus.FAILED, ProcessingStatus.PENDING_REVIEW)
+                            and not is_upload_rejected(img)):
                         if st.button("Reprocess", icon="🔄", key=f"reprocess_{img.image_id}"):
                             try:
                                 submit_image_for_processing(session, img)

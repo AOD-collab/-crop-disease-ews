@@ -84,6 +84,23 @@ def test_missing_checkpoint_fails_loudly(monkeypatch, tmp_path):
 def test_trained_backend_model_version_is_just_the_filename(trained_backend):
     """Bug fix: model_version() used to store the FULL weights path (e.g.
     'cnn-resnet18:A:\\final\\...\\saved_model_cnn.pt' on Windows) instead of
-    just the filename."""
+    just the filename. It also used to hard-code "resnet18" (the deployed
+    model is an SE-ResNet-18) and was identical for every deploy; now the
+    architecture and deploy time come from the loaded checkpoint."""
+    import torch
+    checkpoint = torch.load(WEIGHTS_PATH, map_location="cpu", weights_only=False)
     version = inference.model_version()
-    assert version == "cnn-resnet18:saved_model_cnn.pt"
+    arch = checkpoint.get("architecture", "resnet18")
+    assert version.startswith(f"cnn-{arch}:saved_model_cnn.pt@")
+    assert str(WEIGHTS_PATH.parent) not in version
+    if checkpoint.get("deployed_at"):
+        assert version.endswith("@" + checkpoint["deployed_at"])
+
+
+def test_model_version_falls_back_without_a_checkpoint(monkeypatch, tmp_path):
+    monkeypatch.setitem(IMAGE_MODEL, "weights_path", str(tmp_path / "missing.pt"))
+    inference._load_trained_model.cache_clear()
+    try:
+        assert inference.model_version() == "cnn-resnet18:missing.pt"
+    finally:
+        inference._load_trained_model.cache_clear()

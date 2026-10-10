@@ -25,10 +25,14 @@ This tool finds those rows and gets them unstuck. Two modes:
                checkpoint involved. Use this for a one-shot backfill of
                events that are genuinely gone from Kafka.
 
-Only non-terminal rows are ever touched (INGESTED, UPLOADED, and — with
---include-failed — rows that FAILED specifically at the Kafka-publish
-step). COMPLETED images are never re-queued, so --inline cannot create a
-duplicate prediction for an already-processed image.
+Rows touched: non-terminal ones (INGESTED, UPLOADED, PROCESSING — the
+last is a photo Spark stopped in the middle of), COMPLETED Google Drive
+photos whose result never reached the farmer's Drive folder
+(result_published_at is empty: the Drive upload failed after the result was
+saved), and — with --include-failed — rows that FAILED specifically at the
+Kafka-publish step or at finding the file. Re-sending any of them is safe:
+saving a prediction again replaces the old one (persist_result), and Spark
+uploads the result to Drive again.
 
 Examples
 --------
@@ -42,13 +46,19 @@ import argparse
 import sys
 from datetime import timedelta
 
+from sqlalchemy import and_, or_
+
 from storage.database import (
     SessionLocal, Image, ProcessingStatus, now_utc, init_db, SCALE_TEST_SOURCE,
 )
-from api.image_storage import resolve_image_path, to_stored_path, is_drive_path, drive_file_id_from_path
+from api.image_storage import (
+    resolve_image_path, to_stored_path, is_drive_path, drive_file_id_from_path, DRIVE_PATH_PREFIX,
+)
 
 # Statuses that mean "the pipeline still owes this image a result".
-STUCK_STATUSES = {ProcessingStatus.INGESTED, ProcessingStatus.UPLOADED}
+# PROCESSING: Spark stopped in the middle of the photo; its Kafka event may be
+# gone (topic wiped / checkpoint reset), so nothing would ever finish it.
+STUCK_STATUSES = {ProcessingStatus.INGESTED, ProcessingStatus.UPLOADED, ProcessingStatus.PROCESSING}
 
 # FAILED rows worth retrying with --include-failed: the failure was in the
 # transport or in locating the file, not in the image itself — a retry
@@ -74,27 +84,52 @@ def _event_from_image(img: Image) -> dict:
     }
 
 
+def result_not_delivered():
+    """SQL condition: a COMPLETED Google Drive photo whose result never
+    reached the farmer's Drive folder. spark/preprocessing.
+    publish_result_to_drive_safely only logs a Drive failure, so without
+    this the phone would wait for that result forever."""
+    return and_(Image.status == ProcessingStatus.COMPLETED,
+                Image.result_published_at.is_(None),
+                Image.image_path.like(DRIVE_PATH_PREFIX + "%"))
+
+
+def _not_scale_test():
+    # belongs to a scalability-test run; re-sending it would skew that run
+    return or_(Image.source.is_(None), Image.source != SCALE_TEST_SOURCE)
+
+
 def find_stuck(session, older_than_seconds: int, include_failed: bool, ignore_age: bool):
-    rows = session.query(Image).all()
     cutoff = now_utc() - timedelta(seconds=older_than_seconds)
+    eligible = [Image.status.in_(STUCK_STATUSES), result_not_delivered()]
+    if include_failed:
+        eligible.append(and_(Image.status == ProcessingStatus.FAILED,
+                             or_(*[Image.error_message.like(m + "%") for m in _RETRYABLE_FAILURE_MARKERS])))
+    # Filtered in the database: this used to load every image row and test
+    # each one in Python.
+    rows = session.query(Image).filter(_not_scale_test(), or_(*eligible)).all()
     out = []
     for img in rows:
-        if img.source == SCALE_TEST_SOURCE:
-            continue  # belongs to a scalability-test run; re-sending it would skew that run
-        eligible = img.status in STUCK_STATUSES
-        if include_failed and img.status == ProcessingStatus.FAILED:
-            msg = img.error_message or ""
-            eligible = eligible or any(msg.startswith(m) for m in _RETRYABLE_FAILURE_MARKERS)
-        if not eligible:
-            continue
         if not ignore_age:
-            stamp = img.ingested_at or img.uploaded_at or img.created_at
+            if img.status == ProcessingStatus.COMPLETED:
+                stamp = img.processed_at or img.ingested_at   # its Drive upload may still be running
+            else:
+                stamp = img.ingested_at or img.uploaded_at or img.created_at
             # stored naive-UTC in SQLite; compare on the same basis
             stamp_cmp = stamp.replace(tzinfo=cutoff.tzinfo) if stamp and stamp.tzinfo is None else stamp
             if stamp_cmp and stamp_cmp > cutoff:
                 continue
         out.append(img)
     return out
+
+
+def count_owed(session, older_than_seconds: int = 120) -> dict:
+    """{"waiting": photos the pipeline still owes a result, "undelivered":
+    COMPLETED Drive photos whose result never reached Drive}, counting only
+    rows older than `older_than_seconds` — what find_stuck would pick up."""
+    owed = find_stuck(session, older_than_seconds, include_failed=False, ignore_age=False)
+    undelivered = sum(1 for i in owed if i.status == ProcessingStatus.COMPLETED)
+    return {"waiting": len(owed) - undelivered, "undelivered": undelivered}
 
 
 def _mark_failed(session, image_id: str, message: str):
@@ -223,7 +258,9 @@ def main() -> int:
         view = [
             session.get(Image, s.image_id) for s in stuck
         ]
-        summary = [(i.image_id, i.status.value) for i in view]
+        summary = [(i.image_id, i.status.value + (" (result not in Drive yet)"
+                                                  if i.status == ProcessingStatus.COMPLETED else ""))
+                   for i in view]
 
     if not summary:
         print("No stuck images found. Nothing to do.")

@@ -212,7 +212,7 @@ def _model_ops(*args: str) -> dict:
     imported into the dashboard process once pandas/pyarrow are loaded
     (see that module's docstring)."""
     result = subprocess.run([sys.executable, "-m", "dashboard.model_ops", *args], cwd=BASE_DIR,
-                            capture_output=True, text=True, timeout=300)
+                            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     if result.returncode != 0:
         raise RuntimeError((result.stderr.strip().splitlines() or ["model_ops failed"])[-1])
     return json.loads(result.stdout.strip().splitlines()[-1])

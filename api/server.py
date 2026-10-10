@@ -47,7 +47,10 @@ from api.auth import (
 )
 from api.deps import get_db, get_current_user, require_admin, assert_owns_image
 from api.exif_utils import extract_captured_at
-from api.image_storage import save_image, InvalidImage, resolve_image_path, compute_content_hash
+from api.image_storage import (
+    save_image, InvalidImage, resolve_image_path, compute_content_hash,
+    is_drive_path, downloaded_photo_path, load_image_bytes,
+)
 from api import verification as vcode
 from api.mailer import send_verification_email, EmailSendError
 from api.rate_limit import allow as rate_limit_allow
@@ -715,19 +718,35 @@ def get_image_file(
         raise HTTPException(404, "Image not found")
     assert_owns_image(image, user)
 
-    try:
-        path = resolve_image_path(image.image_path)
-    except FileNotFoundError:
-        raise HTTPException(404, "Image file not found on disk")
+    if is_drive_path(image.image_path):
+        # A Google Drive upload has no file under IMAGE_STORAGE_PATH (this
+        # used to answer 404 for every one of them): serve Spark's kept local
+        # copy, else the photo from Drive.
+        path = downloaded_photo_path(image.user_id, image.image_id)
+        if path is None:
+            try:
+                original = load_image_bytes(image.image_path)
+            except FileNotFoundError:
+                raise HTTPException(404, "Image file not found in Google Drive")
+            except Exception as e:  # noqa: BLE001 - Drive not configured / unreachable
+                raise HTTPException(502, f"Could not fetch the image from Google Drive: {e}")
+    else:
+        try:
+            path = resolve_image_path(image.image_path)
+        except FileNotFoundError:
+            raise HTTPException(404, "Image file not found on disk")
 
     if not max_size:
+        if path is None:
+            media = "image/png" if original.startswith(b"\x89PNG") else "image/jpeg"
+            return Response(content=original, media_type=media)
         return FileResponse(str(path))
 
     max_size = max(16, min(max_size, _MAX_THUMBNAIL_SIZE))
     from io import BytesIO
     from PIL import Image as PILImage
 
-    with PILImage.open(path) as im:
+    with PILImage.open(path if path is not None else BytesIO(original)) as im:
         im.thumbnail((max_size, max_size))
         buf = BytesIO()
         im.convert("RGB").save(buf, format="JPEG", quality=80)

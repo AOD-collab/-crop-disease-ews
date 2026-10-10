@@ -70,7 +70,7 @@ from config.settings import (
 )
 from spark.preprocessing import (
     process_event, persist_result, mark_processing, InvalidEvent, publish_result_to_drive_safely,
-    already_completed, needs_result_upload, held_for_review,
+    replay_state,
 )
 from storage.database import ProcessingStatus, init_db
 
@@ -170,8 +170,11 @@ def foreach_batch_sink(batch_df, batch_id):
         with ThreadPoolExecutor(max_workers=min(SPARK_PARALLEL_PHOTOS, len(events))) as pool:
             uploads = list(pool.map(_process_one, events))
     # The batch (and its Kafka offsets) only commits once every photo's
-    # result is in the database AND in Drive, so a crash can't lose a
-    # phone's result: Spark replays the batch instead.
+    # result is in the database and its Drive upload has been ATTEMPTED, so
+    # a crash can't lose a phone's result: Spark replays the batch instead.
+    # An upload that failed (Drive down) only logs; the photo is left
+    # COMPLETED with result_published_at empty, which System Status counts
+    # and `python -m storage.requeue_stuck` re-sends.
     for upload in uploads:
         if upload is not None:
             upload.result()
@@ -199,15 +202,16 @@ def _process_one(event: dict):
         print(f"[streaming_job] {event.get('image_id')} is a scalability-test event "
               f"(run {event.get('run_id')}), skipping")
         return None
-    if held_for_review(event.get("image_id")):
+    state = replay_state(event.get("image_id"))      # one lookup instead of three
+    if state == "held":
         # MANUAL mode holds this photo; an admin's Process sets it INGESTED
         # before publishing, so this is an old event (a replay) — skip it.
         print(f"[streaming_job] {event.get('image_id')} is held for manual review, skipping old event")
         return None
-    if already_completed(event.get("image_id")):
-        if not needs_result_upload(event.get("image_id")):
-            print(f"[streaming_job] {event.get('image_id')} already COMPLETED, skipping replayed event")
-            return None
+    if state == "completed":
+        print(f"[streaming_job] {event.get('image_id')} already COMPLETED, skipping replayed event")
+        return None
+    if state == "result_missing":
         # Saved, but its result never reached Drive (Spark stopped mid-upload):
         # do it again — saving the prediction again is idempotent.
         print(f"[streaming_job] {event.get('image_id')} COMPLETED but not in Drive yet, processing again")

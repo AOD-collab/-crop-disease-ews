@@ -305,3 +305,44 @@ def test_pending_review_auto_refresh_watches_held_photos(drive, monkeypatch):
     text = _all_text(at)
     assert "1** image(s) awaiting processing" in text
     assert "Checks for new uploads every 5s" in text
+
+
+# ----------------------------------------------------------- admin login rules
+def _try_login(username="admin", password="adminpass1"):
+    at = AppTest.from_file(DASHBOARD_APP_PATH, default_timeout=60)
+    at.run()
+    at.text_input[0].input(username).run()
+    at.text_input[1].input(password).run()
+    at.button[0].click().run()
+    assert not at.exception, at.exception
+    return at
+
+
+@pytest.mark.parametrize("change,message", [
+    ({"is_deleted": True}, "Invalid username or password."),
+    ({"status": UserStatus.INACTIVE}, "This account is not active."),
+    ({"status": UserStatus.SUSPENDED}, "This account is not active."),
+])
+def test_deleted_or_inactive_admin_cannot_log_in(change, message):
+    _seed_admin_and_farmer()
+    with SessionLocal() as s:
+        admin = s.query(User).filter(User.username == "admin").one()
+        for k, v in change.items():
+            setattr(admin, k, v)
+        s.commit()
+    at = _try_login()
+    assert "admin_user" not in at.session_state
+    assert any(message in e.value for e in at.error)
+
+
+def test_open_session_ends_when_admin_is_deactivated():
+    _seed_admin_and_farmer()
+    at = _logged_in("Overview")
+    assert "admin_user" in at.session_state
+    with SessionLocal() as s:
+        s.query(User).filter(User.username == "admin").one().status = UserStatus.INACTIVE
+        s.commit()
+    at.run()
+    assert not at.exception, at.exception
+    assert "admin_user" not in at.session_state
+    assert any("sign in again" in w.value for w in at.warning)

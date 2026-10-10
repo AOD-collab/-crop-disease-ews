@@ -445,7 +445,12 @@ def set_processing_mode(session, mode) -> ProcessingMode:
 # Engine / session
 # ----------------------------------------------------------------------
 _connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, connect_args=_connect_args, future=True)
+# pool_pre_ping (PostgreSQL): Spark, the Drive watcher and the dashboard run for
+# days; after the Postgres container restarts, every pooled connection is dead
+# and its next use failed — a photo was marked FAILED, a watcher scan aborted.
+# The ping (one round trip on checkout) replaces a dead connection instead.
+engine = create_engine(DATABASE_URL, connect_args=_connect_args, future=True,
+                       pool_pre_ping=not DATABASE_URL.startswith("sqlite"))
 
 if DATABASE_URL.startswith("sqlite"):
     @event.listens_for(engine, "connect")

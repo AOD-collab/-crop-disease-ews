@@ -48,6 +48,7 @@ What predict() returns, all from the model's class probabilities:
 """
 
 import hashlib
+import itertools
 import os
 import threading
 from collections import OrderedDict
@@ -67,6 +68,10 @@ class ModelNotAvailable(Exception):
 
 _model_cache = {"key": None, "value": None}
 _model_cache_lock = threading.Lock()
+# Numbers each loaded model, so the input cache below can't hand a reloaded
+# model a tensor prepared for the previous one (id() of a freed dict can be
+# reused by the next).
+_load_generation = itertools.count(1)
 
 
 def _load_trained_model():
@@ -181,12 +186,21 @@ def _load_checkpoint(weights_path: str):
     print(f"[ml.inference] Loaded trained model from '{weights_path}' "
           f"(classes: {class_names}) on {_device_name(torch, device)}")
 
+    # Which deploy this is: a deploy keeps the same file name, so the name
+    # alone can't tell two models apart in predictions.model_version.
+    deployed = checkpoint.get("deployed_at") or checkpoint.get("source_modified_at")
+    if not deployed:
+        from datetime import datetime
+        deployed = datetime.fromtimestamp(os.path.getmtime(weights_path)).isoformat(timespec="seconds")
+
     return {
         "model": model,
         "device": device,
         "preprocess": preprocess,
         "class_names": class_names,
         "healthy_class_name": healthy_class_name,
+        "version": f"cnn-{architecture}:{Path(weights_path).name}@{deployed}",
+        "generation": next(_load_generation),
     }
 
 
@@ -207,7 +221,7 @@ def _prepared_input(loaded, image_bytes: bytes):
     from io import BytesIO
     from PIL import Image, ImageOps
 
-    key = (id(loaded), hashlib.sha1(image_bytes).digest())
+    key = (loaded.get("generation", id(loaded)), hashlib.sha1(image_bytes).digest())
     with _input_cache_lock:
         hit = _input_cache.get(key)
         if hit is not None:
@@ -502,6 +516,13 @@ def model_input_image(image_bytes: bytes):
 
 def model_version() -> str:
     """A short string identifying which model produced a prediction, stored
-    in predictions.model_version for traceability/reproducibility."""
-    weights_path = IMAGE_MODEL["weights_path"]
-    return f"cnn-resnet18:{Path(weights_path).name}"
+    in predictions.model_version for traceability/reproducibility:
+    "cnn-<architecture>:<file name>@<deployed_at>", from the checkpoint that
+    is actually loaded. It used to be the hard-coded "cnn-resnet18:<file
+    name>", wrong for the deployed SE-ResNet-18 and the same for every
+    deploy. Without a usable checkpoint, the old form is returned (no
+    prediction can be made then anyway)."""
+    try:
+        return _load_trained_model()["version"]
+    except Exception:  # noqa: BLE001 - e.g. ModelNotAvailable, or a stub model in a test
+        return f"cnn-resnet18:{Path(IMAGE_MODEL['weights_path']).name}"

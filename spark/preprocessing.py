@@ -467,6 +467,30 @@ def held_for_review(image_id: str) -> bool:
         session.close()
 
 
+def replay_state(image_id: str):
+    """held_for_review / already_completed / needs_result_upload in ONE
+    database lookup, for the Spark sink's check on every event (each of
+    those opens its own session: ~3 ms per lookup on the Docker
+    PostgreSQL). Returns "held", "completed", "result_missing" (COMPLETED
+    but its result never reached Drive) or None (process it)."""
+    if not image_id:
+        return None
+    session = SessionLocal()
+    try:
+        image = session.get(Image, image_id)
+        if image is None:
+            return None
+        if image.status == ProcessingStatus.PENDING_REVIEW:
+            return "held"
+        if image.status == ProcessingStatus.COMPLETED:
+            if is_drive_path(image.image_path) and image.result_published_at is None:
+                return "result_missing"
+            return "completed"
+        return None
+    finally:
+        session.close()
+
+
 def mark_processing(image_id: str) -> None:
     """Flips an Image to PROCESSING right before inference starts, so a
     long-running CNN call is visible in the dashboard as in-flight rather

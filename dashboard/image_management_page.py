@@ -22,6 +22,7 @@ import streamlit as st
 from config.localtime import format_local, now_local
 from storage import image_cache, image_catalog, reviews
 from storage.database import SessionLocal, Image, ProcessingStatus
+from storage.pipeline_submit import UPLOAD_REJECTED_PREFIX
 from storage.image_catalog import CatalogFilters, NO_PREDICTION, NO_RISK
 
 PAGE_SIZE = 12
@@ -218,7 +219,9 @@ def _details(image_id: str, processed_image):
                       "Result delivered to the farmer": _when(row["result_published_at"])})
             if row["error_message"]:
                 st.error(f"Processing error: {row['error_message']}")
-            if row["status"] == "FAILED" and st.button("Retry processing", icon="🔄", key="im_retry"):
+            if (row["status"] == "FAILED"
+                    and not (row["error_message"] or "").startswith(UPLOAD_REJECTED_PREFIX)
+                    and st.button("Retry processing", icon="🔄", key="im_retry")):
                 _retry(row["image_id"])
         with files, st.container(border=True):
             st.markdown("**Local copy and duplicates**")

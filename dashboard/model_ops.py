@@ -149,6 +149,13 @@ def train_and_deploy(cfg: dict) -> int:
 
 
 if __name__ == "__main__":
+    # The run log and the page's JSON reader expect UTF-8 ("—" in the
+    # Auto-deploy lines). Without this, a redirected stdout on Windows is
+    # cp1252 unless whoever started us set PYTHONIOENCODING, and the log
+    # could no longer be decoded as UTF-8.
+    for _stream in (sys.stdout, sys.stderr):
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8")
     command, *args = sys.argv[1:]
     if command == "info":
         result = info(args[0])

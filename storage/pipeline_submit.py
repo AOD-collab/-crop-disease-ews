@@ -38,6 +38,21 @@ def build_upload_event(image) -> dict:
     }
 
 
+# error_message prefix kafka/drive_watcher.register_drive_file gives an upload
+# it refused (inactive account, not the farmer's own folder, wrong type/size).
+UPLOAD_REJECTED_PREFIX = "Upload rejected: "
+
+
+class NotResubmittable(ValueError):
+    """The image was refused at upload time; sending it to the pipeline
+    would analyse a photo the system decided not to accept."""
+
+
+def is_upload_rejected(image) -> bool:
+    return (image.status == ProcessingStatus.FAILED
+            and (image.error_message or "").startswith(UPLOAD_REJECTED_PREFIX))
+
+
 def submit_image_for_processing(session, image, backend=None) -> None:
     """Publish `image`'s upload event and mark it INGESTED, committing on
     `session`. On a publish failure the row is marked FAILED (same contract
@@ -47,7 +62,13 @@ def submit_image_for_processing(session, image, backend=None) -> None:
     `backend` defaults to kafka.producer.get_backend(KAFKA_TOPIC); callers
     that already hold a backend (e.g. the API's cached singleton) should
     pass it.
+
+    Raises NotResubmittable (nothing changed) for an upload the Drive watcher
+    rejected: the dashboard's Reprocess / Retry used to send those through
+    anyway, bypassing the watcher's account and folder checks.
     """
+    if is_upload_rejected(image):
+        raise NotResubmittable(f"{image.error_message} — this upload can't be processed")
     backend = backend or get_backend(KAFKA_TOPIC)
     # Mark INGESTED and commit BEFORE publishing: Spark can then never
     # finish the image before this commit lands and have its COMPLETED/

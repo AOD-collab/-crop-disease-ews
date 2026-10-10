@@ -159,20 +159,17 @@ def spark_streaming_alive() -> bool:
     return "spark.streaming_job" in out or "spark/streaming_job.py" in out
 
 
-def count_stuck_images() -> int | None:
-    """How many images are sitting in a non-terminal state (INGESTED /
-    UPLOADED) — i.e. ingested but never processed. Returns None if the DB
-    can't be read for any reason (don't let a reporting nicety break the
-    launcher)."""
+def count_stuck_images() -> dict | None:
+    """{"waiting": photos the pipeline still owes a result (UPLOADED /
+    INGESTED / PROCESSING), "undelivered": COMPLETED Drive photos whose result
+    never reached Drive} — both older than 2 minutes, i.e. what
+    storage.requeue_stuck re-sends. Returns None if the DB can't be read for
+    any reason (don't let a reporting nicety break the launcher)."""
     try:
-        from storage.database import SessionLocal, Image, ProcessingStatus
+        from storage.database import SessionLocal
+        from storage.requeue_stuck import count_owed
         with SessionLocal() as s:
-            return (
-                s.query(Image)
-                .filter(Image.status.in_([ProcessingStatus.INGESTED,
-                                          ProcessingStatus.UPLOADED]))
-                .count()
-            )
+            return count_owed(s)
     except Exception:
         return None
 
@@ -373,8 +370,9 @@ def main() -> int:
 
     # ---- 3c. flag anything already stuck ingested-but-not-processed ---
     stuck = count_stuck_images()
-    if stuck:
-        print(f"\n{stuck} image(s) are INGESTED but not processed. To clear them:")
+    if stuck and (stuck["waiting"] or stuck["undelivered"]):
+        print(f"\n{stuck['waiting']} image(s) are waiting but not processed, and "
+              f"{stuck['undelivered']} finished result(s) never reached Google Drive. To clear them:")
         print("  python -m storage.requeue_stuck --all            # re-publish to Kafka (Spark must be up)")
         print("  python -m storage.requeue_stuck --all --inline    # or process them now, in-process")
 
