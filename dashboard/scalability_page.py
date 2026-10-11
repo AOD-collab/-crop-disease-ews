@@ -332,7 +332,7 @@ def _results_section(busy: bool):
                          "several iterations are added together; making the gallery previews afterwards is "
                          "not included.")
         m[1].metric("Average Processing Time",
-                    f"{avg['average_processing_s']:.4f} seconds/image" if avg["average_processing_s"] is not None
+                    f"{avg['average_processing_s']:.2f} seconds/image" if avg["average_processing_s"] is not None
                     else "No valid measurement",
                     help="Per photo: preprocessing plus CNN inference, the same code the live pipeline runs. "
                          "Waiting in the queue, reading the file, Google Drive and the database are not "
