@@ -20,8 +20,9 @@ old plain Kafka consumer is still there: `--engine python` (or
 `SCALABILITY_ENGINE=python`). Each run records its engine in `config_json`
 (`ENGINE`).
 
-**Photo source (since 10 October 2026): the photos on this laptop, not Google
-Drive.** By default a test reads the farmer photos already stored locally in
+**Photo source on the dashboard (since 11 October 2026): a folder you select.**
+The page has a **Select folder** button that opens the Windows folder window;
+there is no other choice there. On the command line, by default a test reads the farmer photos already stored locally in
 `storage/downloaded_photos/<user_id>/<image_id>.jpg` (the copies Spark keeps of
 every upload) and takes each photo's municipality and phone GPS from its
 database row. Google Drive is never contacted. Alternatives: `--source-dir` (any
@@ -75,7 +76,7 @@ processing. To give farmers priority:
 ## Running it
 
 Dashboard → **Scalability test**:
-1. Photo source *Local photos on this laptop* (default) or *Custom folder* → *Check*
+1. **Select folder** (the Windows folder window opens) → *Check the folder*
 2. choose the number of **unique photos** and the number of **iterations**
 3. *Start test* (needs the Kafka broker)
 
@@ -167,7 +168,7 @@ one summary line per second:
 
 ### Photos from a custom folder
 
-Any folder on this computer (dashboard: *Photo source → Custom folder*).
+Any folder on this computer (dashboard: **Select folder**).
 Every `.jpg`/`.jpeg`/`.png` in it and its subfolders is checked with the
 upload rules; the same content under two names counts once; files are only
 read. They are hard-linked into the run folder (no extra disk space). If the

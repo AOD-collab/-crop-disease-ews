@@ -489,14 +489,16 @@ def test_averages_leave_out_invalid_measurements():
     assert nothing["total_execution_s"] is None and nothing["total_processing_s"] is None
 
 
-def test_page_checks_a_custom_folder(photo_folder, drive):  # noqa: F811
+def test_page_checks_a_custom_folder(photo_folder, drive, monkeypatch):  # noqa: F811
     from tests.test_dashboard_users import _logged_in, _seed_admin_and_farmer
     _seed_admin_and_farmer()
+    from dashboard import scalability_page
     at = _logged_in("Scalability Test")
-    at.radio(key="scale_source").set_value("Custom folder").run()
-    assert [b for b in at.button if b.label == "Check the folder"][0].disabled      # no path yet
-    at.text_input(key="scale_source_dir").set_value(f'"{photo_folder}"').run()      # pasted with quotes
-    [b for b in at.button if b.label == "Check the folder"][0].click().run()
+    assert not at.radio                                                             # no photo-source choice
+    assert "Check the folder" not in [b.label for b in at.button]                   # no folder selected yet
+    monkeypatch.setattr(scalability_page, "_pick_folder", lambda: str(photo_folder))    # the Windows dialog
+    at.button(key="scale_pick_folder").click().run()
+    at.button(key="scale_check_folder").click().run()
 
     assert not at.exception
     assert at.selectbox(key="scale_size").value == 4                                # all 4 valid photos
@@ -793,16 +795,15 @@ def test_no_local_photos_is_a_clear_error(local_photos_dir, test_topic, monkeypa
         runner.start(5)
 
 
-def test_page_offers_local_photos_not_google_drive(local_photos_dir, drive, monkeypatch):  # noqa: F811
-    from api.image_storage import store_downloaded_photo
-    _forbid_drive(monkeypatch)
-    store_downloaded_photo("someuser", "photo-1", make_leaf_jpeg_bytes(90))
+def test_page_only_offers_a_selected_folder(drive, monkeypatch):  # noqa: F811
+    """No photo-source choice (no local farmer photos, no Google Drive): the
+    test runs on a folder the admin selects; a cancelled dialog selects nothing."""
+    from dashboard import scalability_page
     from tests.test_dashboard_users import _logged_in, _seed_admin_and_farmer
     _seed_admin_and_farmer()
     at = _logged_in("Scalability Test")
-    radio = at.radio(key="scale_source")
-    assert radio.value == "Local photos on this laptop" and "Google Drive" not in radio.options
-    [b for b in at.button if b.label == "Check the local photos"][0].click().run()
-    assert not at.exception, at.exception
-    assert "Prepare local copies" not in [b.label for b in at.button]
-    assert [b for b in at.button if b.label == "Start test"]
+    assert not at.radio
+    assert "Start test" not in [b.label for b in at.button]
+    monkeypatch.setattr(scalability_page, "_pick_folder", lambda: None)              # dialog cancelled
+    at.button(key="scale_pick_folder").click().run()
+    assert not at.exception and "Check the folder" not in [b.label for b in at.button]

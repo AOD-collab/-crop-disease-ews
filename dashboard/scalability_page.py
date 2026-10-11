@@ -110,36 +110,53 @@ def _active_panel():
         st.info("A scalability test is running. The results appear below when it finishes.")
 
 
+_PICK_FOLDER_SCRIPT = (
+    "import tkinter as tk\n"
+    "from tkinter import filedialog\n"
+    "root = tk.Tk(); root.withdraw(); root.attributes('-topmost', True)\n"
+    "print(filedialog.askdirectory(title='Select the folder with the test photos', mustexist=True) or '')\n"
+)
+
+
+def _pick_folder():
+    """Opens the Windows "select folder" window on this laptop (the
+    dashboard runs here) and returns the chosen folder, or None. In its own
+    process: tkinter must not run inside Streamlit's script thread."""
+    try:
+        out = subprocess.run([sys.executable, "-c", _PICK_FOLDER_SCRIPT], capture_output=True, text=True,
+                             timeout=600, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    folder = out.stdout.strip()
+    return os.path.normpath(folder) if folder else None
+
+
 def _setup_section(busy: bool):
     st.subheader("Run a test")
-    # Google Drive is not a choice here: the test reads photos already on this
-    # laptop (`python -m scalability.run start --from-drive` still can).
-    use_folder = st.radio("Photo source", ["Local photos on this laptop", "Custom folder"], horizontal=True,
-                          key="scale_source") == "Custom folder"
-    source_dir = None
-    if use_folder:
-        source_dir = st.text_input("Folder on this computer", key="scale_source_dir",
-                                   placeholder=r"e.g. D:\maize_photos").strip().strip('"') or None
-        can_check = source_dir is not None
-    else:
-        can_check = True
-        st.caption(f"The farmer photos already stored on this laptop ({runner.dataset.local_photos_dir()}). "
-                   "Nothing is downloaded from Google Drive.")
-    source = "folder" if use_folder else "local"
-    if st.button("Check the folder" if use_folder else "Check the local photos", icon="🔎",
-                 disabled=not can_check):
-        with st.spinner("Scanning the folder…" if use_folder else "Scanning the local photos…"):
+    # The photos always come from a folder the admin selects on this laptop
+    # (no Google Drive, no farmer photos).
+    if st.button("Select folder", icon="📁", key="scale_pick_folder"):
+        folder = _pick_folder()
+        if folder:
+            st.session_state["scale_source_dir"] = folder
+            st.session_state.pop("scale_preview", None)
+    source_dir = st.session_state.get("scale_source_dir")
+    if not source_dir:
+        st.caption("Select the folder with the photos for the test.")
+        return
+    st.markdown(f"**Folder:** `{source_dir}`")
+    if st.button("Check the folder", icon="🔎", key="scale_check_folder"):
+        with st.spinner("Scanning the folder…"):
             try:
-                st.session_state["scale_preview"] = {**runner.preview(source_dir), "source_dir": source_dir,
-                                                     "source": source}
+                st.session_state["scale_preview"] = {**runner.preview(source_dir), "source_dir": source_dir}
             except Exception as e:  # noqa: BLE001
-                st.error(f"Could not read {'the folder' if use_folder else 'the local photos'}: {e}")
+                st.error(f"Could not read the folder: {e}")
     pv = st.session_state.get("scale_preview")
-    if not pv or pv.get("source_dir") != source_dir or pv.get("source") != source:
-        return                                              # a check of the other source doesn't count
+    if not pv or pv.get("source_dir") != source_dir:
+        return                                              # a check of another folder doesn't count
     valid = pv["valid"]
     if not valid:
-        st.warning(f"There are no valid photos in {'this folder' if use_folder else 'the local photos'}.")
+        st.warning("There are no valid photos in this folder.")
         return
     options = [n for n in SIZES if n < valid] + [valid]
     labels = {n: f"{n:,}" if n != valid else f"All available ({valid:,})" for n in options}
@@ -158,8 +175,7 @@ def _setup_section(busy: bool):
              "Kafka step and per photo, and the speed every 2 seconds. It is still the separate test "
              "process on its own Kafka topic: the live Spark job and farmer photos are not affected.")
     if st.button("Start test", icon="▶️", type="primary", disabled=busy or not _kafka_up()):
-        _launch(["start", "--size", str(size), "--iterations", str(iterations)]
-                + (["--source-dir", source_dir] if source_dir else [])
+        _launch(["start", "--size", str(size), "--iterations", str(iterations), "--source-dir", source_dir]
                 + (["--live", "progress"] if size * iterations > 2000 else []), console=console)
         st.rerun()
     if not _kafka_up():
