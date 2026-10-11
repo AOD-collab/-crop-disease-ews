@@ -222,7 +222,12 @@ SPARK_RECHECK_DRIVE_FILE = os.getenv("SPARK_RECHECK_DRIVE_FILE", "false").lower(
 ANALYSIS_MAX_PX = int(os.getenv("ANALYSIS_MAX_PX", "1280"))
 
 # Scalability test (scalability/): its OWN Kafka topic and consumer group, read
-# by its own worker process — never the production topic or the Spark job.
+# by its own process — never the production topic or the live Spark job.
+# Engine that consumes the test topic and runs preprocessing + CNN:
+#   spark  (default) the test's own Spark Structured Streaming query
+#          (scalability/spark_engine.py), same shape as the live job
+#   python a plain Kafka consumer + thread pool (scalability/worker.py)
+SCALABILITY_ENGINE = os.getenv("SCALABILITY_ENGINE", "spark").lower()
 SCALABILITY_KAFKA_TOPIC = os.getenv("SCALABILITY_KAFKA_TOPIC", "maize-disease-images-scalability-test")
 SCALABILITY_CONSUMER_GROUP = os.getenv("SCALABILITY_CONSUMER_GROUP", "scalability-test")
 # Photos the test worker processes at the same time; same default as Spark so

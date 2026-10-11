@@ -328,8 +328,8 @@ def _results_section(busy: bool):
                     else "No valid measurement",
                     help="Total elapsed time of the completed iterations ÷ their number. One iteration runs "
                          "from the first photo sent to the test's Kafka topic until the last photo is "
-                         "processed. Finding, downloading and staging the photos happen before the timer "
-                         "starts. Iterations with a failed photo, or during which farmer photos were being "
+                         "processed by the test's own Spark Structured Streaming query. Finding, downloading "
+                         "and staging the photos, and starting Spark, happen before the timer starts. Iterations with a failed photo, or during which farmer photos were being "
                          "processed, are left out.")
         m[1].metric("Average Processing Time",
                     f"{avg['average_processing_s']:.4f} seconds/image" if avg["average_processing_s"] is not None

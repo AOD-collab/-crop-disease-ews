@@ -15,7 +15,8 @@ test" page as a background process, or by hand:
     python -m scalability.run list
 
 The test is ISOLATED from the live pipeline (scalability/worker.py): it has
-its own Kafka topic and consumer group, this process is its worker, and it
+its own Kafka topic, its own Spark query (in this process, separate from the
+live Spark job), and it
 writes only to scale_test_runs / scale_test_items and to
 SCALABILITY_REPORTS_DIR/<run_id>/. No Image, Prediction or Drive result is
 ever created for a test photo, so nothing of a test can reach a farmer, the
@@ -30,11 +31,15 @@ What `start` does:
   3. Stages every ready photo as a hard link in
      SCALABILITY_REPORTS_DIR/<run_id>/images/<item_id>.<ext> plus one
      scale_test_items row (a fresh item id, never a farmer's image_id).
-  4. Waits until no farmer photo is being processed (real time first), then
-     starts the clock: publishes one event per photo to the TEST topic,
-     consumes them, and processes each with the live pipeline's own
-     preprocessing + CNN code, SCALABILITY_WORKERS at a time. New photos
-     wait while farmer photos are being processed.
+  4. Waits until no farmer photo is being processed (real time first),
+     starts the test's own Spark Structured Streaming query on the TEST topic
+     (scalability/spark_engine.py; JVM + Kafka start-up before the timer),
+     then starts the clock: publishes one event per photo to the TEST topic;
+     Spark reads them in micro-batches and processes each photo with the
+     live pipeline's own preprocessing + CNN code, SCALABILITY_WORKERS at a
+     time. New photos wait while farmer photos are being processed.
+     `--engine python` (SCALABILITY_ENGINE) uses a plain Kafka consumer +
+     thread pool in this process instead of Spark.
   5. Stops the clock when every photo is COMPLETED or FAILED and writes the
      summary + CSV files.
 """
@@ -97,6 +102,26 @@ def log(msg: str) -> None:
 LIVE_MODES = ("photos", "progress", "off")
 _live_mode = "photos"
 PROGRESS_EVERY_S = 2.0
+
+
+ENGINES = ("spark", "python")
+_engine_override = None
+
+
+def set_engine(name: str) -> None:
+    global _engine_override
+    if name not in ENGINES:
+        raise RunError(f"--engine must be one of {', '.join(ENGINES)}")
+    _engine_override = name
+
+
+def engine() -> str:
+    """"spark" (the test's own Spark Structured Streaming query) or
+    "python" (Kafka consumer + thread pool), see SCALABILITY_ENGINE."""
+    name = _engine_override or settings.SCALABILITY_ENGINE
+    if name not in ENGINES:
+        raise RunError(f"SCALABILITY_ENGINE must be one of {', '.join(ENGINES)}, not {name!r}")
+    return name
 
 
 def set_live(mode: str) -> None:
@@ -220,6 +245,9 @@ def _benchmark_config(source_dir=None, series=None, from_drive=False) -> dict:
         **(series or {}),
         "KAFKA_TOPIC": settings.SCALABILITY_KAFKA_TOPIC,
         "KAFKA_CONSUMER_GROUP": settings.SCALABILITY_CONSUMER_GROUP,
+        "ENGINE": engine(),
+        **({"SPARK_MAX_EVENTS_PER_BATCH": settings.SPARK_MAX_EVENTS_PER_BATCH,
+            "SPARK_TRIGGER_SECONDS": settings.SPARK_TRIGGER_SECONDS} if engine() == "spark" else {}),
         "WORKERS": settings.SCALABILITY_WORKERS,
         "ANALYSIS_MAX_PX": settings.ANALYSIS_MAX_PX,
         "MODEL_DEVICE": settings.IMAGE_MODEL.get("device"),
@@ -237,13 +265,26 @@ def _benchmark_config(source_dir=None, series=None, from_drive=False) -> dict:
     }
 
 
-def _test_queue():
-    """The test's own Kafka topic + consumer group (tests replace this)."""
+def _test_queue(consume: bool = True):
+    """The test's own Kafka topic + consumer group (tests replace this).
+    consume=False: producer only, the Spark engine reads the topic."""
     try:
-        return worker.KafkaTestQueue()
+        return worker.KafkaTestQueue(consume=consume)
     except Exception as e:  # noqa: BLE001
         raise RunError(f"Kafka is not reachable at {settings.KAFKA_BOOTSTRAP_SERVERS} "
                        f"(test topic {settings.SCALABILITY_KAFKA_TOPIC}): {e}")
+
+
+def _test_stream(run_id: str, ids: list, handle, on_done):
+    """The test's own Spark Structured Streaming query on the test topic,
+    started and warmed up (tests replace this)."""
+    from scalability import spark_engine
+    checkpoint = run_dir(run_id) / "spark_checkpoint"
+    shutil.rmtree(checkpoint, ignore_errors=True)
+    try:
+        return spark_engine.SparkTestStream(run_id, ids, handle, on_done, checkpoint).start()
+    except Exception as e:  # noqa: BLE001
+        raise RunError(f"the scalability test's Spark query could not start: {e}")
 
 
 def _live_gate():
@@ -349,7 +390,8 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
     run_id = run_id or f"scale-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"
     if not _locked:
         _acquire_lock("run", run_id)
-    monitor = gate = queue = None
+    monitor = gate = queue = stream = None
+    use_spark = engine() == "spark"
     try:
         worker.lower_priority()
         with SessionLocal() as s:
@@ -435,7 +477,32 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
         _set_phase(run_id, "Loading the CNN")
         _emit([f"[cnn]      loading and warming up the model (not measured), {len(ids)} photo(s) staged"])
         worker.warm_up()                        # model loading is not measured
-        queue = _test_queue()
+
+        def handle(item_id, received_at):
+            gate.wait()                         # farmer photos first
+            try:
+                timings, prediction = worker.process_photo(paths[item_id])
+            except Exception as e:  # noqa: BLE001 - this photo only
+                return item_id, ("FAILED", f"{type(e).__name__}: {e}"[:2000], {"received_at": received_at}, None)
+            t_start, t_end = timings.pop("_t0"), timings.pop("_t1")
+            timings["contended"] = gate.overlapped(t_start, t_end)
+            return item_id, ("COMPLETED", None, {"received_at": received_at, **timings}, prediction)
+
+        # Finished photos arrive on this queue (a done-callback per photo), so
+        # the loop only ever touches photos that just finished. It used to
+        # rescan every submitted photo twice every 50 ms and write the phase
+        # to the database each time — at 10,000 photos that main-thread work
+        # competed with the workers for the GIL inside the measured time.
+        finished = stdlib_queue.Queue()
+        queue = _test_queue(consume=False) if use_spark else _test_queue()
+        if use_spark:
+            _set_phase(run_id, "Starting Spark")
+            _emit([f"[spark]    starting the test's own Spark Structured Streaming query on topic "
+                   f"'{settings.SCALABILITY_KAFKA_TOPIC}' (not measured; the live Spark job is not touched)"])
+            stream = _test_stream(run_id, ids, handle, finished.put)
+            stream.warm_up(queue.send_many)     # Spark's first job on real data is not measured
+            _emit([f"[spark]    ready — micro-batches of up to {settings.SPARK_MAX_EVENTS_PER_BATCH} event(s) "
+                   f"every {settings.SPARK_TRIGGER_SECONDS:g}s, {settings.SCALABILITY_WORKERS} photo(s) at a time"])
         _set_phase(run_id, "Processing", status="RUNNING")
         # The live Spark job shares the GPU; recorded so a slow iteration can
         # be explained (a 7 s stall on 2026-10-10 happened with it running).
@@ -460,22 +527,6 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
             done.update(events[i]["item_id"] for i in failures)
         log(f"{run_id}: published {len(events) - len(failures)} event(s) to {settings.SCALABILITY_KAFKA_TOPIC}")
 
-        def handle(item_id, received_at):
-            gate.wait()                         # farmer photos first
-            try:
-                timings, prediction = worker.process_photo(paths[item_id])
-            except Exception as e:  # noqa: BLE001 - this photo only
-                return item_id, ("FAILED", f"{type(e).__name__}: {e}"[:2000], {"received_at": received_at}, None)
-            t_start, t_end = timings.pop("_t0"), timings.pop("_t1")
-            timings["contended"] = gate.overlapped(t_start, t_end)
-            return item_id, ("COMPLETED", None, {"received_at": received_at, **timings}, prediction)
-
-        # Finished photos arrive on this queue (a done-callback per photo), so
-        # the loop only ever touches photos that just finished. It used to
-        # rescan every submitted photo twice every 50 ms and write the phase
-        # to the database each time — at 10,000 photos that main-thread work
-        # competed with the workers for the GIL inside the measured time.
-        finished = stdlib_queue.Queue()
         submitted = set()
         pending = {}                    # finished, not yet written to the database
         last_change = last_flush = last_phase = last_progress = last_emit = time.monotonic()
@@ -484,7 +535,15 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
         was_paused = False
         with ThreadPoolExecutor(max_workers=max(1, settings.SCALABILITY_WORKERS)) as pool:
             while len(done) < len(ids):
-                if len(submitted) + len(failures) < len(ids):
+                if stream is not None:
+                    # Spark consumes and processes on its own threads; the
+                    # loop only books what it received and finished.
+                    stream.raise_if_failed()
+                    new = stream.take_received()
+                    submitted.update(new)
+                    received += len(new)
+                    wait_s = 0.05
+                elif len(submitted) + len(failures) < len(ids):
                     for event in queue.poll(0.05):
                         item_id = event.get("item_id")
                         if event.get("run_id") != run_id or item_id not in paths or item_id in submitted:
@@ -511,7 +570,9 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
                     _record(run_id, pending)
                     if _live_mode != "off":
                         if received:
-                            live.append(f"[kafka]    consumed {received} event(s) "
+                            live.append(f"[spark]    micro-batch read {received} event(s) from Kafka "
+                                        f"({len(submitted)} of {len(ids)} received)" if stream is not None else
+                                        f"[kafka]    consumed {received} event(s) "
                                         f"({len(submitted)} of {len(ids)} received)")
                             received = 0
                         if _live_mode == "photos":
@@ -550,6 +611,9 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
                     break
         t1 = time.monotonic()
         _emit(live)
+        if stream is not None:
+            stream.stop()
+            stream = None
         samples = monitor.stop()
         monitor = None
         gate.stop()
@@ -581,8 +645,11 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
             monitor.stop()
         if gate is not None:
             gate.stop()
+        if stream is not None:
+            stream.stop()
         if queue is not None:
             queue.close()
+        shutil.rmtree(run_dir(run_id) / "spark_checkpoint", ignore_errors=True)
         if not _locked:
             _release_lock()
 
@@ -870,6 +937,10 @@ def _main(argv=None) -> int:
     st.add_argument("--stall-minutes", type=float, default=10,
                     help="stop waiting after this long without a single photo finishing")
     st.add_argument("--run-id", help=argparse.SUPPRESS)
+    st.add_argument("--engine", choices=ENGINES,
+                    help="what reads the test topic and processes the photos: the test's own Spark "
+                         "Structured Streaming query (spark) or a plain Kafka consumer (python); "
+                         "default SCALABILITY_ENGINE (spark)")
     st.add_argument("--live", choices=LIVE_MODES, default="photos",
                     help="what to show while it runs: one line per photo (default), "
                          "only progress lines (for very large runs), or nothing")
@@ -894,6 +965,8 @@ def _main(argv=None) -> int:
         ctypes.windll.kernel32.SetConsoleTitleW(f"EWS-ScalabilityTest ({args.cmd})")
     if getattr(args, "live", None):
         set_live(args.live)
+    if getattr(args, "engine", None):
+        set_engine(args.engine)
     if getattr(args, "log_file", None):
         _tee_to(args.log_file)
 

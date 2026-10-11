@@ -57,6 +57,14 @@ class InMemoryTestTopic:
         pass
 
 
+@pytest.fixture(autouse=True)
+def python_engine(monkeypatch):
+    """These tests drive the runner with the in-memory topic and the plain
+    consumer loop; the Spark engine has its own tests
+    (tests/test_scalability_spark.py)."""
+    monkeypatch.setattr(settings, "SCALABILITY_ENGINE", "python")
+
+
 @pytest.fixture()
 def test_topic(monkeypatch):
     """The test's own topic, no live farmer processing, and proof that the

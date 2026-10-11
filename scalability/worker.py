@@ -140,9 +140,10 @@ class KafkaTestQueue:
     """Producer + consumer on the test's own topic and consumer group. The
     consumer is subscribed (partitions assigned) before anything is sent, so
     no event of this run can be missed; events of other runs are skipped by
-    the caller (run_id)."""
+    the caller (run_id). consume=False: producer only (the Spark engine,
+    scalability/spark_engine.py, reads the topic itself)."""
 
-    def __init__(self, topic: str = None, group: str = None):
+    def __init__(self, topic: str = None, group: str = None, consume: bool = True):
         from confluent_kafka import Consumer, KafkaException
         from confluent_kafka.admin import AdminClient, NewTopic
         from kafka.producer import KafkaBackend
@@ -162,6 +163,9 @@ class KafkaTestQueue:
                         raise
         self.topic = topic
         self._producer = KafkaBackend(topic)
+        self._consumer = None
+        if not consume:
+            return
         self._consumer = Consumer({"bootstrap.servers": servers, "group.id": group,
                                    "auto.offset.reset": "earliest", "enable.auto.commit": True})
         assigned = threading.Event()
@@ -176,6 +180,8 @@ class KafkaTestQueue:
         return self._producer.send_many(events)
 
     def poll(self, timeout: float = 0.5) -> list:
+        if self._consumer is None:
+            return []
         out = []
         for msg in self._consumer.consume(num_messages=500, timeout=timeout):
             if msg.error():
@@ -187,6 +193,8 @@ class KafkaTestQueue:
         return out
 
     def close(self) -> None:
+        if self._consumer is None:
+            return
         try:
             self._consumer.close()
         except Exception:  # noqa: BLE001

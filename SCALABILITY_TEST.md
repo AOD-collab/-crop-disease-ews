@@ -1,10 +1,24 @@
 # Scalability test (Demo 2)
 
-Measures how fast the system's image processing — the live pipeline's own
-preprocessing (`spark/preprocessing.prepare_image`) and CNN
-(`ml/inference.predict`) — handles a large batch of real photos, **isolated
-from the real-time pipeline** (Demo 1) so that a test never touches farmer
-submissions, predictions or results.
+Measures how fast the system's image processing — **Kafka → Apache Spark
+Structured Streaming → the live pipeline's own preprocessing
+(`spark/preprocessing.prepare_image`) and CNN (`ml/inference.predict`)** —
+handles a large batch of real photos, **isolated from the real-time pipeline**
+(Demo 1) so that a test never touches farmer submissions, predictions or
+results.
+
+**Engine (since 11 October 2026): the test's own Spark query.** The test topic
+is read by a Spark Structured Streaming query that belongs to the test
+(`scalability/spark_engine.py`, started inside the test process) — the same
+shape as the live job: micro-batches of up to `SPARK_MAX_EVENTS_PER_BATCH`
+events every `SPARK_TRIGGER_SECONDS`, parse + filter as Spark SQL, then
+`foreachBatch` runs preprocessing + CNN `SCALABILITY_WORKERS` photos at a time,
+and a micro-batch commits only when all its photos are done. It is a separate
+query with its own checkpoint (deleted after each run); the live Spark job
+(`spark/streaming_job.py`) is not changed and never sees the test topic. The
+old plain Kafka consumer is still there: `--engine python` (or
+`SCALABILITY_ENGINE=python`). Each run records its engine in `config_json`
+(`ENGINE`).
 
 **Photo source (since 10 October 2026): the photos on this laptop, not Google
 Drive.** By default a test reads the farmer photos already stored locally in
@@ -25,18 +39,19 @@ Google Drive images/<email>/ ─(list + verify)─► storage/downloaded_photos/
                               storage/scalability_reports/<run_id>/images/<item_id>.jpg
                                                          │
  scalability/run.py ── {run_id, item_id} events ──► Kafka topic maize-disease-images-scalability-test
-                                                         │ consumer group "scalability-test"
+                                                         │ the TEST's own Spark Structured Streaming query
+                                                         │ (scalability/spark_engine.py, own checkpoint)
                                                          ▼
-                      the runner's own worker (scalability/worker.py), SCALABILITY_WORKERS at a time:
-                      prepare_image → CNN  (same code as Spark; the prediction is discarded)
+                      foreachBatch, SCALABILITY_WORKERS at a time (scalability/worker.process_photo):
+                      prepare_image → CNN  (same code as the live Spark job)
                                                          │
                       scale_test_runs / scale_test_items (timings only), CSV files per run
 ```
 
 | Shared with the live pipeline? | |
 |---|---|
-| Kafka topic and consumer | **No** — own topic (`SCALABILITY_KAFKA_TOPIC`) and group (`SCALABILITY_CONSUMER_GROUP`); a guard refuses the production topic |
-| Spark streaming job | **No** — the live job skips any event with a `run_id` |
+| Kafka topic | **No** — own topic (`SCALABILITY_KAFKA_TOPIC`); a guard refuses the production topic |
+| Spark streaming job | **No** — the test runs its own Spark query (own SparkSession in the test process, own checkpoint); the live job reads only the live topic and skips any event with a `run_id` |
 | `images`, `predictions`, `processing_events` | **No** — a test creates no row there; its items have fresh ids, never a farmer's image_id |
 | Google Drive results, labelling folder, Tableau, dashboard farmer pages | **No** |
 | CNN code and checkpoint | **Same code, own copy** — loaded into the runner process (extra GPU memory while it runs), warmed up before the timer |
@@ -78,7 +93,9 @@ The results show the **latest test** only:
   test topic until the last photo is finished: test topic, reading each
   staged file, preprocessing, CNN and recording the measurement. Finding,
   downloading and staging photos, and loading the CNN, happen before the
-  timer starts. A *valid* iteration finished with every photo processed, no
+  timer starts, and so does starting the test's Spark query (JVM, Kafka
+  connection, one warm-up event through a first micro-batch), so the timer covers Spark's
+  micro-batch scheduling but not its start-up. A *valid* iteration finished with every photo processed, no
   failure and no overlap with live farmer processing.
 * **Average Processing Time (seconds/image)** = mean, over every validly
   measured photo of the test's finished iterations, of `time.perf_counter`
@@ -122,7 +139,8 @@ python -m scalability.run start --size 10000 --live progress     # big runs: pro
 
 ```
 [scalability 17:40:48] [timer]    started — publishing 12 event(s) to Kafka topic 'maize-disease-images-scalability-test' (the live topic 'maize-disease-images' is not touched)
-[scalability 17:40:49] [kafka]    consumed 12 event(s) (12 of 12 received)
+[scalability 17:40:47] [spark]    ready — micro-batches of up to 100 event(s) every 1s, 8 photo(s) at a time
+[scalability 17:40:49] [spark]    micro-batch read 12 event(s) from Kafka (12 of 12 received)
 [scalability 17:40:49] [cnn]       1/12  7c92a3ad  preprocess 0.323s  cnn 0.240s  -> northern_leaf_blight 84%  risk HIGH
 [scalability 17:42:51] [progress] 24/60 done  11.55 photos/s  in workers 28  waiting in Kafka 0  elapsed 2.1s
 [scalability 17:40:51] scale-20261010-174030-cf35: COMPLETED. 12 ok, 0 failed in 1.266s.
@@ -135,13 +153,14 @@ bookkeeping loop at most every 0.5 s, never by the photo workers (60 photos: 3.5
 `photos` vs 3.98 s / 3.69 s with `off`). The run's `config_json` records which mode was used
 (`LIVE_OUTPUT`). `--log-file` keeps a copy of the window's output.
 
-**Why the EWS-Spark window stays quiet during a test:** the test never goes through
-Spark (its events are on their own topic and processed by the test's worker; Spark
-skips any test event) — that is the isolation. The **EWS-KafkaMonitor** window does
-show the test's Kafka traffic, as one summary line per second:
+**Why the EWS-Spark window stays quiet during a test:** that window is the LIVE
+Spark job, and the test never goes through it (its events are on their own topic
+and read by the test's own Spark query, in the test window) — that is the
+isolation. The **EWS-KafkaMonitor** window does show the test's Kafka traffic, as
+one summary line per second:
 
 ```
-[kafka 18:33:49] TEST topic 'maize-disease-images-scalability-test': +60 event(s) (offsets 60-119; 60 for scale-20261010-183344-72dc); 120 since start; test worker committed up to offset 60 (60 behind; it commits every few seconds) — processed by the scalability test, not Spark
+[kafka 18:33:49] TEST topic 'maize-disease-images-scalability-test': +60 event(s) (offsets 60-119; 60 for scale-20261010-183344-72dc); 120 since start — read by the scalability test's own Spark query, not the live Spark job
 ```
 
 ### Photos from a custom folder

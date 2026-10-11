@@ -27,7 +27,7 @@ import time
 from collections import Counter
 from datetime import datetime
 
-from config.settings import SCALABILITY_KAFKA_TOPIC, SCALABILITY_CONSUMER_GROUP
+from config.settings import SCALABILITY_KAFKA_TOPIC, SCALABILITY_CONSUMER_GROUP, SCALABILITY_ENGINE
 from kafka.config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, broker_reachable
 
 GROUP_ID = "ews-kafka-monitor"          # never used by Spark or the scalability test
@@ -77,17 +77,23 @@ class TestTopicSummary:
         self.total += 1
         self.end_offset = max(self.end_offset or 0, offset + 1)
 
-    def line(self, consumed_to=None) -> str | None:
-        """The summary since the last call (None when nothing arrived)."""
+    def line(self, consumed_to=None, engine: str = SCALABILITY_ENGINE) -> str | None:
+        """The summary since the last call (None when nothing arrived).
+        The Spark engine keeps its position in its own checkpoint, not in the
+        consumer group, so the group's position is only shown for the python
+        engine."""
         if not self.runs:
             return None
         runs = ", ".join(f"{n} for {run}" for run, n in self.runs.items())
         text = (f"TEST topic '{SCALABILITY_KAFKA_TOPIC}': +{sum(self.runs.values())} event(s) "
                 f"(offsets {self.first}-{self.last}; {runs}); {self.total} since start")
-        if consumed_to is not None and self.end_offset is not None:
-            text += (f"; test worker committed up to offset {consumed_to} "
-                     f"({max(0, self.end_offset - consumed_to)} behind; it commits every few seconds)")
-        text += " — processed by the scalability test, not Spark"
+        if engine == "spark":
+            text += " — read by the scalability test's own Spark query, not the live Spark job"
+        else:
+            if consumed_to is not None and self.end_offset is not None:
+                text += (f"; test worker committed up to offset {consumed_to} "
+                         f"({max(0, self.end_offset - consumed_to)} behind; it commits every few seconds)")
+            text += " — processed by the scalability test's worker, not Spark"
         self.runs.clear()
         self.first = self.last = None
         return text

@@ -104,9 +104,12 @@ def test_test_topic_summary_counts_runs_offsets_and_position():
     assert summary.line() is None                                       # nothing arrived
     for offset in range(100, 160):
         summary.add(json.dumps({"run_id": "scale-A", "item_id": str(offset)}).encode(), offset)
-    line = summary.line(consumed_to=130)
+    line = summary.line(consumed_to=130, engine="python")
     assert "+60 event(s) (offsets 100-159; 60 for scale-A); 60 since start" in line
     assert "committed up to offset 130 (30 behind" in line and "not Spark" in line
+    summary.add(json.dumps({"run_id": "scale-B", "item_id": "x"}).encode(), 160)
+    line = summary.line(consumed_to=130, engine="spark")              # Spark has no group position
+    assert "committed" not in line and "own Spark query, not the live Spark job" in line
     assert summary.line() is None                                       # reset after each line
     summary.add(b"not json", 160)
     assert "1 for unreadable" in summary.line()
