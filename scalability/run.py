@@ -13,6 +13,7 @@ test" page as a background process, or by hand:
     python -m scalability.run cleanup --run-id <run_id>
     python -m scalability.run delete --run-id <run_id>
     python -m scalability.run list
+    python -m scalability.run reset      # delete EVERY test (the dashboard's Delete test)
 
 The test is ISOLATED from the live pipeline (scalability/worker.py): it has
 its own Kafka topic, its own Spark query (in this process, separate from the
@@ -292,14 +293,18 @@ def _live_gate():
     return worker.LiveGate()
 
 
-def _link_or_copy(src: Path, dst: Path) -> str:
+def _stage(src: Path, dst: Path) -> Path:
+    """The path the run reads one photo from: a hard link `dst` in the
+    run's own folder (same file, no extra disk space), or, when that is not
+    possible (the photo is on another drive), the original `src` itself,
+    read in place and never written. Photos are never copied: a 7,000-photo
+    folder on C: copied twice filled the A: drive (2026-10-11)."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
-        os.link(src, dst)                     # same file, no extra disk space
-        return "hardlink"
+        os.link(src, dst)
+        return dst
     except OSError:
-        shutil.copy2(src, dst)                # e.g. local copies on another drive
-        return "copy"
+        return src
 
 
 def _chunks(seq, n=CHUNK):
@@ -367,6 +372,12 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
     docstring). `source_dir`: take the photos from this folder instead of
     Google Drive. `series`: {"SERIES_ID", "ITERATION", "ITERATIONS"} when
     this run is one iteration of start_series(), stored in config_json."""
+    # Total execution time (end_to_end_seconds) starts when Start test was
+    # pressed: the dashboard starts this process at that moment, so a single
+    # test or iteration 1 counts from the process start; a later iteration
+    # from here (the previous iteration's gallery previews are display only).
+    first = not series or series.get("ITERATION", 1) == 1
+    started_wall = psutil.Process().create_time() if first else time.time()
     init_db()
     reap_dead_runs()
     if replay_of:
@@ -449,9 +460,11 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
         for c in ready:
             item_id = str(uuid.uuid4())
             ext = ".png" if c.mime_type == "image/png" else ".jpg"     # e.g. IMG_1.JPEG -> .jpg
-            paths[item_id] = images_dir / f"{item_id}{ext}"
-            _link_or_copy(Path(c.local_path), paths[item_id])
+            paths[item_id] = _stage(Path(c.local_path), images_dir / f"{item_id}{ext}")
             staged.append((item_id, c))
+        in_place = sum(not path.is_relative_to(images_dir) for path in paths.values())
+        if in_place:
+            _emit([f"[prepare]  {in_place} photo(s) are on another drive: read in place (read-only), not copied"])
         # where each photo was taken (EXIF GPS is read from the file) — before the timer
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             places = list(pool.map(lambda ic: worker.photo_location(paths[ic[0]], ic[1].location,
@@ -470,13 +483,16 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
 
         # 4. wait for real time, then the measured iteration ----------------
         gate = _live_gate().start()
+        farmer_wait_s = 0.0             # real-time priority: not test time
         if gate.paused:
             _set_phase(run_id, "Waiting: farmer photos are being processed")
             log(f"{run_id}: waiting until farmer photos are processed")
+            waited = time.monotonic()
             gate.wait()
+            farmer_wait_s = time.monotonic() - waited
         _set_phase(run_id, "Loading the CNN")
-        _emit([f"[cnn]      loading and warming up the model (not measured), {len(ids)} photo(s) staged"])
-        worker.warm_up()                        # model loading is not measured
+        _emit([f"[cnn]      loading and warming up the model, {len(ids)} photo(s) staged"])
+        worker.warm_up()                        # not in the per-photo times (it is in the total)
 
         def handle(item_id, received_at):
             gate.wait()                         # farmer photos first
@@ -498,7 +514,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
         if use_spark:
             _set_phase(run_id, "Starting Spark")
             _emit([f"[spark]    starting the test's own Spark Structured Streaming query on topic "
-                   f"'{settings.SCALABILITY_KAFKA_TOPIC}' (not measured; the live Spark job is not touched)"])
+                   f"'{settings.SCALABILITY_KAFKA_TOPIC}' (the live Spark job is not touched)"])
             stream = _test_stream(run_id, ids, handle, finished.put)
             stream.warm_up(queue.send_many)     # Spark's first job on real data is not measured
             _emit([f"[spark]    ready — micro-batches of up to {settings.SPARK_MAX_EVENTS_PER_BATCH} event(s) "
@@ -610,6 +626,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
                     log(f"{run_id}: no progress for {stall_seconds:.0f}s, stopping the wait")
                     break
         t1 = time.monotonic()
+        end_to_end = time.time() - started_wall - farmer_wait_s
         _emit(live)
         if stream is not None:
             stream.stop()
@@ -625,7 +642,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
         comparison = _save_pictures(run_id, ids, paths, series)
 
         # 6. summary -----------------------------------------------------------
-        finalize(run_id, samples=samples, execution_seconds=t1 - t0,
+        finalize(run_id, samples=samples, execution_seconds=t1 - t0, end_to_end_seconds=end_to_end,
                  live_overlap=gate.overlapped(t0, t1), paused_seconds=gate.paused_seconds(t0, t1),
                  comparison=comparison, published=len(events) - len(failures), publish_failed=len(failures),
                  status="COMPLETED" if len(done) >= len(ids) else "INCOMPLETE",
@@ -747,7 +764,7 @@ def _load_items(session, run_id):
 
 def finalize(run_id: str, *, samples: list, execution_seconds: float, live_overlap: bool,
              paused_seconds: float, comparison: dict, published: int, publish_failed: int,
-             status: str, spark_job_running: bool = None) -> dict:
+             status: str, spark_job_running: bool = None, end_to_end_seconds: float = None) -> dict:
     with SessionLocal() as s:
         run = s.get(ScaleTestRun, run_id)
         items = _load_items(s, run_id)
@@ -762,6 +779,11 @@ def finalize(run_id: str, *, samples: list, execution_seconds: float, live_overl
             "not_finished": sum(i.status in ("STAGED", "PUBLISHED") for i in items),
             # timer: first event published to the test topic -> last photo finished
             "execution_seconds": round(execution_seconds, 3),
+            # from pressing Start test (process start; for iteration 2+ the
+            # iteration's start) to the last photo finished: photo staging,
+            # CNN loading, Spark start, Kafka, preprocessing, CNN, saving;
+            # minus any wait for farmer photos before the start
+            "end_to_end_seconds": round(end_to_end_seconds, 3) if end_to_end_seconds is not None else None,
             "live_overlap": live_overlap,
             "paused_seconds": round(paused_seconds, 3),
             # the live Spark job was running (sharing the GPU) during this iteration
@@ -956,6 +978,7 @@ def _main(argv=None) -> int:
             c.add_argument("--drive-results", action="store_true",
                            help="also move a legacy run's result folder in Drive to the trash")
     sub.add_parser("list")
+    sub.add_parser("reset", help="delete every scalability test and its data (scalability/reset.py)")
     args = p.parse_args(argv)
     for stream in (sys.stdout, sys.stderr):         # "—" in the live lines, any console / log
         if hasattr(stream, "reconfigure"):
@@ -999,6 +1022,16 @@ def _main(argv=None) -> int:
             print(json.dumps(cleanup(args.run_id, args.drive_results), indent=2))
         elif args.cmd == "delete":
             print(json.dumps(delete(args.run_id, args.drive_results), indent=2))
+        elif args.cmd == "reset":
+            from scalability import reset as test_reset
+            result = test_reset.reset_all(performed_by="cli")
+            for step in result["steps"]:
+                print(f"{'ok    ' if step['ok'] else 'FAILED'} {step['step']}: {step['detail']}")
+            if result["left"]:
+                print(f"still left: {', '.join(result['left'])}")
+            print("reset complete" if result["ok"] else "reset NOT complete")
+            if not result["ok"]:
+                return 1
         elif args.cmd == "list":
             reap_dead_runs()
             with SessionLocal() as s:

@@ -87,16 +87,18 @@ The results show the **latest test** only:
   CenterCrop — the 224 × 224 picture the CNN received). Saved by the run
   itself, outside the timed stages. No disease names, labels, confidences or
   annotations.
-* **Average Execution Time (seconds)** = sum of the valid iterations'
-  execution times ÷ number of valid iterations. One iteration runs
-  (`time.monotonic`) from right before the first event is published to the
-  test topic until the last photo is finished: test topic, reading each
-  staged file, preprocessing, CNN and recording the measurement. Finding,
-  downloading and staging photos, and loading the CNN, happen before the
-  timer starts, and so does starting the test's Spark query (JVM, Kafka
-  connection, one warm-up event through a first micro-batch), so the timer covers Spark's
-  micro-batch scheduling but not its start-up. A *valid* iteration finished with every photo processed, no
-  failure and no overlap with live farmer processing.
+* **Total Execution Time (seconds)** — from pressing *Start test* until
+  the system has finished the last photo: preparing the photos, loading the
+  CNN, starting the test's Spark job, Kafka, preprocessing, CNN and saving
+  the results (`end_to_end_seconds`, counted from the runner process's
+  start; for iteration 2 and later from that iteration's start). Time spent
+  waiting before the start because farmer photos were being processed is
+  not counted, and the gallery previews made after the last photo are not
+  included. With several iterations their times are added. Shown only when
+  every iteration finished with every photo processed and no overlap with
+  farmer processing ("Not available" otherwise, and for tests from before
+  11 October 2026). The photo-only timer — first event to the test topic →
+  last photo (`execution_seconds`) — is still in `summary.csv`.
 * **Average Processing Time (seconds/image)** = mean, over every validly
   measured photo of the test's finished iterations, of `time.perf_counter`
   around `prepare_image` + CNN inference only — no queue waiting, file
@@ -168,11 +170,11 @@ one summary line per second:
 Any folder on this computer (dashboard: *Photo source → Custom folder*).
 Every `.jpg`/`.jpeg`/`.png` in it and its subfolders is checked with the
 upload rules; the same content under two names counts once; files are only
-read. They are hard-linked into the run folder — **copied in full if the
-folder is on another drive** (a 6,977-photo run from `C:` took 8.8 GB under
-`A:\…\storage\scalability_reports`). Remove those copies afterwards with
-Image management → Storage → "Staged photos of finished scalability tests"
-(the measurements and the before/after pair are kept).
+read. They are hard-linked into the run folder (no extra disk space). If the
+folder is on another drive, where a hard link is impossible, the photos are
+**read in place and never copied** (since 11 October 2026: copying a
+6,977-photo folder from `C:` twice filled the 24 GB `A:` drive). Only the run's
+one before-picture and the small gallery previews are written to `A:`.
 
 ## Results on this laptop (10 October 2026)
 
@@ -190,11 +192,50 @@ received the 40 events.
 | Action | Removes | Keeps |
 |---|---|---|
 | Image management → Storage → staged photos of finished tests | the run's staged copies | measurements, CSV files, the before/after pair |
-| **Delete test** (page) / `delete --run-id X` | the run's measurements and its whole folder | Drive originals, local copies |
+| **Delete test** (page) / `reset` | **every** scalability test — see below | everything that is not the test's |
+| `delete --run-id X` | one run's measurements and its whole folder | Drive originals, local copies |
 | `cleanup --run-id X` | staged copies (and, for runs from before 10 October, their old rows in the production tables) | measurements |
 | **Replay** (`start --replay-of X`) | nothing | a new run with exactly the same photos |
 
 The factory reset never deletes the scalability measurements.
+
+### Delete test = complete reset (`scalability/reset.py`)
+
+The page's **Delete test** button (tick "Yes, delete all scalability test data"
+first) and `python -m scalability.run reset` return the scalability test to
+its initial state. Every resource is found by a name that belongs only to
+the test:
+
+| Step | Removes | Identified by |
+|---|---|---|
+| Stop test processes | a running test and its own Spark JVM (child process) | command line `-m scalability.run start` / `prepare` |
+| Kafka | the events of the test topic (the empty topic stays) and the test's consumer groups | `SCALABILITY_KAFKA_TOPIC`, `SCALABILITY_CONSUMER_GROUP*`; the production topic is refused |
+| Database | `scale_test_runs`, `scale_test_items`, legacy test rows, the inactive test system account | the test tables; `images.source = 'scalability_test'` |
+| Files | `scale-*` run folders (hard links, previews, CSV, Spark checkpoints), `logs/`, `_prepare_status.json`, `_lock.json`, the legacy `storage/images/scalability/` | the test folder `SCALABILITY_REPORTS_DIR` (refused if it is or contains a shared folder) |
+
+**Never touched:** the live Kafka topic and the live Spark job, farmer
+photos and `storage/downloaded_photos`, Google Drive, the model, the
+training and review folders, `inference_benchmarks/`, and your own photo
+folders. A hard link is only a directory entry, and photos read in place are
+never inside the test folder, so originals cannot be deleted.
+
+Every step runs even if another one fails. Afterwards the reset checks what
+is left: the page shows **"Status: Ready — 0 test images, progress 0%"**
+only when nothing of the test remains. Otherwise it shows which step failed
+(for example a file that is open in another program). Every reset is
+recorded in `storage_audit_log` (`action = scalability_reset`). Running it
+again, or with no test at all, is harmless.
+
+**Not removed (cannot be attributed to the test alone):** Spark's temporary
+`spark-*` folders in `%TEMP%` (Spark removes its own on a normal stop, and the
+live job uses the same folder), and gallery images your browser has cached.
+
+Verified on 11 October 2026 against a running 1,000-photo Spark test, with
+the live system running (Spark job, Drive watcher, Kafka monitor, dashboard).
+The test runner and its Spark JVM were stopped, 1,001 test events were
+deleted, and the run folder and rows were removed. The live Spark job and
+its JVM kept running, the production topic stayed at 558 events, and the
+images / predictions / users / image_reviews counts were unchanged.
 
 ## Troubleshooting
 

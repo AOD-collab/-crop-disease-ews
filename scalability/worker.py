@@ -296,8 +296,15 @@ def save_comparison(original_path, image_bytes: bytes, out_dir: Path) -> dict:
     processed: `before` = the staged original file, `after` = the bytes
     prepare_image produced for it, put through the model's own Resize +
     CenterCrop (ml/inference.model_input_image) — the picture the CNN
-    received. Returns their paths relative to `out_dir`."""
+    received. Returns their paths relative to `out_dir`. A photo read in
+    place from another drive (run._stage) is copied here, that one only."""
+    import shutil
     from ml.inference import model_input_image
     out_dir.mkdir(parents=True, exist_ok=True)
     model_input_image(image_bytes).save(out_dir / "after_preprocessing.png")
-    return {"before": str(Path(original_path).relative_to(out_dir)), "after": "after_preprocessing.png"}
+    original_path = Path(original_path)
+    if not original_path.resolve().is_relative_to(Path(out_dir).resolve()):
+        before = Path(out_dir) / f"before_preprocessing{original_path.suffix.lower()}"
+        shutil.copy2(original_path, before)
+        original_path = before
+    return {"before": str(original_path.relative_to(out_dir)), "after": "after_preprocessing.png"}

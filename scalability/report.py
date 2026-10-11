@@ -52,6 +52,13 @@ def valid_iteration(run) -> bool:
             and not s.get("failed") and not s.get("not_finished"))
 
 
+def _total_end_to_end(runs: list):
+    if not runs or not all(valid_iteration(r) for r in runs):
+        return None
+    values = [json.loads(r.summary_json).get("end_to_end_seconds") for r in runs]
+    return sum(values) if all(v is not None for v in values) else None
+
+
 def series_averages(runs: list, items: list) -> dict:
     """The two results the dashboard shows for a test (one or more
     iterations, scalability/run.start_series):
@@ -60,6 +67,14 @@ def series_averages(runs: list, items: list) -> dict:
                              / number of valid iterations
       average_processing_s = mean processing time of every validly measured
                              photo of the test's finished iterations
+      total_end_to_end_s   = the page's Total Execution Time: sum of every
+                             iteration's end_to_end_seconds (from pressing
+                             Start test to the last photo finished); None
+                             unless EVERY iteration is valid and has it
+      total_execution_s    = sum of the valid iterations' execution times
+      total_processing_s   = sum of those photos' processing times (photos run
+                             several at a time, so this is more than the
+                             total execution time)
 
     `runs`: the iterations' ScaleTestRun rows; `items`: their
     ScaleTestItem rows. A value is None when nothing valid was measured."""
@@ -73,6 +88,9 @@ def series_averages(runs: list, items: list) -> dict:
         "photos_measured": len(per_photo),
         "average_execution_s": sum(durations) / len(durations) if durations else None,
         "average_processing_s": statistics.fmean(per_photo) if per_photo else None,
+        "total_execution_s": sum(durations) if durations else None,
+        "total_end_to_end_s": _total_end_to_end(runs),
+        "total_processing_s": sum(per_photo) if per_photo else None,
     }
 
 

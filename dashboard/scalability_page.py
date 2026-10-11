@@ -30,7 +30,7 @@ from config.settings import BASE_DIR
 from config.localtime import format_local
 from kafka.config import broker_reachable
 from storage.database import SessionLocal, ScaleTestRun, ScaleTestItem
-from scalability import run as runner
+from scalability import run as runner, reset as test_reset
 from scalability.report import REPORTS_DIR, series_averages, items_frame
 from scalability.worker import preview_paths
 from spark.analytics import high_risk_by_location
@@ -310,33 +310,36 @@ def _results_section(busy: bool):
     st.subheader("Results")
     runs = _latest_test()
     if not runs:
-        st.info("No scalability test has been run yet.")
+        st.info("**Status: Ready** — 0 test images, progress 0%. No previous results: start a new test above.")
         return
     st.caption(f"Latest test, started {format_local(runs[0].started_at)}.")
 
     with SessionLocal() as s:
         items = s.query(ScaleTestItem).filter(ScaleTestItem.run_id.in_([r.run_id for r in runs])).all()
     avg = series_averages(runs, items)
-    if avg["average_execution_s"] is None and avg["average_processing_s"] is None:
+    if avg["total_end_to_end_s"] is None and avg["average_processing_s"] is None:
         st.info("The test is still running." if any(r.status in runner.ACTIVE_STATUSES for r in runs) else
                 "This test has no valid timing measurement: no iteration finished with every photo processed "
                 "while no farmer photos were being processed.")
     else:
         m = st.columns(2)
-        m[0].metric("Average Execution Time",
-                    f"{avg['average_execution_s']:.2f} seconds" if avg["average_execution_s"] is not None
-                    else "No valid measurement",
-                    help="Total elapsed time of the completed iterations ÷ their number. One iteration runs "
-                         "from the first photo sent to the test's Kafka topic until the last photo is "
-                         "processed by the test's own Spark Structured Streaming query. Finding, downloading "
-                         "and staging the photos, and starting Spark, happen before the timer starts. Iterations with a failed photo, or during which farmer photos were being "
-                         "processed, are left out.")
+        m[0].metric("Total Execution Time",
+                    f"{avg['total_end_to_end_s']:.2f} seconds" if avg["total_end_to_end_s"] is not None
+                    else "Not available",
+                    help="From pressing Start test until the system finished the last photo: preparing the "
+                         "photos, loading the CNN, starting Spark, Kafka, preprocessing, CNN and saving the "
+                         "results. Time spent waiting while farmer photos were processed is not counted; "
+                         "several iterations are added together; making the gallery previews afterwards is "
+                         "not included.")
         m[1].metric("Average Processing Time",
                     f"{avg['average_processing_s']:.4f} seconds/image" if avg["average_processing_s"] is not None
                     else "No valid measurement",
                     help="Per photo: preprocessing plus CNN inference, the same code the live pipeline runs. "
                          "Waiting in the queue, reading the file, Google Drive and the database are not "
                          "included. Photos processed while farmer photos were being processed are left out.")
+        if avg["total_end_to_end_s"] is None:
+            st.caption("Total Execution Time is not available for tests run before 11 October 2026, or when an "
+                       "iteration had a failed photo or ran while farmer photos were being processed.")
     shared_gpu = [i + 1 for i, r in enumerate(runs)
                   if json.loads(r.summary_json or "{}").get("spark_job_running")]
     if shared_gpu:
@@ -351,24 +354,47 @@ def _results_section(busy: bool):
     if not _gallery(first, df):
         _comparison(runs)               # tests from before the gallery: their one saved pair
 
-    st.divider()
+
+def _reset_section():
+    """The Delete test button: a complete reset of the scalability test
+    only (scalability/reset.py), then this page back to its defaults."""
+    st.subheader("Delete test")
+    st.caption("Deletes every scalability test: its staged images, previews, results, logs, its records, its "
+               "Kafka test events and a running test with its own Spark job. Your original photos, farmer "
+               "photos, Google Drive, the live Kafka topic and Spark job, the model and the training data "
+               "are not touched.")
     a1, a2 = st.columns(2)
-    confirm = a1.checkbox("Yes, delete this test", key=f"confirm_{runs[0].run_id}")
-    if a2.button("Delete test", icon="🗑️", key=f"del_{runs[0].run_id}", disabled=busy or not confirm):
-        try:
-            for r in runs:
-                runner.delete(r.run_id)
-            st.session_state["scale_msg"] = "Test deleted."
-        except Exception as e:  # noqa: BLE001
-            st.session_state["scale_msg"] = f"Delete failed: {e}"
+    confirm = a1.checkbox("Yes, delete all scalability test data", key="scale_reset_confirm")
+    if a2.button("Delete test", icon="🗑️", key="scale_reset", disabled=not confirm):
+        with st.spinner("Resetting the scalability test…"):
+            admin = (st.session_state.get("admin_user") or {}).get("username")
+            result = test_reset.reset_all(performed_by=admin)
+        for key in [k for k in st.session_state if str(k).startswith("scale_")]:
+            del st.session_state[key]            # widgets back to their defaults
+        st.session_state["scale_reset_result"] = result
         st.rerun()
+
+
+def _reset_message(result: dict) -> None:
+    if result["ok"]:
+        st.success("Scalability test deleted. Status: Ready — 0 test images, progress 0%.")
+        return
+    lines = [f"- **{s['step']}**: {'done' if s['ok'] else 'FAILED'} — {s['detail']}" for s in result["steps"]]
+    if result["left"]:
+        lines.append(f"- Still left: {', '.join(result['left'])}")
+    st.error("The scalability test was NOT completely deleted:\n\n" + "\n".join(lines)
+             + "\n\nNothing outside the scalability test was touched. Fix the problem and press Delete test again.")
 
 
 def render():
     if msg := st.session_state.pop("scale_msg", None):
         st.info(msg)
+    if result := st.session_state.pop("scale_reset_result", None):
+        _reset_message(result)
     _active_panel()
     busy = runner.active_job() is not None
     _setup_section(busy)
     st.divider()
     _results_section(busy)
+    st.divider()
+    _reset_section()

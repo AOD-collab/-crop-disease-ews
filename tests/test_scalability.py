@@ -325,6 +325,34 @@ def test_full_run_from_a_custom_folder(photo_folder, test_topic, downloads):
     assert _snapshot(photo_folder) == before                       # deleting never touches the folder
 
 
+def test_photos_on_another_drive_are_read_in_place_not_copied(photo_folder, test_topic, monkeypatch):
+    """os.link fails across drives; the test must then read the originals
+    where they are instead of filling the disk with copies."""
+    import os
+
+    def cross_drive(src, dst):
+        raise OSError(17, "The system cannot move the file to a different disk drive")
+    monkeypatch.setattr(os, "link", cross_drive)
+    before = _snapshot(photo_folder)
+    copies = []
+    import shutil
+    real_copy2 = shutil.copy2
+    monkeypatch.setattr(shutil, "copy2", lambda src, dst, **k: copies.append(dst) or real_copy2(src, dst, **k))
+
+    run_id = runner.start(10, source_dir=str(photo_folder))
+
+    with SessionLocal() as s:
+        run = s.get(ScaleTestRun, run_id)
+    summary = json.loads(run.summary_json)
+    assert run.status == "COMPLETED" and summary["completed"] == 4
+    staged = runner.run_dir(run_id) / "images"
+    assert not staged.exists() or not any(staged.iterdir())        # nothing staged, nothing copied
+    assert len(copies) == 1                                         # only the before/after picture
+    assert (runner.run_dir(run_id) / summary["comparison"]["before"]).is_file()
+    runner.delete(run_id)
+    assert _snapshot(photo_folder) == before                       # originals untouched
+
+
 def test_replay_of_a_folder_run_finds_renamed_photos(photo_folder, test_topic):
     first = runner.start(10, source_dir=str(photo_folder))
     (photo_folder / "leaf_1.jpg").rename(photo_folder / "renamed.jpg")
@@ -424,6 +452,24 @@ def _item(run_id, processing_s, status="COMPLETED", contended=False):
                            timings_json=json.dumps({"processing_s": processing_s, "contended": contended}))
 
 
+def test_total_execution_time_counts_from_pressing_start_for_every_iteration():
+    ok = [_run("a", execution_seconds=10.0, end_to_end_seconds=40.0, failed=0),
+          _run("b", execution_seconds=12.0, end_to_end_seconds=30.0, failed=0)]
+    assert report.series_averages(ok, [])["total_end_to_end_s"] == pytest.approx(70.0)
+    one_bad = ok + [_run("c", execution_seconds=9.0, end_to_end_seconds=20.0, failed=1)]
+    assert report.series_averages(one_bad, [])["total_end_to_end_s"] is None    # every iteration must count
+    old = [_run("d", execution_seconds=10.0, failed=0)]                           # before 11 October 2026
+    assert report.series_averages(old, [])["total_end_to_end_s"] is None
+
+
+def test_end_to_end_includes_setup_before_the_photo_timer(photo_folder, test_topic):
+    run_ids = runner.start_series(10, 2, source_dir=str(photo_folder))
+    with SessionLocal() as s:
+        summaries = [json.loads(s.get(ScaleTestRun, r).summary_json) for r in run_ids]
+    for sm in summaries:
+        assert sm["end_to_end_seconds"] >= sm["execution_seconds"] > 0
+
+
 def test_averages_leave_out_invalid_measurements():
     runs = [_run("a", execution_seconds=10.0, failed=0), _run("b", execution_seconds=20.0, failed=0),
             _run("c", execution_seconds=99.0, failed=0, live_overlap=True),     # farmers were processed
@@ -434,10 +480,13 @@ def test_averages_leave_out_invalid_measurements():
     avg = report.series_averages(runs, items)
     assert avg["average_execution_s"] == pytest.approx(15.0)                 # (10 + 20) / 2
     assert avg["average_processing_s"] == pytest.approx((0.2 + 0.4 + 0.3 + 0.6) / 4)
+    assert avg["total_execution_s"] == pytest.approx(30.0)                   # 10 + 20
+    assert avg["total_processing_s"] == pytest.approx(0.2 + 0.4 + 0.3 + 0.6)
 
     nothing = report.series_averages([_run("x", execution_seconds=5.0, failed=0, live_overlap=True)],
                                      [_item("x", 1.0, contended=True)])
     assert nothing["average_execution_s"] is None and nothing["average_processing_s"] is None
+    assert nothing["total_execution_s"] is None and nothing["total_processing_s"] is None
 
 
 def test_page_checks_a_custom_folder(photo_folder, drive):  # noqa: F811
@@ -461,7 +510,7 @@ def test_page_shows_averages_disease_data_and_every_photo(photo_folder, test_top
     at = _logged_in("Scalability Test")
 
     assert not at.exception
-    assert [m.label for m in at.metric] == ["Average Execution Time", "Average Processing Time"]
+    assert [m.label for m in at.metric] == ["Total Execution Time", "Average Processing Time"]
     assert at.metric[0].value.endswith(" seconds") and at.metric[1].value.endswith(" seconds/image")
     assert [h.value for h in at.subheader if h.value in ("Disease data", "All test photos")] == \
         ["Disease data", "All test photos"]
