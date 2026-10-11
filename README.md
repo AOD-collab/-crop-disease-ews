@@ -321,9 +321,9 @@ server-generated ids, so a client filename can never escape a storage root
 `dashboard/app.py` (Streamlit) is the ADMIN web application, behind its own
 login gate (ADMIN accounts only): Overview, Recent submissions, Pending
 review (MANUAL mode), Farmer management, Image management (section 31),
-Risk alerts, Analytics, Performance, System status, Label photos, Model
-training, Scalability test (section 32) and System settings (processing
-mode, factory reset). Every time on the Performance page is in seconds.
+Risk alerts, Analytics, System status, Label photos, Model training,
+Scalability test (section 32) and System settings (processing mode,
+factory reset).
 
 ## 17. Real-time architecture
 
@@ -537,7 +537,8 @@ incompatibility, a SQLite naive/aware datetime mismatch, and a pandas
 ## 26. Performance evaluation
 
 `spark/analytics.performance_metrics()` (surfaced at `/admin/system-status`
-and the dashboard's Performance tab) computes, from real recorded
+and by `scripts/perf_report.py`; the dashboard's Performance page was removed
+on 11 October 2026) computes, from real recorded
 timestamps only:
 
 - `avg_capture_to_upload_seconds` — only for images with a real EXIF/
@@ -550,8 +551,6 @@ timestamps only:
 - `total_processed` / `total_failed`
 
 Units: a name ending `_ms` is milliseconds, `_s` / `_seconds` is seconds.
-The dashboard's Performance page shows all four in **seconds** (the
-millisecond value divided by 1000) and explains each span.
 
 Throughput under load is measured by the scalability test (section 32,
 [SCALABILITY_TEST.md](SCALABILITY_TEST.md)) on this laptop.
