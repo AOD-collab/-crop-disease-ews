@@ -22,7 +22,7 @@ from tests.test_drive_flow import (
 
 DASHBOARD_APP_PATH = str(Path(__file__).resolve().parent.parent / "dashboard" / "app.py")
 PAGES = ["Overview", "Real-Time Monitoring", "Pending Review", "Users", "Images",
-         "Risk Alerts", "Analytics", "Performance", "System Status", "Label Photos", "Model Training",
+         "Risk Alerts", "Analytics", "System Status", "Label Photos", "Model Training",
          "Scalability Test", "Maintenance"]
 
 
@@ -256,26 +256,10 @@ def test_risk_alerts_shows_n_of_n_high_risk_per_municipality(drive):
     assert list(table["summary"]) == ["2 of 3 maize photos", "0 of 1 maize photo"]
 
 
-def test_performance_page_shows_every_time_in_seconds(drive):
-    """processing_latency_ms is stored in milliseconds; the page converts it
-    so every metric there is in seconds, and a real 0 is not shown as "—"."""
-    from datetime import datetime, timedelta, timezone
-    from storage.database import Image, Prediction
+def test_performance_page_is_gone(drive):
     _seed_admin_and_farmer()
-    t = datetime(2026, 10, 1, 3, 0, tzinfo=timezone.utc)
-    with SessionLocal() as s:
-        farmer = s.query(User).filter(User.username == "farmer1@gmail.com").one()
-        s.add(Image(image_id="img1", user_id=farmer.user_id, image_path="x.jpg", uploaded_at=t, ingested_at=t,
-                    status=ProcessingStatus.COMPLETED))
-        s.add(Prediction(image_id="img1", predicted_class="healthy", prediction_confidence=0.9,
-                         predicted_at=t + timedelta(seconds=4), processing_latency_ms=1500))
-        s.commit()
-    at = _logged_in("Performance")
-    metrics = {m.label: m.value for m in at.metric}
-    assert metrics["Avg Kafka → prediction"] == "1.50 s"                 # 1500 ms
-    assert metrics["Avg upload → Kafka"] == "0.0 s"                     # zero, not "—"
-    assert metrics["Avg upload → prediction"] == "4.0 s"
-    assert metrics["Avg capture → upload"] == "—"                       # no capture time recorded
+    at = _logged_in("Overview")
+    assert "nav_Performance" not in {b.key for b in at.sidebar.button}
 
 
 def test_open_page_is_highlighted_and_title_changes(drive):

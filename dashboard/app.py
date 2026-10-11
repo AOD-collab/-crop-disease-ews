@@ -209,12 +209,12 @@ with st.sidebar:
 # Menu as buttons. The page names below are what every `elif page == "..."`
 # compares against; only the icon + label shown is cosmetic.
 _PAGES = ["Overview", "Real-Time Monitoring", "Pending Review", "Users", "Images",
-          "Risk Alerts", "Analytics", "Performance", "System Status", "Label Photos", "Model Training",
+          "Risk Alerts", "Analytics", "System Status", "Label Photos", "Model Training",
           "Scalability Test", "Maintenance"]
 _NAV_ICONS = {
     "Overview": "📊", "Real-Time Monitoring": "🕒", "Pending Review": "📥",
     "Users": "👥", "Images": "🖼️",
-    "Risk Alerts": "🚨", "Analytics": "📈", "Performance": "⚡",
+    "Risk Alerts": "🚨", "Analytics": "📈",
     "System Status": "🩺", "Label Photos": "🏷️", "Model Training": "🧠", "Scalability Test": "🧪",
     "Maintenance": "🛠️",
 }
@@ -318,7 +318,6 @@ _PAGE_HEAD = {
                                    "cache."),
     "Risk Alerts": ("Risk alerts", "Leaves rated high risk, newest first."),
     "Analytics": ("Analytics", "Disease trends in every municipality over time, and the overall risk picture."),
-    "Performance": ("Performance", "How long each step of the pipeline takes."),
     "System Status": ("System status", "Whether every part of the pipeline is running right now."),
     "Label Photos": ("Label photos", "Put farmer photos in the right disease class so the next training learns from them."),
     "Model Training": ("Model training","Retrain the disease model on this laptop's GPU and choose when the system uses it."),
@@ -1037,32 +1036,6 @@ elif page == "Analytics":
         )
     if dist.empty and rt.empty and rdist.empty and dt.empty:
         st.info("No analytics available yet — no images have been fully processed.")
-
-elif page == "Performance":
-    perf = analytics.performance_metrics()
-    if not perf:
-        st.info("No performance data yet.")
-    else:
-        # One unit on this page: seconds. predictions.processing_latency_ms is
-        # stored in milliseconds and converted here; a real 0 stays 0, only a
-        # missing value shows "—".
-        def _secs(value, digits=1):
-            return "—" if value is None else f"{value:,.{digits}f} s"
-
-        ingest_ms = perf.get("avg_processing_latency_ms")
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Avg capture → upload", _secs(perf.get("avg_capture_to_upload_seconds")))
-        c2.metric("Avg upload → Kafka", _secs(perf.get("avg_upload_to_ingestion_seconds")))
-        c3.metric("Avg Kafka → prediction", _secs(None if ingest_ms is None else ingest_ms / 1000, 2))
-        c4.metric("Avg upload → prediction", _secs(perf.get("avg_end_to_end_latency_seconds")))
-        st.metric("Processed / Failed", f"{perf['total_processed']} / {perf['total_failed']}")
-        st.caption(
-            "All times are in seconds. Capture → upload: photo taken (EXIF or trusted capture time) to "
-            "upload; only for photos that have a capture time. Upload → Kafka: upload to the event being "
-            "published. Kafka → prediction: event published to prediction saved, including waiting in "
-            "Kafka, downloading the photo, preprocessing and the CNN. Upload → prediction: the whole way "
-            "(end to end)."
-        )
 
 elif page == "System Status":
     st.caption("Android → Google Drive → Kafka → Spark → Google Drive → Android. "
