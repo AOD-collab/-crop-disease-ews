@@ -155,8 +155,8 @@
     <string name="status_still_processing">Still processing — check \'My Images\' later, or the admin dashboard.</string>
     <string name="row_suffix_still_processing">%1$s — still processing</string>
     <string name="row_processing_failed">Processing failed: %1$s</string>
-    <string name="result_healthy">Healthy leaf (%1$.0f%% confidence)</string>
-    <string name="result_diseased">Disease: %1$s (%2$.0f%% confidence, risk %3$s, score %4$.3f)</string>
+    <string name="result_healthy">Healthy leaf (%1$.2f%% confidence)</string>
+    <string name="result_diseased">Disease: %1$s (%2$.2f%% confidence, risk %3$s, score %4$.2f)</string>
     <string name="error_could_not_parse">Couldn\'t parse server response: %1$s</string>
     <string name="content_description_remove_photo">Remove %1$s</string>
 
@@ -168,7 +168,7 @@
     <string name="error_load_history">Couldn\'t load history: %1$s</string>
     <string name="empty_no_uploads">No uploads yet.</string>
     <string name="outcome_healthy_caps">DI\'AK</string>
-    <string name="outcome_diseased_caps">DISEASED: %1$s (%2$.0f%% confidence, risk %3$s)</string>
+    <string name="outcome_diseased_caps">DISEASED: %1$s (%2$.2f%% confidence, risk %3$s)</string>
     <string name="outcome_failed_caps">FAILED: %1$s</string>
     <string name="outcome_pending_caps">PENDING — still processing</string>
 

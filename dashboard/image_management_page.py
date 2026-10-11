@@ -38,7 +38,7 @@ def _when(dt) -> str:
 
 
 def _pct(v) -> str:
-    return f"{v * 100:.0f}%" if v is not None and not pd.isna(v) else "—"
+    return f"{v * 100:.2f}%" if v is not None and not pd.isna(v) else "—"
 
 
 def _admin() -> str | None:
@@ -71,7 +71,7 @@ def _summary():
     st.markdown("**Files on this laptop**")
     c = st.columns(4)
     c[0].metric("Cached original photos", cached, help="Files in the original-photo cache.")
-    c[1].metric("Local storage used", f"{total_bytes / 1e6:,.0f} MB",
+    c[1].metric("Local storage used", f"{total_bytes / 1e6:,.2f} MB",
                 help="All image categories below; a hard-linked file is counted once.")
     c[2].metric("Missing or invalid copies", verdicts.get("missing", 0) + verdicts.get("invalid", 0),
                 help="Catalog images without a local copy, or whose copy differs from the original.")
@@ -299,14 +299,14 @@ def _storage():
         else:
             st.dataframe(pd.DataFrame([c.as_row() for c in candidates]), hide_index=True, use_container_width=True)
             mb = sum(c.size for c in candidates) / 1e6
-            st.warning(f"{len(candidates)} file(s), {mb:,.1f} MB would be deleted from this laptop.")
+            st.warning(f"{len(candidates)} file(s), {mb:,.2f} MB would be deleted from this laptop.")
             if "orphan_cache" in kinds:
                 st.caption("Files without a database record cannot be fetched again by this app.")
             ok = st.checkbox(f"I checked this list: delete these {len(candidates)} file(s)", key="im_clean_ok")
             if st.button(f"Delete {len(candidates)} file(s)", icon="🗑️", type="primary", disabled=not ok):
                 report = image_cache.cleanup(kinds, [c.rel for c in candidates], performed_by=_admin())
                 st.session_state.pop("im_preview", None)
-                st.session_state["im_msg"] = (f"Deleted {report['deleted']} file(s) ({report['bytes'] / 1e6:,.1f} MB); "
+                st.session_state["im_msg"] = (f"Deleted {report['deleted']} file(s) ({report['bytes'] / 1e6:,.2f} MB); "
                                               f"skipped {len(report['skipped'])}, failed {len(report['failed'])}. "
                                               "Recorded in the audit log.")
                 st.rerun()

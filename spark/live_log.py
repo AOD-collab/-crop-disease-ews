@@ -61,7 +61,7 @@ def photo_line(event: dict, status: str, result: dict = None, error: str = None,
     t = (result or {}).get("timings") or {}
     conf = result.get("prediction_confidence")
     verdict = (f"{result.get('predicted_class')}"
-               + (f" {conf * 100:.0f}%" if isinstance(conf, (int, float)) else "")
+               + (f" {conf * 100:.2f}%" if isinstance(conf, (int, float)) else "")
                + f"  risk {result.get('risk_level')}")
     stages = "  ".join(f"{label} {t[key]:.2f}s" for key, label in
                        (("read_s", "download"), ("preprocess_s", "preprocess"), ("cnn_s", "cnn"),

@@ -221,7 +221,7 @@ def _disease_section(first_run, df):
             fig = px.scatter_mapbox(
                 gps, lat="gps_latitude", lon="gps_longitude", color="predicted_class",
                 color_discrete_map=colors, hover_name="location",
-                hover_data={"prediction_confidence": ":.0%", "gps_latitude": ":.5f", "gps_longitude": ":.5f",
+                hover_data={"prediction_confidence": ":.2%", "gps_latitude": ":.5f", "gps_longitude": ":.5f",
                             "predicted_class": True},
                 labels={"predicted_class": "Disease", "prediction_confidence": "Confidence"},
                 zoom=8, height=420)
@@ -248,7 +248,7 @@ def _disease_section(first_run, df):
             column_config={
                 "location": st.column_config.TextColumn("Municipality"),
                 "summary": st.column_config.TextColumn("HIGH risk photos"),
-                "high_pct": st.column_config.ProgressColumn("Share HIGH", format="%.0f%%",
+                "high_pct": st.column_config.ProgressColumn("Share HIGH", format="%.2f%%",
                                                             min_value=0, max_value=100),
             },
             hide_index=True, use_container_width=True,
@@ -298,7 +298,7 @@ def _gallery(first_run, df):
                 if row["predicted_class"]:
                     conf = row["prediction_confidence"]
                     st.caption(f"**{row['predicted_class']}**"
-                               + (f" · {conf * 100:.0f}%" if conf is not None else "")
+                               + (f" · {conf * 100:.2f}%" if conf is not None else "")
                                + (f" · {row['risk_level']} risk" if row["risk_level"] else ""))
                 elif row["error_message"]:
                     st.caption(str(row["error_message"])[:120])

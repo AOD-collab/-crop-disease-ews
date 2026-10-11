@@ -40,7 +40,7 @@ def test_photo_line_shows_farmer_place_result_and_stage_times():
     result = {"predicted_class": "common_rust", "prediction_confidence": 0.912, "risk_level": "HIGH",
               "timings": {"read_s": 1.93, "preprocess_s": 0.14, "cnn_s": 0.05, "render_s": 0.3}}
     line = live_log.photo_line(_event(uid), "COMPLETED", result, seconds=2.81)
-    assert line.startswith("[photo]  0f1e2d3c  ana@gmail.com  Baucau  -> common_rust 91%  risk HIGH")
+    assert line.startswith("[photo]  0f1e2d3c  ana@gmail.com  Baucau  -> common_rust 91.20%  risk HIGH")
     assert "download 1.93s" in line and "cnn 0.05s" in line and "total 2.81s" in line
     failed = live_log.photo_line(_event(uid), "FAILED", error="Image file not found in Google Drive")
     assert "FAILED: Image file not found" in failed
@@ -69,7 +69,7 @@ def test_spark_prints_each_photo_and_its_drive_delivery(capsys, monkeypatch):
 
     assert job._process_one(_event(uid)).result() == ProcessingStatus.COMPLETED
     out = capsys.readouterr().out
-    assert "[photo]  0f1e2d3c  ana@gmail.com  Baucau  -> healthy 97%  risk LOW" in out
+    assert "[photo]  0f1e2d3c  ana@gmail.com  Baucau  -> healthy 97.00%  risk LOW" in out
     assert "delivered to ana@gmail.com's Drive" in out
 
     delivered["file"] = None                                  # Drive down: publish only logged it

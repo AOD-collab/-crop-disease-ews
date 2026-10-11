@@ -209,7 +209,7 @@ def test_system_status_reports_drive_database_and_backlog(drive):
         assert title in text, title
     assert "Connected as **central@gmail.com**" in text
     assert "1 farmer folder(s) registered" in text
-    assert "Storage used: 2.00 GB of 15 GB" in text
+    assert "Storage used: 2.00 GB of 15.00 GB" in text
     assert "SQLite" in text or "PostgreSQL" in text
 
 
@@ -250,7 +250,7 @@ def test_risk_alerts_shows_n_of_n_high_risk_per_municipality(drive):
 
     at = _logged_in("Risk Alerts")
 
-    assert "**2 of 4** analysed maize photos are HIGH risk (50%), across 2 municipalities." in _all_text(at)
+    assert "**2 of 4** analysed maize photos are HIGH risk (50.00%), across 2 municipalities." in _all_text(at)
     table = at.dataframe[0].value
     assert list(table["location"]) == ["Dili", "Baucau"]
     assert list(table["summary"]) == ["2 of 3 maize photos", "0 of 1 maize photo"]

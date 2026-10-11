@@ -428,7 +428,7 @@ def _system_status() -> dict:
             if info["usage_bytes"] is not None:
                 used = info["usage_bytes"] / 1e9
                 lines.append(f"Storage used: {used:.2f} GB"
-                             + (f" of {info['limit_bytes'] / 1e9:.0f} GB" if info["limit_bytes"] else ""))
+                             + (f" of {info['limit_bytes'] / 1e9:.2f} GB" if info["limit_bytes"] else ""))
             level = "ok"
             if info["limit_bytes"] and info["usage_bytes"] and info["usage_bytes"] > 0.9 * info["limit_bytes"]:
                 level = "warn"
@@ -622,7 +622,7 @@ if page == "Overview":
                 with qc3:
                     st.badge(img.status.value, color=STATUS_BADGE_COLOR.get(img.status.value, "gray"))
                     if pred:
-                        st.caption(f"{pred.predicted_class} ({(pred.prediction_confidence or 0) * 100:.0f}% confidence)")
+                        st.caption(f"{pred.predicted_class} ({(pred.prediction_confidence or 0) * 100:.2f}% confidence)")
                 with qc4:
                     with st.expander("View details"):
                         st.write({
@@ -942,7 +942,7 @@ elif page == "Risk Alerts":
         n_high, n_total = int(by_location["high"].sum()), int(by_location["total"].sum())
         st.subheader("HIGH risk by municipality")
         st.markdown(f"**{n_high} of {n_total}** analysed maize photos are HIGH risk "
-                    f"({n_high / n_total * 100:.0f}%), across {len(by_location)} "
+                    f"({n_high / n_total * 100:.2f}%), across {len(by_location)} "
                     + ("municipality." if len(by_location) == 1 else "municipalities."))
         st.dataframe(
             by_location.assign(summary=[f"{h} of {t} maize photo{'' if t == 1 else 's'}" for h, t in
@@ -951,7 +951,7 @@ elif page == "Risk Alerts":
             column_config={
                 "location": st.column_config.TextColumn("Municipality"),
                 "summary": st.column_config.TextColumn("HIGH risk"),
-                "high_pct": st.column_config.ProgressColumn("Share HIGH", format="%.0f%%",
+                "high_pct": st.column_config.ProgressColumn("Share HIGH", format="%.2f%%",
                                                             min_value=0, max_value=100),
             },
             hide_index=True, use_container_width=True,
@@ -974,7 +974,7 @@ elif page == "Risk Alerts":
                     st.markdown(f"**{row['location'] or 'Unknown location'}**")
                 cols = st.columns(3)
                 cols[0].metric("Disease", row["predicted_class"] or "—")
-                cols[1].metric("Confidence", f"{(row['prediction_confidence'] or 0)*100:.0f}%")
+                cols[1].metric("Confidence", f"{(row['prediction_confidence'] or 0)*100:.2f}%")
                 cols[2].metric("Risk Score", f"{row['risk_score']:.2f}" if pd.notna(row["risk_score"]) else "—")
                 st.caption(
                     f"Captured: {format_local(row['captured_at']) or '—'}  •  "

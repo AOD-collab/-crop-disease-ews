@@ -676,7 +676,7 @@ def test_photo_line_formats_results_failures_and_overlap():
     ok = ("COMPLETED", None, {"preprocess_s": 0.1234, "cnn_s": 0.05, "contended": True},
           {"predicted_class": "common_rust", "prediction_confidence": 0.973, "risk_level": "HIGH"})
     line = runner._photo_line(7, 120, "abcdef0123456789", ok)
-    assert "  7/120  abcdef01" in line and "preprocess 0.123s" in line and "common_rust 97%" in line
+    assert "  7/120  abcdef01" in line and "preprocess 0.12s" in line and "common_rust 97.30%" in line
     assert "risk HIGH" in line and "excluded" in line
     bad = runner._photo_line(1, 2, "deadbeef00", ("FAILED", "OSError: broken file", {}, None))
     assert "FAILED  OSError: broken file" in bad

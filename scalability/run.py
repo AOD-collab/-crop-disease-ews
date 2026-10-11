@@ -148,10 +148,10 @@ def _photo_line(n: int, total: int, item_id: str, outcome) -> str:
         return f"{head}  FAILED  {(error or '')[:120]}"
     conf = prediction.get("prediction_confidence")
     result = (f"{prediction.get('predicted_class')}"
-              + (f" {conf * 100:.0f}%" if isinstance(conf, (int, float)) else "")
+              + (f" {conf * 100:.2f}%" if isinstance(conf, (int, float)) else "")
               + f"  risk {prediction.get('risk_level')}")
     flag = "  (overlapped farmer processing — excluded)" if timings.get("contended") else ""
-    return (f"{head}  preprocess {timings.get('preprocess_s', 0):.3f}s  cnn {timings.get('cnn_s', 0):.3f}s"
+    return (f"{head}  preprocess {timings.get('preprocess_s', 0):.2f}s  cnn {timings.get('cnn_s', 0):.2f}s"
             f"  -> {result}{flag}")
 
 
@@ -609,7 +609,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
                                     f"{len(done) / elapsed if elapsed > 0 else 0:.2f} photos/s  "
                                     f"in workers {len(submitted) - len(done) - len(pending)}  "
                                     f"waiting in Kafka {len(ids) - len(submitted) - len(failures)}  "
-                                    f"elapsed {elapsed:.1f}s")
+                                    f"elapsed {elapsed:.2f}s")
                     if live and (now - last_emit >= 0.5 or len(done) >= len(ids)):
                         _emit(live)
                         live = []
@@ -623,7 +623,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
                 if gate.paused:
                     last_change = now           # waiting for farmers is not a stall
                 elif not pending and now - last_change > stall_seconds:
-                    log(f"{run_id}: no progress for {stall_seconds:.0f}s, stopping the wait")
+                    log(f"{run_id}: no progress for {stall_seconds:.2f}s, stopping the wait")
                     break
         t1 = time.monotonic()
         end_to_end = time.time() - started_wall - farmer_wait_s

@@ -140,7 +140,7 @@ def render():
             with right:
                 st.markdown(f"`{photo.stem}`")
                 if pred:
-                    conf = f" ({pred.prediction_confidence * 100:.0f}%)" if pred.prediction_confidence else ""
+                    conf = f" ({pred.prediction_confidence * 100:.2f}%)" if pred.prediction_confidence else ""
                     st.caption(f"AI prediction: {CLASSES.get(ai_class, ai_class)}{conf}")
                 st.markdown("**What disease is on this leaf?**")
                 buttons = st.columns(len(CLASSES))
