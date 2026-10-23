@@ -34,10 +34,14 @@
     <string name="nav_home">Home</string>
     <string name="nav_history">Istoria</string>
     <string name="nav_settings">Konfigurasaun</string>
+    <string name="hint_password">Password</string>
     <string name="dash_placeholder">—</string>
     <string name="unknown_location">Unknown location</string>
+    <string name="error_could_not_reach_server">Couldn\'t reach server: %1$s</string>
+    <string name="error_unexpected_response">Unexpected server response: %1$s</string>
     <string name="error_unknown_error">unknown error</string>
     <string name="session_expired_toast">Your session expired — please log in again</string>
+    <string name="server_error">Server error (%1$d)</string>
     <string name="outcome_healthy_label">Saudavel</string>
     <string name="outcome_diseased_label">Moras</string>
     <string name="outcome_pending_label">Pending</string>
@@ -46,6 +50,45 @@
     <!-- Login screen -->
     <string name="login_screen_title">Crop Disease Early Warning</string>
     <string name="login_subtitle">Field data collection — sign in</string>
+    <string name="hint_username">Username</string>
+    <string name="btn_log_in">Tama</string>
+    <string name="register_link">Don\'t have an account? Register</string>
+    <string name="error_enter_username">Enter your username</string>
+    <string name="error_enter_password">Enter your password</string>
+    <string name="error_invalid_credentials">Invalid username or password</string>
+    <string name="error_login_failed_with_body">Login failed (%1$d): %2$s</string>
+    <string name="error_login_failed">Login failed (%1$d)</string>
+
+    <!-- Register screen -->
+    <string name="register_screen_title">Create your account</string>
+    <string name="register_subtitle">Register with your Gmail address — we\'ll send you a verification code</string>
+    <string name="hint_full_name">Naran Kompletu</string>
+    <string name="hint_gmail_address">Gmail Address</string>
+    <string name="hint_confirm_password">Confirm Password</string>
+    <string name="register_password_requirements_caption">Password must be at least 8 characters and include a letter and a number.</string>
+    <string name="btn_create_account">Kria Konta</string>
+    <string name="login_link">Already have an account? Log in</string>
+    <string name="error_enter_full_name">Enter your full name</string>
+    <string name="error_enter_gmail">Enter your Gmail address</string>
+    <string name="error_invalid_gmail">Enter a valid Gmail address (e.g. name@gmail.com)</string>
+    <string name="error_enter_password_register">Enter a password</string>
+    <string name="error_password_requirements">Password must be at least 8 characters and include a letter and a number</string>
+    <string name="error_passwords_do_not_match">Passwords do not match</string>
+    <string name="error_registration_failed">Registration failed (%1$d)</string>
+
+    <!-- Verify email screen -->
+    <string name="verify_screen_title">Verify your Gmail</string>
+    <string name="verify_subtitle_default">A verification code has been sent to your Gmail address.</string>
+    <string name="verify_subtitle_with_email">A verification code has been sent to:\n%1$s</string>
+    <string name="hint_code">6-digit code</string>
+    <string name="btn_verify">Verifika</string>
+    <string name="code_expires_default">Code expires in 10:00</string>
+    <string name="code_expires_in">Code expires in %1$d:%2$02d</string>
+    <string name="code_expired">Your code has expired</string>
+    <string name="btn_resend_code">Resend Code</string>
+    <string name="error_enter_code">Enter the 6-digit code from your email</string>
+    <string name="error_request_failed">Request failed (%1$d)</string>
+    <string name="verified_success_message">Gmail verified successfully. Your account is now active.</string>
 
     <!-- Home screen -->
     <string name="home_greeting_default">Bem-vindu.</string>
@@ -74,9 +117,11 @@
     <string name="btn_choose_gallery">Hili husi Galeria</string>
     <string name="btn_upload_check_risk">Upload &amp; Check Risk</string>
     <string name="toast_camera_permission_required">Camera permission is required to take a photo</string>
+    <string name="toast_max_batch_size">You can upload up to %1$d photos at once</string>
     <string name="toast_pick_photo_first">Take or choose at least one photo first</string>
     <string name="toast_enter_location">Enter a location, or pick one from the list</string>
     <string name="toast_select_location">Hili fatin (munisípiu) molok haruka foto</string>
+    <string name="status_uploading">Haruka fotografia %1$d ba Google Drive…</string>
     <string name="history_refreshing">Saved on this phone — updating from Google Drive…</string>
     <string name="history_saved_offline">Saved on this phone — could not reach Google Drive, so new results may be missing.</string>
     <!-- Upload queue: sentences left in English (see tetum_translations.md convention) -->
@@ -100,14 +145,19 @@
     <string name="upload_done_some_failed">Upload finished: %1$d sent, %2$d not sent. Open the app to retry.</string>
     <string name="upload_done_no_access">Upload stopped: this Google account has no access to its Drive folder yet. Ask the administrator.</string>
     <string name="upload_paused_sign_in">Upload paused: please open the app and sign in again. %1$d photo(s) are waiting.</string>
+    <string name="status_upload_failed">Upload failed: %1$s\nCheck that this phone has internet access and the server is reachable.</string>
     <string name="row_waiting_to_process">%1$s — waiting to process…</string>
+    <string name="row_rejected">%1$s — rejected: %2$s</string>
     <string name="row_failed">%1$s — failed: %2$s</string>
+    <string name="row_status_generic">%1$s — %2$s</string>
     <string name="error_invalid_file">invalid file</string>
+    <string name="status_processing_batch">Prosesa fotografia %1$d (Google Drive → Kafka → Spark → CNN)…</string>
     <string name="status_still_processing">Still processing — check \'My Images\' later, or the admin dashboard.</string>
     <string name="row_suffix_still_processing">%1$s — still processing</string>
     <string name="row_processing_failed">Processing failed: %1$s</string>
     <string name="result_healthy">Healthy leaf (%1$.2f%% confidence)</string>
     <string name="result_diseased">Disease: %1$s (%2$.2f%% confidence, risk %3$s, score %4$.2f)</string>
+    <string name="error_could_not_parse">Couldn\'t parse server response: %1$s</string>
     <string name="content_description_remove_photo">Remove %1$s</string>
 
     <!-- History screen -->

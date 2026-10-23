@@ -73,4 +73,7 @@
         <item name="iconTint">@color/accent_text</item>
     </style>
 
+    <style name="Widget.CropDisease.OutcomeChip" parent="Widget.Material3.Chip.Filter">
+        <item name="chipCornerRadius">20dp</item>
+    </style>
 </resources>

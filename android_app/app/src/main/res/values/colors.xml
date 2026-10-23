@@ -11,6 +11,7 @@
          readable stand-in for anywhere a "branded" text/link color is
          wanted (see values-night for why it differs there). -->
     <color name="brand_primary">#F0B429</color>
+    <color name="brand_primary_dark">#C98500</color>
     <color name="brand_on_primary">#1B1B1B</color>
     <color name="brand_primary_container">#FCE8B0</color>
     <color name="brand_on_primary_container">#5C4300</color>
@@ -23,14 +24,17 @@
     <color name="surface">#FFFFFF</color>
     <color name="page_background">#FAF7EF</color>
     <color name="divider">#EAE3D2</color>
+    <color name="border">#1A1B1B1B</color>
 
     <!-- Status palette (fixed — never themed; validated for both light and
          dark surfaces). Maps onto this app's four upload outcomes:
          healthy=good, diseased=critical, failed=serious, pending=muted
          (pending isn't a verdict yet, so it stays neutral, not colored). -->
     <color name="status_good">#0CA30C</color>
+    <color name="status_warning">#FAB219</color>
     <color name="status_serious">#EC835A</color>
     <color name="status_critical">#D03B3B</color>
 
     <color name="error_text">#D03B3B</color>
+    <color name="link_text">#8A6100</color>
 </resources>
