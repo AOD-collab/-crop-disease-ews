@@ -77,7 +77,6 @@ PREPARE_STATUS_FILE = REPORTS_DIR / "_prepare_status.json"
 # Where runs from before the isolation (2026-10-10) staged their photos;
 # only clean-up still looks here.
 LEGACY_STAGING_ROOT = IMAGE_STORAGE_PATH / "scalability"
-SCALE_TEST_EMAIL = "scalability-test@system.local"
 ACTIVE_STATUSES = ("PREPARING", "RUNNING")
 CHUNK = 500
 
