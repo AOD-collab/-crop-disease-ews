@@ -9,8 +9,8 @@ pattern for bringing Python ML into Structured Streaming).
 Google Drive (Android -> Drive -> Kafka -> Spark -> Drive -> Android):
     For events whose image_path is "gdrive:<file id>", the image is
     downloaded from Google Drive (not read from local disk), the EXIF
-    capture time is read here (the API never sees the bytes in that
-    flow), and after the result is stored, publish_result_to_drive() writes
+    capture time is read here (the original bytes only reach the
+    laptop here), and after the result is stored, publish_result_to_drive() writes
     /results/<image_id>.json to Google Drive for the Android app to read.
 
 Classification vs risk (DIT manual section 26):
@@ -151,8 +151,8 @@ def clean_event(event: dict) -> dict:
 def _clean_drive_event(event: dict) -> dict:
     """Validation for a Google Drive image (the Drive counterpart of the
     local-disk checks in clean_event): the file must still exist in Drive,
-    not be trashed, and carry this event's image_id (set by the API when it
-    created the upload session) — so a Kafka event can't point Spark at an
+    not be trashed, and carry this event's image_id (set by the phone when it
+    uploaded the photo) — so a Kafka event can't point Spark at an
     arbitrary Drive file."""
     file_id = drive_file_id_from_path(event["image_path"])
     if event.get("drive_file_id") and event["drive_file_id"] != file_id:
@@ -591,8 +591,8 @@ def persist_result(
 # Spark -> Google Drive /results
 # ---------------------------------------------------------------------------
 def _prediction_to_dict(p: Prediction) -> dict:
-    """Same fields as api/server.py _prediction_summary(), so the Android
-    app parses a Drive result exactly like a database result."""
+    """The prediction fields of a Drive result file, in the shape the Android
+    app parses (DriveRest.kt)."""
     return {
         "prediction_id": p.prediction_id, "image_id": p.image_id,
         "predicted_class": p.predicted_class, "prediction_confidence": p.prediction_confidence,

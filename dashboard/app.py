@@ -37,7 +37,7 @@ from config.localtime import format_local, now_local
 # Table columns: same "28/09/2026 21:37" Timor-Leste Time as everywhere else.
 _TLT_COL = st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm", timezone="Asia/Dili")
 TIME_COLUMNS = {c: _TLT_COL for c in ("captured_at", "uploaded_at", "processed_at", "predicted_at")}
-from api.auth import verify_password, normalize_email
+from storage.auth import verify_password, normalize_email
 from storage.image_storage import is_drive_path, drive_file_id_from_path, resolve_image_path, downloaded_photo_path
 from storage import drive_client
 from spark import analytics
@@ -223,7 +223,7 @@ page = st.session_state["page"]
 
 # ------------------------------------------------------------------
 # Image-processing mode switch (AUTOMATIC / MANUAL). Persisted in the
-# system_settings table so the REST API sees the same value.
+# system_settings table so the Drive watcher sees the same value.
 # ------------------------------------------------------------------
 def _switch_to_manual():
     s = SessionLocal()

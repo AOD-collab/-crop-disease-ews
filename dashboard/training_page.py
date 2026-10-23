@@ -17,7 +17,7 @@ dataset and train.py) on this same laptop. This page only:
     but only if it scores better than the model in use (a new run can be
     worse; dashboard/model_ops.py train_and_deploy), or by hand with the
     Deploy button. ml/inference.py reloads the file when it changes, so
-    Spark and the API use the new model without a restart.
+    Spark uses the new model without a restart.
 
 Where the training project lives (.env):
     TRAINING_PROJECT_DIR   default C:\\Users\\user\\OneDrive\\Pictures\\crop_disease_ews
@@ -257,7 +257,7 @@ def _restore_backup(backup: Path) -> None:
 
 def _after_model_swap() -> None:
     _checkpoint_info.clear()
-    try:  # only this dashboard process; Spark and the API cache their own copy
+    try:  # only this dashboard process; Spark caches its own copy
         from ml import inference
         inference._load_trained_model.cache_clear()
     except Exception:  # noqa: BLE001
@@ -443,7 +443,7 @@ def _deploy_section(running: bool, test_metrics: dict):
             st.error(f"Deploy failed — the model in use was not changed. {msg[1]}")
     if msg or st.session_state.get("_restored"):
         st.session_state.pop("_restored", None)
-        st.info("Spark and the API pick up the new model on their next prediction — no restart needed.",
+        st.info("Spark picks up the new model on its next prediction — no restart needed.",
                 icon="🔁")
 
     backups = sorted(BACKUP_DIR.glob("*.pt"), reverse=True) if BACKUP_DIR.exists() else []

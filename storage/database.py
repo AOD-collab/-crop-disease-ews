@@ -62,8 +62,8 @@ class Role(str, enum.Enum):
 
 
 class UserStatus(str, enum.Enum):
-    # PENDING_VERIFICATION: newly self-registered, Gmail not yet confirmed —
-    # cannot log in (see api/deps.py get_current_user / api/server.py login).
+    # PENDING_VERIFICATION: self-registered through the removed REST API,
+    # Gmail never confirmed. Kept so existing rows stay valid.
     PENDING_VERIFICATION = "PENDING_VERIFICATION"
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
@@ -77,10 +77,10 @@ class RiskLevel(str, enum.Enum):
 
 
 class ProcessingStatus(str, enum.Enum):
-    UPLOADED = "UPLOADED"          # row created by the API, not yet ingested
+    UPLOADED = "UPLOADED"          # row created (Drive watcher), not yet published to Kafka
     # MANUAL processing mode only: the image is stored but deliberately held
     # back — nothing is published to Kafka until an admin clicks "Process"
-    # (api/server.py admin_process_image / the dashboard button). AUTOMATIC
+    # on the dashboard. AUTOMATIC
     # mode never uses this state, so the existing pipeline is unaffected.
     PENDING_REVIEW = "PENDING_REVIEW"
     INGESTED = "INGESTED"          # Kafka event published/consumed
@@ -103,15 +103,14 @@ class User(Base):
     role = Column(Enum(Role), nullable=False, default=Role.USER)
     # Default stays ACTIVE so every existing/programmatic user-creation path
     # (bootstrap admin, ORM-created test fixtures, etc.) keeps working
-    # unchanged. Self-registration (api/server.py register()) explicitly
-    # overrides this to PENDING_VERIFICATION.
+    # unchanged. (Self-registration through the removed REST API set
+    # PENDING_VERIFICATION instead.)
     status = Column(Enum(UserStatus), nullable=False, default=UserStatus.ACTIVE)
 
-    # --- Gmail verification (section 3/6 of the registration feature) ---
+    # --- Gmail verification (the removed REST API's self-registration;
+    # columns kept so the schema and existing rows stay unchanged) ---
     email_verified = Column(Boolean, nullable=False, default=False)
-    # Only a hash of the verification code is ever stored — never the code
-    # itself (section 11: "Never store passwords/verification codes as
-    # plain text" / "never expose the verification code via the API").
+    # Only a hash of the verification code was ever stored, never the code.
     verification_code_hash = Column(String, nullable=True)
     verification_code_expires_at = Column(DateTime(timezone=True), nullable=True)
     verification_attempts = Column(Integer, nullable=False, default=0)
@@ -145,8 +144,8 @@ class Image(Base):
     original_filename = Column(String, nullable=True)
     image_path = Column(String, nullable=False)   # storage/images/YYYY/MM/DD/<uuid>.jpg
     source = Column(String, nullable=False, default="android_upload")
-    # SHA-256 of the uploaded bytes — lets the API flag repeat uploads of the
-    # same photo (same content re-submitted, possibly under a new filename).
+    # SHA-256 of the uploaded bytes — identifies repeat uploads of the same
+    # photo (same content re-submitted, possibly under a new filename).
     content_hash = Column(String, nullable=True)
 
     # --- timestamp pipeline (see README "Timestamp pipeline") ---
@@ -245,11 +244,11 @@ class ProcessingEvent(Base):
 
     event_id = Column(String, primary_key=True, default=new_uuid)
     image_id = Column(String, ForeignKey("images.image_id"), nullable=False)
-    # When the API published this event to Kafka (was misleadingly stored in
-    # kafka_received_at before; see persist_result()).
+    # When the event was published to Kafka — the image's ingested_at (was
+    # misleadingly stored in kafka_received_at before; see persist_result()).
     api_published_at = Column(DateTime(timezone=True), nullable=True)
     # When Spark's foreachBatch sink actually received/started handling this
-    # event — genuinely Spark-side now, not the API's publish time.
+    # event — genuinely Spark-side, not the publish time.
     kafka_received_at = Column(DateTime(timezone=True), nullable=True)
     spark_started_at = Column(DateTime(timezone=True), nullable=True)
     spark_completed_at = Column(DateTime(timezone=True), nullable=True)
@@ -281,8 +280,8 @@ class RejectedEvent(Base):
 
 # ----------------------------------------------------------------------
 # system_settings — tiny key/value store for runtime-toggleable settings
-# that must be shared across separate processes (the REST API and the
-# Streamlit dashboard run independently). Currently holds only the
+# that must be shared across separate processes (the Streamlit dashboard
+# and the Drive watcher run independently). Currently holds only the
 # image-processing mode.
 # ----------------------------------------------------------------------
 class SystemSetting(Base):
@@ -456,7 +455,7 @@ if DATABASE_URL.startswith("sqlite"):
     @event.listens_for(engine, "connect")
     def _sqlite_wal(dbapi_conn, _record):
         # WAL lets outside readers (a live Tableau connection, DB Browser)
-        # read while the API/Spark write, instead of a reader's lock making
+        # read while Spark/the dashboard write, instead of a reader's lock making
         # writers fail with "database is locked". Persistent on the file.
         dbapi_conn.execute("PRAGMA journal_mode=WAL")
 
@@ -708,10 +707,3 @@ def init_db():
         _create_admin_catalog_view(conn)
 
 
-def get_session():
-    """FastAPI dependency: yields a session, always closes it."""
-    session = SessionLocal()
-    try:
-        yield session
-    finally:
-        session.close()

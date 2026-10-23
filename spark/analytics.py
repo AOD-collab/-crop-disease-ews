@@ -22,10 +22,9 @@ def _read_sql(query: str) -> pd.DataFrame:
 
 
 def _clean_record(record: dict) -> dict:
-    """pandas NaT/NaN don't serialize to JSON the way FastAPI's default
-    encoder expects (NaT becomes the literal string "NaT", not null) —
-    normalize both to None, and pandas Timestamps to ISO strings, before a
-    record crosses the API boundary."""
+    """pandas NaT/NaN become None and pandas Timestamps ISO strings, so a
+    record is plain JSON-safe values (NaT would otherwise show up as the
+    literal string "NaT")."""
     cleaned = {}
     for key, value in record.items():
         if isinstance(value, pd.Timestamp):
@@ -35,19 +34,6 @@ def _clean_record(record: dict) -> dict:
         else:
             cleaned[key] = value
     return cleaned
-
-
-def to_json_safe_records(df: pd.DataFrame) -> list:
-    """Convert a DataFrame to a list of dicts safe to return from a JSON
-    API endpoint. pandas aggregations (e.g. the mean of an all-NaN group —
-    routine right after an upload, before Spark has produced any
-    prediction yet) can leave NaN/NaT in the result; Python's `json.dumps`
-    rejects NaN outright (`ValueError: Out of range float values are not
-    JSON compliant: nan`), so every record must go through `_clean_record`
-    before crossing the API boundary. Dashboard call sites that need a
-    DataFrame for plotly should keep calling the un-cleaned functions
-    below directly."""
-    return [_clean_record(r) for r in df.to_dict(orient="records")]
 
 
 def images_with_predictions() -> pd.DataFrame:
@@ -104,10 +90,9 @@ def images_with_predictions() -> pd.DataFrame:
 def kpi_summary() -> dict:
     df = images_with_predictions()
     # Soft-deleted USERs are kept for historical integrity (their images/
-    # predictions stay fully queryable — see admin_delete_user in
-    # api/server.py) but shouldn't inflate a "how many active accounts do
-    # we have" headline count, consistent with admin_list_users excluding
-    # them by default.
+    # predictions stay fully queryable) but shouldn't inflate a "how many
+    # active accounts do we have" headline count, consistent with the
+    # dashboard's user list excluding them by default.
     total_users = pd.read_sql("SELECT COUNT(*) AS n FROM users WHERE NOT is_deleted", engine)["n"].iloc[0]
 
     predicted_class_lower = df["predicted_class"].astype(str).str.lower()
@@ -200,19 +185,6 @@ def disease_trend_by_location(df: pd.DataFrame = None) -> pd.DataFrame:
     out = (done.assign(location=location, day=day)
            .groupby(["location", "day", "predicted_class"]).size().reset_index(name="photos"))
     return out.sort_values(["location", "day", "predicted_class"]).reset_index(drop=True)[cols]
-
-
-def location_summary() -> pd.DataFrame:
-    df = images_with_predictions()
-    if df.empty:
-        return df
-    grouped = df.groupby(["location"], dropna=False).agg(
-        total_images=("image_id", "count"),
-        high_risk_count=("risk_level", lambda s: (s == "HIGH").sum()),
-        avg_risk_score=("risk_score", "mean"),
-        last_upload=("uploaded_at", "max"),
-    ).reset_index()
-    return grouped.sort_values("avg_risk_score", ascending=False)
 
 
 def performance_metrics() -> dict:

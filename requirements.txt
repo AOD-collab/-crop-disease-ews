@@ -1,8 +1,4 @@
-# --- API / web ---
-fastapi
-uvicorn[standard]
-python-multipart
-pydantic
+# --- Config ---
 python-dotenv  # loads a local .env in config/settings.py (dev convenience)
 
 # --- Database (SQLite for local dev, PostgreSQL in production — see
@@ -10,8 +6,7 @@ python-dotenv  # loads a local .env in config/settings.py (dev convenience)
 sqlalchemy
 psycopg2-binary
 
-# --- Auth ---
-pyjwt
+# --- Accounts (password hashing, storage/auth.py) ---
 bcrypt
 
 # --- Streaming ---
@@ -34,7 +29,6 @@ plotly
 
 # --- Testing ---
 pytest
-httpx
 piexif
 
 # --- Scalability/performance testing (scalability/, scripts/perf_report.py) ---

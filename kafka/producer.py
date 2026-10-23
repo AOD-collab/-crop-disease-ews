@@ -23,8 +23,8 @@ from kafka.config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_USE_LOCAL_FALLBACK, LOCA
 
 LOCAL_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
 
-# One append at a time within this process: the API serves uploads from a
-# thread pool, and two threads appending to the queue file at once could
+# One append at a time within this process: a publisher may send from
+# several threads, and two threads appending to the queue file at once could
 # interleave their lines.
 _APPEND_LOCK = threading.Lock()
 
@@ -59,8 +59,8 @@ class KafkaBackend:
         # Without checking it, a broker that goes down after get_backend()
         # succeeded makes send() return cleanly while the event is never
         # delivered — which is exactly how uploads end up marked INGESTED
-        # by the API but never processed. Surface it so the caller
-        # (api/server.py) can mark the image FAILED and tell the client.
+        # but never processed. Surface it so the caller
+        # (storage/pipeline_submit.py) can tell the image wasn't queued.
         from confluent_kafka import KafkaException
         errors = []
 
@@ -132,7 +132,7 @@ class ResilientBackend:
     """Kafka when the broker is reachable, the local file queue when it is
     not — decided on EVERY send, not once at process start.
 
-    Long-running publishers (the API's cached backend, kafka/drive_watcher)
+    Long-running publishers (kafka/drive_watcher, the dashboard)
     used to call get_backend() once at startup. If Kafka happened to be down
     at that moment they stayed on LocalFileBackend for their whole lifetime:
     every later upload was appended to storage/local_queue/*.jsonl and marked
@@ -195,8 +195,8 @@ class ResilientBackend:
 
     def _claim_files(self) -> list:
         """Claims the queue file plus any orphaned claim, each by renaming it
-        to a fresh .draining-<uuid> name. The rename is the lock: the API and
-        the Drive watcher (separate processes sharing the file) never both
+        to a fresh .draining-<uuid> name. The rename is the lock: the Drive watcher
+        and the dashboard (separate processes sharing the file) never both
         forward the same backlog; a rename that fails means someone else
         holds that file — it is skipped."""
         path = self._local.path

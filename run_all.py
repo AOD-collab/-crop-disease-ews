@@ -6,34 +6,24 @@ its own console window:
     * Kafka broker        docker compose up -d             localhost:9092
     * Spark streaming job  python -m spark.streaming_job
     * Admin dashboard      streamlit run dashboard/app.py   http://localhost:8501
-    * Mail-outbox sender   python scripts/send_outbox_mail.py (only with --mail: it sends the
-                           old verification-code emails; farmers now sign in with Google)
     * Drive watcher        python -m kafka.drive_watcher    (Google Drive /images -> Kafka)
 
 The Android app talks only to Google Drive; the Drive watcher is what
 brings its uploads into Kafka. It is skipped (with a message) until
 `python scripts/drive_authorize.py` has been run once — see DRIVE_SETUP.md.
 
-The REST API is NOT started by this script — run it yourself:
-    python -m uvicorn api.server:app --host 0.0.0.0 --port 8000
-(pass --api to have this script start it too). The Android app does NOT use
-the API — it talks only to Google Drive — so no public address, ngrok or
-port forwarding is needed.
+There is no server of ours for the phone to reach, so no public address,
+ngrok or port forwarding is needed.
 
-Config (JWT_SECRET, BOOTSTRAP_ADMIN_PASSWORD, PYSPARK_PYTHON) is read from the
-.env file in this folder by config/settings.py — edit that, not this. You do
-NOT need to set JWT_SECRET by hand; .env already carries one, and it should
-stay constant so existing login tokens keep working.
+Config (BOOTSTRAP_ADMIN_PASSWORD, PYSPARK_PYTHON, ...) is read from the
+.env file in this folder by config/settings.py — edit that, not this.
 
 Examples
 --------
     python run_all.py                     # DB init + Kafka + Spark + dashboard + Drive watcher
     python run_all.py --no-kafka          # skip starting a broker (one already running / started elsewhere)
     python run_all.py --no-spark          # skip the Spark streaming job
-    python run_all.py --mail              # also start the old mail-outbox sender
     python run_all.py --no-drive          # skip the Google Drive watcher
-    python run_all.py --api               # also start the REST API (uvicorn on :8000)
-    python run_all.py --api --reload      # ...under uvicorn --reload
     python run_all.py --reset             # factory-reset pipeline data + Kafka messages first (keeps users/admins)
     python run_all.py --stop              # stop everything this script started
 """
@@ -203,15 +193,10 @@ def main() -> int:
     p.add_argument("--no-kafka", action="store_true", help="don't start a Kafka broker (one is already running elsewhere)")
     p.add_argument("--no-spark", action="store_true", help="don't start the Spark streaming job")
     p.add_argument("--no-dashboard", action="store_true", help="don't start the Streamlit dashboard")
-    p.add_argument("--mail", action="store_true",
-                   help="also start the scripts/send_outbox_mail.py watcher (old verification-code emails; "
-                        "not needed with Google sign-in)")
-    p.add_argument("--no-mail", action="store_true", help=argparse.SUPPRESS)  # old flag, now the default
+    p.add_argument("--no-mail", action="store_true", help=argparse.SUPPRESS)  # old flag: accepted, does nothing
     p.add_argument("--no-drive", action="store_true", help="don't start the Google Drive -> Kafka watcher")
     p.add_argument("--no-kafka-monitor", action="store_true",
                    help="don't open the read-only EWS-KafkaMonitor window (live view of the Kafka topic)")
-    p.add_argument("--api", action="store_true", help="also start the REST API (uvicorn on :8000) — off by default, run it yourself")
-    p.add_argument("--reload", action="store_true", help="with --api: run uvicorn under --reload")
     p.add_argument("--reset", action="store_true", help="factory-reset pipeline data first (keeps users/admins)")
     p.add_argument("--stop", action="store_true", help="stop everything a previous run started")
     args = p.parse_args()
@@ -249,7 +234,7 @@ def main() -> int:
         PID_FILE.unlink()  # stale file, all dead
 
     # ---- dependency sanity check --------------------------------------
-    if subprocess.run([sys.executable, "-c", "import uvicorn, streamlit, fastapi, sqlalchemy"]).returncode != 0:
+    if subprocess.run([sys.executable, "-c", "import streamlit, sqlalchemy"]).returncode != 0:
         print("Python dependencies are missing. Run:  pip install -r requirements.txt")
         return 1
 
@@ -316,15 +301,6 @@ def main() -> int:
     print("\nLaunching components:")
     services: list[dict] = []
 
-    if args.api:
-        if port_in_use(8000):
-            print("  skipped API        - port 8000 already in use (something already running there?)")
-        else:
-            api = ["python", "-m", "uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000"]
-            if args.reload:
-                api.append("--reload")
-            services.append(start_service("EWS-API", api))
-
     if not args.no_spark:
         services.append(start_service("EWS-Spark", ["python", "-m", "spark.streaming_job"]))
 
@@ -338,9 +314,6 @@ def main() -> int:
         else:
             services.append(start_service("EWS-Dashboard",
                                           ["python", "-m", "streamlit", "run", "dashboard/app.py"]))
-
-    if args.mail:
-        services.append(start_service("EWS-Mail", ["python", "scripts/send_outbox_mail.py"]))
 
     if not args.no_drive:
         from storage import drive_client
@@ -384,11 +357,9 @@ def main() -> int:
 
     # ---- 4. report ------------------------------------------------
     print("\nUp. Open:")
-    if args.api:
-        print("  API docs   http://localhost:8000/docs")
     if not args.no_dashboard:
         print("  Dashboard  http://localhost:8501")
-    print("  Android    talks only to Google Drive - no API, ngrok or port forwarding needed")
+    print("  Android    talks only to Google Drive - no ngrok or port forwarding needed")
 
     print("\nStop everything with:  python run_all.py --stop")
     return 0

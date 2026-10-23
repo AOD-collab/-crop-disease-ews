@@ -4,8 +4,8 @@ processing.
 
 Background
 ----------
-`api/server.py` marks an image `INGESTED` the moment its upload event is
-published to Kafka. Turning that into a prediction (`COMPLETED`) is a
+`storage/pipeline_submit.py` marks an image `INGESTED` the moment its upload
+event is published to Kafka. Turning that into a prediction (`COMPLETED`) is a
 separate process — `spark/streaming_job.py`. If the Spark consumer is not
 running when the event is published (crash, never started, killed by
 `run_all.py --stop`), or if the Kafka topic is wiped underneath a stale
@@ -72,7 +72,7 @@ _RETRYABLE_FAILURE_MARKERS = (
 
 
 def _event_from_image(img: Image) -> dict:
-    """Rebuild the exact event dict api/server.py publishes on upload."""
+    """Rebuild the exact upload event storage/pipeline_submit.py publishes."""
     return {
         "image_id": img.image_id,
         "user_id": img.user_id,

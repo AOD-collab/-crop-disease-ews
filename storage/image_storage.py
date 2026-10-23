@@ -11,7 +11,6 @@ Persistent image storage per DIT manual section 12.
 - Keeps the original image bytes unmodified (no forced re-compression).
 """
 
-import hashlib
 import re
 import uuid
 from datetime import datetime, timezone
@@ -24,12 +23,6 @@ from config.settings import (
 
 class InvalidImage(Exception):
     pass
-
-
-def compute_content_hash(image_bytes: bytes) -> str:
-    """SHA-256 of the raw uploaded bytes, used to detect a repeat upload of
-    the same photo (possibly under a different filename)."""
-    return hashlib.sha256(image_bytes).hexdigest()
 
 
 def resolve_image_path(stored: str) -> Path:

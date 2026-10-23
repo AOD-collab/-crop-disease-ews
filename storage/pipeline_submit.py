@@ -1,11 +1,11 @@
 """
 The single "submit an uploaded image into the streaming pipeline" step.
 
-AUTOMATIC mode (api/server.py `upload_image`) publishes the upload event to
-Kafka inline the moment the image is stored, and marks the row INGESTED.
-MANUAL mode stores the image at ProcessingStatus.PENDING_REVIEW and does
-nothing else until an admin clicks "Process" — which calls
-`submit_image_for_processing()` here.
+In AUTOMATIC mode the Drive watcher (kafka/drive_watcher.py) calls
+`submit_image_for_processing()` the moment it registers a new photo, which
+publishes the upload event to Kafka and marks the row INGESTED. MANUAL mode
+stores the image at ProcessingStatus.PENDING_REVIEW and does nothing else
+until an admin clicks "Process" on the dashboard — which calls it too.
 
 Either way the event that lands on the `maize-disease-images` topic, and
 everything downstream of it (spark/streaming_job.py), is identical. This is
@@ -20,8 +20,7 @@ from kafka.producer import get_backend
 
 
 def build_upload_event(image) -> dict:
-    """The exact event dict api/server.py publishes on upload, rebuilt from
-    a stored Image row (mirrors storage/requeue_stuck._event_from_image).
+    """The upload event published to Kafka, built from a stored Image row (mirrors storage/requeue_stuck._event_from_image).
 
     For a Google Drive upload, image_path is "gdrive:<file id>" and
     drive_file_id carries the same id explicitly: Kafka transports only
@@ -55,13 +54,11 @@ def is_upload_rejected(image) -> bool:
 
 def submit_image_for_processing(session, image, backend=None) -> None:
     """Publish `image`'s upload event and mark it INGESTED, committing on
-    `session`. On a publish failure the row is marked FAILED (same contract
-    as the automatic path in api/server.upload_image) and the exception is
-    re-raised for the caller to report.
+    `session`. On a publish failure the row is marked FAILED and the
+    exception is re-raised for the caller to report.
 
     `backend` defaults to kafka.producer.get_backend(KAFKA_TOPIC); callers
-    that already hold a backend (e.g. the API's cached singleton) should
-    pass it.
+    that already hold a backend (e.g. the Drive watcher's) should pass it.
 
     Raises NotResubmittable (nothing changed) for an upload the Drive watcher
     rejected: the dashboard's Reprocess / Retry used to send those through

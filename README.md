@@ -23,9 +23,9 @@ photo), the system reports that clearly instead of inventing an answer.
 > plus a marked-up `<image_id>_processed.jpg` back to Drive, where the app
 > shows the original and processed photo side by side:
 > **Android → Google Drive → Kafka → Spark → Google Drive → Android.**
-> No REST API or ngrok is needed between the phone and the laptop. Setup:
-> [DRIVE_SETUP.md](DRIVE_SETUP.md). The REST API code is kept unchanged (tests,
-> scripts), but the app no longer uses it.
+> No server of ours, REST API or ngrok sits between the phone and the
+> laptop. Setup: [DRIVE_SETUP.md](DRIVE_SETUP.md). (The old REST API, which
+> the app used before Google Drive, has been removed.)
 
 ## 1. Project objective
 
@@ -45,99 +45,33 @@ observations that an ADMIN can monitor centrally.
 
 ## 3. Real image source
 
-Photos come from real people, using a real camera:
-- The **USER (Android app)** captures or picks a real photo and uploads it.
-- Any other real HTTP client (a browser form, `curl`, a drone controller
-  script) can also call `POST /upload-image` — the API doesn't care what
-  took the photo, only that it's a real image file.
-
-There is no synthetic image generator anywhere in this codebase.
+Photos come from real people, using a real camera: the **USER (Android
+app)** captures or picks a real photo and uploads it, unchanged, to their
+own Google Drive folder. There is no synthetic image generator anywhere in
+this codebase.
 
 ## 4. USER role
 
-The USER is a farmer / field officer using the Android app. A USER can:
-register themselves (see "4a. Self-registration & Gmail verification"
-below), login, pick a location from a dropdown, capture/pick a
-photo, preview it, upload it, watch its processing status, view their own
-prediction results, and view their own upload history. A USER cannot reach
-admin endpoints and cannot read another USER's images or predictions — this
-is enforced in the API (`api/deps.py`), not just hidden in the UI. A USER
-can never register themselves as an ADMIN — the role is always decided
-server-side (`POST /auth/register` ignores any client-supplied role).
-
-## 4a. Self-registration & Gmail verification
-
-New USERs create their own account from the Android app's login screen
-("Register" link) instead of an ADMIN provisioning every account by hand.
-
-```
-Register (Full Name, Gmail, Password, Confirm Password)
-        │
-        ▼
-Server validation (Gmail format, password policy, uniqueness)
-        │
-        ▼
-Account created — status = PENDING_VERIFICATION, email_verified = false
-        │
-        ▼
-6-digit code generated, hashed, stored with an expiry, emailed to the Gmail address
-        │
-        ▼
-Verify Gmail screen — enter the code (Resend available once it's due)
-        │
-   ┌────┴────┐
-Correct    Incorrect / expired / too many attempts
-   │            │
-   ▼            ▼
-status = ACTIVE   Error shown, code stays valid / resend offered
-email_verified = true
-   │
-   ▼
-Login (POST /auth/login) → normal USER client
-```
-
-Key implementation points (see `api/verification.py`, `api/mailer.py`,
-`api/server.py`):
-
-- The registration endpoint checks the address is a *structurally valid*
-  Gmail address, but that alone never marks the account verified — only
-  entering the emailed code does. Merely ending in `@gmail.com` proves
-  nothing about who controls the mailbox.
-- The verification code is a cryptographically random 6-digit number
-  (`secrets.randbelow`), stored only as a keyed HMAC-SHA256 hash — never in
-  plain text — expires after `VERIFICATION_CODE_TTL_MINUTES` (default 10),
-  is single-use, allows at most `VERIFICATION_CODE_MAX_ATTEMPTS` (default
-  5) incorrect tries, and resends are throttled by
-  `VERIFICATION_RESEND_COOLDOWN_SECONDS` (default 60). It is never returned
-  by any API response.
-- `POST /auth/login` only issues a token for `status = ACTIVE` accounts —
-  `PENDING_VERIFICATION`, `INACTIVE`, and `SUSPENDED` are all rejected, with
-  a distinct message for each so a USER knows why they can't log in yet.
-- Endpoints: `POST /auth/register`, `POST /auth/verify-email`,
-  `POST /auth/resend-verification` (see section 22 for the full endpoint
-  list). All three are rate-limited per client IP (`api/rate_limit.py`), in
-  addition to the per-account attempt/cooldown limits above.
-- Sending the code uses real SMTP (`api/mailer.py`) configured entirely via
-  environment variables — `MAIL_HOST`, `MAIL_PORT`, `MAIL_USERNAME`,
-  `MAIL_PASSWORD`, `MAIL_FROM`, `MAIL_FROM_NAME` (see section 19). If
-  `MAIL_HOST` isn't set (e.g. local dev without SMTP credentials), the
-  email is written to `storage/mail_outbox/` instead of being sent — the
-  same "real component with a local fallback" pattern as Kafka's local
-  queue — so the whole flow is runnable and testable without a real mail
-  server.
+The USER is a farmer / field officer using the Android app. A USER signs in
+with Google, picks a location from a dropdown, captures/picks photos,
+uploads them, and sees each photo's result and their own upload history.
+Access is enforced by Google Drive itself: every farmer has a private
+`images/<email>/` folder they can write to and a `results/<email>/` folder
+they can only read, shared with that Google account alone. An account is
+given access by the ADMIN (dashboard "Register farmer", or
+`python scripts/drive_share_user.py <email>`); until then the app reports
+that the account cannot upload yet. The laptop decides who uploaded a
+file from Google's own owner field, never from anything the phone claims.
 
 ## 5. ADMIN role
 
-The ADMIN uses the web dashboard (`dashboard/app.py`) and/or the
-`/admin/*` REST endpoints. An ADMIN can: manage users (full CRUD — create,
-read with search/filter/pagination, update including Gmail changes and
-status transitions, soft-delete/deactivate), view all images/predictions
-system-wide, monitor risk/disease distribution, view real-time results,
-view high-risk alerts, and view performance metrics. Every `/admin/*`
-endpoint is protected server-side by `api/deps.py::require_admin` — the
-dashboard/UI never being shown a button is not the enforcement mechanism.
-An ADMIN cannot delete their own account or demote/suspend themselves
-(self-lockout prevention).
+The ADMIN uses the web dashboard (`dashboard/app.py`): register farmers,
+manage users, view all images/predictions system-wide, monitor
+risk/disease distribution, view real-time results and high-risk alerts,
+switch between AUTOMATIC and MANUAL processing, label photos and train /
+deploy the model. Dashboard login checks the ADMIN's bcrypt password hash
+(`storage/auth.py`). An ADMIN cannot delete their own account or
+demote/suspend themselves (self-lockout prevention).
 
 ## 5a. Location (replaces the old Field/FieldUser feature)
 
@@ -151,27 +85,23 @@ upload form (with an "Other" option for anywhere not listed).
 
 What this means concretely:
 
-- **No admin setup required.** A newly registered/verified USER can
-  upload immediately — there's no field to create or assignment to wait
-  on first.
+- **No field setup required.** A registered farmer can upload
+  immediately — there's no field to create or assignment to wait on first.
 - **`location` is a display/filter label, not an access-control
-  boundary.** Any authenticated, active USER can upload with any location
-  string, including one nobody has used before. This is a deliberate
+  boundary.** Any registered farmer can upload with any location string, including one nobody has used before. This is a deliberate
   simplification — if you need per-user upload restrictions again, that
   access-control layer no longer exists and would need to be rebuilt.
 - **Nullable.** Omitting a location entirely is allowed; the image is
   still processed normally, it just won't be grouped under anything in
   the location-based dashboard views.
-- The upload endpoint (`POST /upload-image`) accepts `location` as a
-  plain form field (not a foreign key), and `GET /admin/analytics`
-  exposes `location_summary` (risk/volume grouped by location) in place
-  of the old `field_summary`.
+- The phone sends `location` as a plain Drive file property (not a
+  foreign key); the Drive watcher stores it on the image row.
 
 ## 6. Image collection
 
 ```
-USER LOGIN → PICK LOCATION → CAPTURE/SELECT REAL PHOTO → PREVIEW → UPLOAD
-    → PROCESSING (async, via Kafka + Spark) → VIEW RESULT
+GOOGLE SIGN-IN → PICK LOCATION → CAPTURE/SELECT REAL PHOTOS → UPLOAD TO DRIVE
+    → PROCESSING (async, via Drive watcher + Kafka + Spark) → VIEW RESULT
 ```
 
 The Android app never generates a fake image — it always sends the actual
@@ -183,21 +113,21 @@ bytes of a photo the phone captured or the user picked from their gallery.
 the "Exif" sub-IFD, not the base IFD — this actually tripped up the first
 implementation and was fixed after a failing test caught it). If no valid
 EXIF timestamp exists, `captured_at = NULL` — the system never invents one.
-If the Android client supplies a trusted capture timestamp instead (form
-field `captured_at_client`), it's used as a documented fallback and the
+If the Android client supplies a trusted capture timestamp instead (Drive
+file property `captured_at_client`), it's used as a documented fallback and the
 row records `captured_at_source = "client_trusted"` so it's clear where the
 value came from.
 
 ## 8. Upload timestamp — `uploaded_at`
 
-Generated by the server (`now_utc()` in `storage/database.py`) the moment
-the file is received — never trusted from the client, regardless of what a
-client claims. This lets the system compute `capture_to_upload_latency`
+Taken from Google Drive's own `createdTime` for the uploaded file (Google's
+clock, not the phone's) by the Drive watcher — never trusted from the
+client, regardless of what a client claims. This lets the system compute `capture_to_upload_latency`
 honestly.
 
 ## 9. Kafka
 
-Apache Kafka is the real streaming transport between the API and Spark.
+Apache Kafka is the real streaming transport between the Drive watcher and Spark.
 Topic: `maize-disease-images` (`kafka/config.py`). The producer uses
 **confluent-kafka**, not kafka-python — this project's own package is also
 named `kafka/`, and importing `kafka-python` (whose import name is also
@@ -411,20 +341,10 @@ kind:
 | `KAFKA_TOPIC` | Kafka topic name | `maize-disease-images` |
 | `KAFKA_USE_LOCAL_FALLBACK` | Fall back to local queue if Kafka is down | `true` |
 | `MODEL_PATH` | Path to the CNN checkpoint | `ml/trained_model/saved_model_cnn.pt` |
-| `JWT_SECRET` | **Must be set** in production | *(empty — fails loudly if unset)* |
-| `JWT_EXPIRE_MINUTES` | Token lifetime | `480` |
 | `BOOTSTRAP_ADMIN_USERNAME` / `BOOTSTRAP_ADMIN_PASSWORD` | First admin account, created by `storage/init_db.py` | *(unset — no bootstrap admin without this)* |
-| `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_FULL_NAME` | Email/name on that bootstrap admin (created pre-verified — see section 4a) | `admin@example.local` / `System Administrator` |
+| `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_FULL_NAME` | Email/name on that bootstrap admin (created pre-verified) | `admin@example.local` / `System Administrator` |
 | `RISK_THRESHOLD_HIGH` / `RISK_THRESHOLD_MEDIUM` | Risk score cutoffs | `0.6` / `0.3` |
-| `SYSTEM_NAME` | Name shown in verification emails | `Crop Disease Early Warning System` |
-| `MAIL_HOST` / `MAIL_PORT` / `MAIL_USERNAME` / `MAIL_PASSWORD` | SMTP credentials for sending verification emails — **never commit these** | *(unset — falls back to `storage/mail_outbox/` files instead of sending)* |
-| `MAIL_FROM` / `MAIL_FROM_NAME` | "From" address/name on verification emails | `MAIL_USERNAME` / `SYSTEM_NAME` |
-| `MAIL_USE_TLS` | STARTTLS when sending | `true` |
-| `MAIL_OUTBOX_DIR` | Local dev fallback location when `MAIL_HOST` is unset | `storage/mail_outbox` |
-| `VERIFICATION_CODE_TTL_MINUTES` | Gmail code expiry | `10` |
-| `VERIFICATION_CODE_MAX_ATTEMPTS` | Incorrect-code attempts allowed before lockout | `5` |
-| `VERIFICATION_RESEND_COOLDOWN_SECONDS` | Minimum gap between resend requests | `60` |
-| `PASSWORD_MIN_LENGTH` | Minimum password length for registration/admin-created users | `8` |
+| `MAIL_OUTBOX_DIR` | Old e-mail outbox of the removed REST API; factory reset can still empty it | `storage/mail_outbox` |
 
 ## 20. Kafka startup
 
@@ -437,8 +357,8 @@ kafka-topics.sh --create --topic maize-disease-images \
 ```
 
 No Kafka installed? Leave `KAFKA_USE_LOCAL_FALLBACK=true` (the default) —
-the API will automatically use the local file-queue fallback and log that
-it did so.
+the Drive watcher and the dashboard will automatically use the local
+file-queue fallback and log that they did so.
 
 ## 21. Spark startup
 
@@ -453,30 +373,15 @@ No multi-node cluster? `spark-submit` also runs this job in local mode
 a reachable Kafka broker. The processing logic on its own is covered
 without any external infra by `pytest tests/test_streaming_pipeline.py`.
 
-## 22. API startup
+## 22. REST API (removed)
 
-```bash
-python -m storage.init_db   # creates tables + bootstrap ADMIN, once
-uvicorn api.server:app --host 0.0.0.0 --port 8000
-```
-
-Registration/user-management endpoints added by this feature (all under
-the existing FastAPI app, no separate service):
-
-```
-POST   /auth/register              full_name, email, password, confirm_password
-POST   /auth/verify-email          email, code
-POST   /auth/resend-verification   email
-POST   /auth/login                 username (email works here too), password
-
-GET    /admin/users                ?search=&role=&status_filter=&page=&page_size=&include_deleted=
-POST   /admin/users                full_name, email, password, role, [status]
-PUT    /admin/users/{id}           full_name, email, role, status
-DELETE /admin/users/{id}?confirm=true    soft-delete
-```
-
-`GET /admin/users` returns `{"items": [...], "total", "page", "page_size",
-"total_pages"}` rather than a bare list, so the admin UI can paginate.
+The FastAPI server the Android app used before Google Drive (`api/`, with
+JWT login, Gmail self-registration and `/admin/*` endpoints) has been
+removed: the app talks only to Google Drive, and the dashboard does
+everything an ADMIN needs. The few account helpers the rest of the system
+uses (e-mail normalisation, bcrypt password hashing) are in
+`storage/auth.py`. Existing database columns from that feature
+(`email_verified`, `verification_code_hash`, ...) are kept unchanged.
 
 ## 23. Dashboard startup
 
@@ -518,26 +423,22 @@ Some of the test files:
 - `test_scalability.py` — the isolated scalability test: no production rows, topic or Drive results; real-time priority; the two averages from measured data only; one before/after pair
 - `test_reset.py` — the factory reset, refused while the Spark job or the Drive watcher runs
 
-- `test_auth.py` — password hashing, JWT issue/verify, tampered-token rejection
 - `test_exif.py` — real EXIF extraction, missing/malformed EXIF, never inventing a timestamp
 - `test_risk_assessment.py` — risk scoring behavior, event validation/cleaning
 - `test_streaming_pipeline.py` — runs `spark/streaming_job.py`'s own code in **Spark local mode**: `parse_events()` decoding a Kafka-style JSON value against `EVENT_SCHEMA`, `foreach_batch_sink()` persisting a real `Prediction` row from a real image, its `DataFrame.isEmpty()` guard short-circuiting an empty micro-batch, an invalid event being marked `FAILED` (never given a fake prediction), and a full file-source → `foreachBatch` → DB run that advances a real Structured Streaming checkpoint. Builds every DataFrame by reading JSON files (pure-JVM scan) to stay clear of the executor-side Python-worker crash on this Windows box (see `DOKUMENTASAUN_TETUN.md` §10)
 - `test_image_validation.py` — empty/corrupted/oversized files, path-traversal safety, no filename collisions
-- `test_api.py` — full HTTP integration: login, upload workflow with a free-text `location` (including omitting it, and an arbitrary/unrecognized value — location is a display label, not an access-control boundary), USER data isolation (a USER cannot read another USER's image), role enforcement (a USER cannot reach `/admin/*` even by trying to smuggle `role=ADMIN` into a request), admin user management
-- `test_registration.py` — Gmail registration/verification: invalid Gmail addresses, mismatched/weak passwords, duplicate-email rejection, pending accounts unable to log in, the full register → verify → login flow (reading the code from `storage/mail_outbox/`, the local fallback used since no SMTP server is configured for tests), single-use codes, attempt limits, resend issuing a fresh code, admin user CRUD (default-pending vs. explicit-active user creation, self-lockout prevention on delete/role/status, soft delete excluding a user from the default listing, Gmail changes resetting verification), and a Pydantic v2 regression (`UpdateUserRequest` fields must be `Optional[str] = None`, not a bare `str = None` — the latter rejects an explicit JSON `null`, which a real API client sending `{"role": null}` to mean "no change" would hit as a confusing 422)
 - `test_dashboard_users.py` — runs the actual Streamlit dashboard script end-to-end via `streamlit.testing.v1.AppTest` (not just an import/syntax check) against a real temp database, targeting a real bug this exact technique caught during review: the "Edit user" form's Status dropdown always reflects *some* value (Streamlit widgets can't represent "untouched"), and an earlier version compared it against `target.status.value` *after* an email-change had already mutated that same field in memory — so editing only the email while leaving Status showing its pre-existing value silently overwrote the PENDING_VERIFICATION reset back to ACTIVE and skipped sending a new code. Fixed by capturing the original status before any mutation; this test proves the full loop (edit email in the dashboard → code lands in `storage/mail_outbox/` → verify → log in with the new address) actually works
 
-The API server, upload workflow, and Kafka local-file fallback were also
-exercised live end-to-end (real `uvicorn` process, real HTTP requests, real
-image bytes) during development — this caught and led
+The upload workflow and Kafka local-file fallback were also exercised live
+end-to-end (at the time through the since-removed REST API, with real HTTP
+requests and real image bytes) during development — this caught and led
 to fixing several real bugs (EXIF sub-IFD lookup, a passlib/bcrypt
 incompatibility, a SQLite naive/aware datetime mismatch, and a pandas
 `NaT`-serializes-as-string issue in the analytics endpoint).
 
 ## 26. Performance evaluation
 
-`spark/analytics.performance_metrics()` (surfaced at `/admin/system-status`
-and by `scripts/perf_report.py`; the dashboard's Performance page was removed
+`spark/analytics.performance_metrics()` (surfaced by `scripts/perf_report.py`; the dashboard's Performance page was removed
 on 11 October 2026) computes, from real recorded
 timestamps only:
 
@@ -600,7 +501,7 @@ with Gradle and JDK 17).
 ## 30. Processing modes (AUTOMATIC / MANUAL)
 
 Stored in `system_settings` (`processing_mode`) and switched from the
-dashboard sidebar or `PUT /admin/processing-mode`. **AUTOMATIC**: the Drive
+dashboard sidebar. **AUTOMATIC**: the Drive
 watcher publishes every new photo to Kafka at once. **MANUAL**: the photo is
 stored as `PENDING_REVIEW` and waits on the Pending review page until an
 admin presses **Process** (or switches back to AUTOMATIC, which releases
@@ -664,7 +565,6 @@ afterwards (they are never deleted automatically).
 ```
 crop_disease_image_system/
 ├── run_all.py               starts Kafka/PostgreSQL (Docker), Spark, dashboard, Drive watcher
-├── api/                     REST API (kept; the app no longer uses it), auth, e-mail verification
 ├── android_app/             farmer app (Kotlin) — Google sign-in, upload, history, settings
 ├── config/                  settings.py (env-driven), localtime.py (Timor-Leste Time)
 ├── kafka/
@@ -684,6 +584,7 @@ crop_disease_image_system/
 ├── storage/
 │   ├── database.py           models, views (v_tableau_images, v_admin_image_catalog), migrations
 │   ├── init_db.py            create tables + bootstrap the first admin
+│   ├── auth.py               e-mail normalisation, bcrypt password hashing
 │   ├── image_storage.py      where photos live (local path / gdrive:<id>), safe local writes
 │   ├── exif_utils.py         EXIF capture time, GPS, camera
 │   ├── image_catalog.py      the admin image catalog (parameterised SQL)
@@ -696,7 +597,7 @@ crop_disease_image_system/
 │   └── schema.sql            raw PostgreSQL DDL
 ├── scalability/              isolated scalability test (dataset, run, worker, report, monitor)
 ├── dashboard/                Streamlit admin dashboard (app.py + one module per larger page)
-├── scripts/                  Drive authorisation, farmer sharing, benchmarks, mail-outbox sender
+├── scripts/                  Drive authorisation, farmer sharing, benchmarks, performance report
 ├── tests/                    pytest suite, no external infrastructure required
 ├── SCALABILITY_TEST.md, INFERENCE_BENCHMARK.md, DRIVE_SETUP.md, DOKUMENTASAUN_TETUN.md
 ├── requirements.txt, docker-compose.yml

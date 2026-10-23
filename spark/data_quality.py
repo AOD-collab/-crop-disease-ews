@@ -19,7 +19,7 @@ def data_quality_report() -> dict:
 
     # --- duplicate records ---
     # Same uploaded bytes under (possibly) different filenames/uploads —
-    # see Image.content_hash / api/server.py's duplicate-flagging.
+    # see Image.content_hash.
     hash_counts = images.dropna(subset=["content_hash"]).groupby("content_hash").size()
     duplicate_hash_groups = hash_counts[hash_counts > 1]
     # More than one Prediction row for the same image — Structured

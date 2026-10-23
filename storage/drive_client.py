@@ -1,7 +1,7 @@
 """
 Google Drive access for the Android -> Drive -> Kafka -> Spark -> Drive ->
 Android architecture. This module is the ONLY place in the project that
-talks to Google Drive; the API (api/server.py), the Spark job
+talks to Google Drive; the Drive watcher, the Spark job
 (spark/preprocessing.py) and the dashboard all go through it.
 
 Uses the Google Drive REST API v3 directly (https://developers.google.com/drive/api/reference/rest/v3)

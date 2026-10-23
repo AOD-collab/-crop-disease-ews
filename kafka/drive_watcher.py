@@ -13,8 +13,8 @@ architecture). Runs on the laptop/server next to Kafka and Spark.
                  safety net.
     Kafka -> Spark (spark/streaming_job.py) -> Drive /results -> Android
 
-It takes over the job the REST API's upload endpoints used to do, because
-the phone no longer talks to a server of ours — only to Google Drive.
+It is the system's only way in for photos: the phone never talks to a
+server of ours — only to Google Drive.
 
 Trust model: the image_id / location / capture time come from the phone
 (Drive appProperties), but WHO uploaded the file comes from Google itself
@@ -52,7 +52,7 @@ from storage.database import (  # noqa: E402
 )
 from storage.pipeline_submit import submit_image_for_processing, UPLOAD_REJECTED_PREFIX  # noqa: E402
 from storage.image_storage import to_drive_path  # noqa: E402
-from api.auth import hash_password, normalize_email  # noqa: E402
+from storage.auth import hash_password, normalize_email  # noqa: E402
 
 # Drive API quota: each check is ONE change-feed request (~100 units of the
 # 325,000/minute per-user limit), whatever the number of farmers.
@@ -70,8 +70,9 @@ _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 
 
 def _normalize_location(location):
-    """Same rule as api/server.py _normalize_location (kept identical so
-    Drive uploads and legacy API uploads group the same in analytics)."""
+    """Case/whitespace-normalised location ("viqueque " -> "Viqueque"), the
+    same rule as Spark's initcap(trim(...)) so places group together in
+    analytics."""
     if not location:
         return None
     collapsed = re.sub(r"\s+", " ", str(location).strip())

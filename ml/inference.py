@@ -1,9 +1,10 @@
 """
 Shared inference wrapper — THIS IS THE PLACE TO PLUG IN YOUR TRAINED MODEL.
 
-Every real data source (real_camera_client.py, upload_folder_client.py,
-api/server.py) calls `predict(image_bytes)` from this module instead of
-duplicating model-loading code. Every result comes from the trained CNN
+Everything that classifies a photo (spark/streaming_job.py, the
+scalability worker, scripts/benchmark_inference.py) calls
+`predict(image_bytes)` from this module instead of duplicating
+model-loading code. Every result comes from the trained CNN
 checkpoint at IMAGE_MODEL["weights_path"]; there is no pixel-math
 fallback. A missing checkpoint raises ModelNotAvailable.
 
@@ -15,8 +16,8 @@ TO GO LIVE WITH YOUR TRAINED MODEL:
      this module expects (see `_CHECKPOINT_FORMAT` below).
   3. Copy that file to ml/trained_model/saved_model_cnn.pt in THIS project
      (or point IMAGE_MODEL_WEIGHTS at wherever you put it).
-  4. Done — real_camera_client.py, upload_folder_client.py, and
-     api/server.py all pick it up automatically, no other code changes.
+  4. Done — Spark, the scalability test and the benchmark all pick it up
+     automatically, no other code changes.
 
 --------------------------------------------------------------------------
 _CHECKPOINT_FORMAT (what export_model.py in the training project writes,
@@ -78,8 +79,8 @@ def _load_trained_model():
     """The loaded checkpoint, cached per process and reloaded automatically
     when the file at IMAGE_MODEL["weights_path"] is replaced (a deploy or
     restore from the dashboard's Model training page swaps it with
-    os.replace) — so Spark and the API switch to a newly deployed model on
-    their next prediction, without a restart. Returns a dict with the torch
+    os.replace) — so Spark switches to a newly deployed model on its
+    next prediction, without a restart. Returns a dict with the torch
     model + preprocessing metadata; raises ModelNotAvailable without one."""
     weights_path = IMAGE_MODEL["weights_path"]
     try:

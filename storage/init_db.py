@@ -14,7 +14,7 @@ from config.settings import (
     BOOTSTRAP_ADMIN_USERNAME, BOOTSTRAP_ADMIN_PASSWORD, BOOTSTRAP_ADMIN_EMAIL, BOOTSTRAP_ADMIN_FULL_NAME,
 )
 from storage.database import init_db, SessionLocal, User, Role, UserStatus
-from api.auth import hash_password
+from storage.auth import hash_password
 
 
 def run():
@@ -45,8 +45,7 @@ def run():
             # This is a deliberate, config-driven administrative account —
             # not an arbitrary self-registered Gmail address — so marking
             # it pre-verified here doesn't conflict with the "never
-            # auto-verify an arbitrary address" rule that applies to
-            # register()/admin_create_user() (see api/server.py).
+            # auto-verify an arbitrary address" rule.
             email_verified=True,
         )
         session.add(admin)

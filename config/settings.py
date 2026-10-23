@@ -10,12 +10,12 @@ from pathlib import Path
 
 # Project root = the folder containing this config/ folder. Used so that
 # storage paths, the SQLite dev DB, etc. always resolve to the same
-# location regardless of what directory a script/streamlit/uvicorn is
+# location regardless of what directory a script/streamlit/spark job is
 # launched from.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-# Load a local .env (if present) so JWT_SECRET, DB URL, mail and model
-# settings don't have to be exported in every shell (uvicorn, streamlit,
+# Load a local .env (if present) so the DB URL, admin bootstrap, Drive and
+# model settings don't have to be exported in every shell (streamlit,
 # spark, init_db). Real environment variables always win — load_dotenv()
 # does not override values already present in the environment. Optional
 # dependency: if python-dotenv isn't installed, .env is simply ignored.
@@ -125,12 +125,8 @@ SCALABILITY_REPORTS_DIR = Path(os.getenv("SCALABILITY_REPORTS_DIR",
                                          str(BASE_DIR / "storage" / "scalability_reports")))
 
 # --------------------------------------------------------------------
-# Auth
+# Accounts
 # --------------------------------------------------------------------
-JWT_SECRET = os.getenv("JWT_SECRET", "")  # MUST be set via env in production
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_MINUTES = int(os.getenv("JWT_EXPIRE_MINUTES", "480"))  # 8h shift-length default
-
 # Bootstrap admin account, only used by storage/init_db.py on first run when
 # the users table is empty. Change/rotate this in production.
 BOOTSTRAP_ADMIN_USERNAME = os.getenv("BOOTSTRAP_ADMIN_USERNAME", "admin")
@@ -138,34 +134,9 @@ BOOTSTRAP_ADMIN_PASSWORD = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "")
 BOOTSTRAP_ADMIN_EMAIL = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "admin@example.local")
 BOOTSTRAP_ADMIN_FULL_NAME = os.getenv("BOOTSTRAP_ADMIN_FULL_NAME", "System Administrator")
 
-# --------------------------------------------------------------------
-# Gmail registration / verification (section 8 & 3 of the registration
-# feature). SMTP credentials MUST come from the environment — never
-# hard-code them here or commit them to the repo.
-# --------------------------------------------------------------------
-SYSTEM_NAME = os.getenv("SYSTEM_NAME", "Crop Disease Early Warning System")
-
-MAIL_HOST = os.getenv("MAIL_HOST", "")
-MAIL_PORT = int(os.getenv("MAIL_PORT", "587"))
-MAIL_USERNAME = os.getenv("MAIL_USERNAME", "")
-MAIL_PASSWORD = os.getenv("MAIL_PASSWORD", "")
-MAIL_FROM = os.getenv("MAIL_FROM", MAIL_USERNAME)
-MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", SYSTEM_NAME)
-MAIL_USE_TLS = os.getenv("MAIL_USE_TLS", "true").lower() == "true"
-
-# If MAIL_HOST isn't configured (e.g. local dev), verification emails are
-# written to this local "outbox" directory instead of being sent for real —
-# the same fallback philosophy as kafka/producer.py's local queue: a real
-# component (real SMTP send) with a local-file fallback purely so the app
-# is runnable without external infrastructure, never a fake/simulated send.
+# Where the removed REST API's e-mail verification wrote its outbox. Nothing
+# writes there any more; factory reset can still empty an old one.
 MAIL_OUTBOX_DIR = Path(os.getenv("MAIL_OUTBOX_DIR", str(BASE_DIR / "storage" / "mail_outbox")))
-
-VERIFICATION_CODE_LENGTH = 6
-VERIFICATION_CODE_TTL_MINUTES = int(os.getenv("VERIFICATION_CODE_TTL_MINUTES", "10"))
-VERIFICATION_CODE_MAX_ATTEMPTS = int(os.getenv("VERIFICATION_CODE_MAX_ATTEMPTS", "5"))
-VERIFICATION_RESEND_COOLDOWN_SECONDS = int(os.getenv("VERIFICATION_RESEND_COOLDOWN_SECONDS", "60"))
-
-PASSWORD_MIN_LENGTH = int(os.getenv("PASSWORD_MIN_LENGTH", "8"))
 
 # --------------------------------------------------------------------
 # Risk thresholds (rule-based risk assessment — see spark/preprocessing.py)

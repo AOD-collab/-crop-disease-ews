@@ -51,7 +51,7 @@ services:
       POSTGRES_PASSWORD: ews_password
       POSTGRES_DB: crop_disease
     ports:
-      # Bound to localhost only: the API, Spark and Tableau Desktop all run
+      # Bound to localhost only: Spark, the dashboard and Tableau Desktop all run
       # on this machine, so there's no reason to expose the database (and
       # its default password) to everyone on the same Wi-Fi.
       - "127.0.0.1:5432:5432"
