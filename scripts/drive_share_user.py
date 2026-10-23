@@ -16,7 +16,7 @@ and in Google Drive itself. Running it again for the same email is safe.
 
 This is the "user registration" step of the Google Drive design. Also add
 the same email as a *test user* on the OAuth consent screen while the
-Google Cloud app is in Testing (see DRIVE_SETUP.md). To block someone
+Google Cloud app is in Testing (see README "Google Drive setup"). To block someone
 later, deactivate their user in the dashboard (the Drive watcher then
 rejects their uploads) and/or remove their access to their folders.
 """

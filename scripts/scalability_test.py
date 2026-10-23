@@ -50,10 +50,7 @@ def make_test_user() -> str:
 
 
 def _synthetic_jpeg_bytes() -> bytes:
-    """A cheap, real (not corrupted) leaf-like JPEG — see
-    tests/conftest.make_leaf_jpeg_bytes for the same pattern used by the
-    test suite. Kept independent (no test-suite import) so this script has
-    no dependency on pytest."""
+    """A cheap, real (not corrupted) leaf-like JPEG."""
     img = PILImage.new("RGB", (64, 64), color=(60, 150, 40))
     draw = ImageDraw.Draw(img)
     rng = random.Random()

@@ -793,7 +793,7 @@ elif page == "Users":
                 st.error("Not a valid email address: " + ", ".join(bad))
             elif not drive_client.is_configured():
                 st.error("Google Drive is not set up on this laptop yet — run "
-                         "`python scripts\\drive_authorize.py` first (see DRIVE_SETUP.md).")
+                         "`python scripts\\drive_authorize.py` first (see README 'Google Drive setup').")
             else:
                 from kafka.drive_watcher import get_or_create_farmer
                 done = []

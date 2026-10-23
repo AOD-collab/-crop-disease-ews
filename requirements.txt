@@ -27,10 +27,6 @@ pandas
 streamlit
 plotly
 
-# --- Testing ---
-pytest
-piexif
-
 # --- Scalability/performance testing (scalability/, scripts/perf_report.py) ---
 psutil
 requests

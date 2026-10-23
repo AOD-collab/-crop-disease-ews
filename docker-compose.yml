@@ -4,7 +4,7 @@
 # PostgreSQL (DIT manual 5.3 — PostgreSQL, not SQLite, for the demo).
 #
 # SQLite + the local Kafka file-queue fallback remain the defaults for local
-# dev/testing (config/settings.py, tests/conftest.py) — this compose file is
+# dev (config/settings.py) — this compose file is
 # only needed for a real demo/submission run against real infrastructure.
 #
 # Usage:

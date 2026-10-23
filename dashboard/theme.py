@@ -2,8 +2,8 @@
 pages it imports), so a disease has the same colour everywhere."""
 
 # Fixed-order categorical hues for open-ended series (disease classes,
-# locations) — see dataviz skill's palette.md; assigned in order, never cycled
-# past what a chart actually needs.
+# locations) — assigned in order, never cycled past what a chart actually
+# needs.
 # Maize-field hues (greens, kernel yellows, earth browns, one teal/blue for
 # separation) — distinct from each other, in harmony with the green/yellow UI.
 CATEGORICAL_HUES = ["#2E7D32", "#E0A800", "#8D5A2B", "#1F7A8C", "#9BBF3B", "#C8541B", "#5B3A29", "#6A994E"]

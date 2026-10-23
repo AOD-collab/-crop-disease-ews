@@ -79,8 +79,7 @@ IMAGE_MODEL = {
     # "auto" = the NVIDIA GPU (RTX 3050) when this Python has a CUDA build
     # of PyTorch, else the CPU; "cuda" / "cpu" to force one (ml/inference.py).
     "device": os.getenv("MODEL_DEVICE", "auto"),
-    # Inference speed (ml/inference.py; measured by scripts/benchmark_inference.py,
-    # see INFERENCE_BENCHMARK.md):
+    # Inference speed (ml/inference.py; measured by scripts/benchmark_inference.py):
     #   MODEL_BATCH_SIZE    >1: Spark's photo threads share ONE batched GPU forward
     #                       pass of up to this many photos; 1 = each photo alone.
     #   MODEL_BATCH_WAIT_MS how long the batcher waits for more photos to join.
@@ -97,7 +96,7 @@ IMAGE_MODEL = {
     # Defaults keep the predictions exactly as before (FP32, one photo per
     # forward pass); only the thread count changed (same numbers, ~half the
     # CPU). For the scalability test, MODEL_BATCH_SIZE=8 + MODEL_PRECISION=fp16
-    # measured fastest for the CNN itself; see INFERENCE_BENCHMARK.md.
+    # measured fastest for the CNN itself (scripts/benchmark_inference.py).
     "torch_threads": int(os.getenv("MODEL_TORCH_THREADS", "1")),
     # Supported disease classes come FROM the loaded checkpoint at runtime
     # (checkpoint["class_names"]) — never hard-coded here. See

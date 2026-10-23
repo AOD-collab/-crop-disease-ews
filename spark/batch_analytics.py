@@ -58,8 +58,7 @@ def jdbc_url_and_properties() -> tuple:
 
 def aggregate_location_daily(images_df, predictions_df):
     """The actual distributed aggregation, factored out from run() so it's
-    testable against local DataFrames without a live Postgres server (see
-    tests/test_batch_analytics.py). One row per (location, day):
+    testable against local DataFrames without a live Postgres server. One row per (location, day):
     total_images, total_healthy, total_diseased, avg_risk_score,
     high_risk_count."""
     joined = images_df.join(

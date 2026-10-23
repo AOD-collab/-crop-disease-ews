@@ -17,7 +17,7 @@ What it does:
      (default storage/google_drive_folders.json), which config/settings.py
      reads automatically.
 
-Prerequisite (see DRIVE_SETUP.md): a Google Cloud project with the Google
+Prerequisite (see README "Google Drive setup"): a Google Cloud project with the Google
 Drive API enabled and an OAuth client of type "Desktop app"; download its
 JSON to GOOGLE_DRIVE_CLIENT_SECRET_FILE (default
 storage/google_client_secret.json).
@@ -41,7 +41,7 @@ def main() -> int:
     if not secret.exists():
         print(f"OAuth client file not found: {secret}")
         print("Create a 'Desktop app' OAuth client in Google Cloud Console, download its JSON")
-        print("and save it at that path (see DRIVE_SETUP.md).")
+        print("and save it at that path (see README 'Google Drive setup').")
         return 1
 
     from google_auth_oauthlib.flow import InstalledAppFlow

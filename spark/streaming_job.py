@@ -37,12 +37,8 @@ REQUIRES EXTERNAL INFRASTRUCTURE for a real deployment: a running Kafka
 broker and (for --packages to resolve) internet access to Maven Central the
 first time it runs.
 
-Verification: tests/test_streaming_pipeline.py runs this job's own code —
-parse_events() against EVENT_SCHEMA, and foreach_batch_sink() including its
-DataFrame.isEmpty() guard, .collect() fan-out, and a full
-readStream -> foreachBatch -> DB run with checkpointing — in Spark **local
-mode** with a file source standing in for Kafka. What is NOT exercised in
-this environment is an actual multi-node cluster and a live Kafka broker.
+Runs in Spark **local mode** on this laptop; an actual multi-node cluster
+has not been exercised.
 """
 import os
 import time
@@ -133,8 +129,8 @@ def parse_events(raw):
     before (the image then stayed INGESTED for good). foreach_batch_sink
     dedupes each micro-batch and skips images that are already COMPLETED.
 
-    Extracted from run() so tests/test_streaming_pipeline.py can exercise
-    the exact projection the streaming query uses without a Kafka broker."""
+    Extracted from run() so the exact projection the streaming query uses
+    can be exercised without a Kafka broker."""
     parsed = raw.select(
         from_json(col("value").cast("string"), EVENT_SCHEMA).alias("data")
     ).select("data.*")

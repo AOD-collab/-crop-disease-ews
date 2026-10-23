@@ -10,7 +10,7 @@ its own console window:
 
 The Android app talks only to Google Drive; the Drive watcher is what
 brings its uploads into Kafka. It is skipped (with a message) until
-`python scripts/drive_authorize.py` has been run once — see DRIVE_SETUP.md.
+`python scripts/drive_authorize.py` has been run once — see README "Google Drive setup".
 
 There is no server of ours for the phone to reach, so no public address,
 ngrok or port forwarding is needed.
@@ -321,7 +321,7 @@ def main() -> int:
             services.append(start_service("EWS-DriveWatcher", ["python", "-m", "kafka.drive_watcher"]))
         else:
             print("  skipped Drive watcher - Google Drive not set up yet "
-                  "(run: python scripts/drive_authorize.py, see DRIVE_SETUP.md)")
+                  "(run: python scripts/drive_authorize.py, see README 'Google Drive setup')")
 
     if not services:
         print("Nothing was started.")

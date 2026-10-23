@@ -24,7 +24,7 @@ photo), the system reports that clearly instead of inventing an answer.
 > shows the original and processed photo side by side:
 > **Android → Google Drive → Kafka → Spark → Google Drive → Android.**
 > No server of ours, REST API or ngrok sits between the phone and the
-> laptop. Setup: [DRIVE_SETUP.md](DRIVE_SETUP.md). (The old REST API, which
+> laptop. Setup: section 19a, "Google Drive setup". (The old REST API, which
 > the app used before Google Drive, has been removed.)
 
 ## 1. Project objective
@@ -157,10 +157,9 @@ still held is an old one (e.g. Spark replaying the topic after a factory
 reset that kept Kafka's messages) and must not bypass manual mode.
 
 The processing/persistence code (`spark/preprocessing.py`) depends only on
-SQLAlchemy, not pyspark, so `tests/test_streaming_pipeline.py` exercises the
-full clean → CNN → risk → DB path (and the `streaming_job.py` query itself
-in Spark **local mode**, with a file source standing in for Kafka) without
-needing a broker or a multi-node cluster.
+SQLAlchemy, not pyspark, so the full clean → CNN → risk → DB path can run
+without a broker or a multi-node cluster (e.g. `python -m
+storage.requeue_stuck --inline`).
 
 ## 11. Image processing
 
@@ -243,8 +242,8 @@ managed cache:
 | `storage/images/` | photos from the previous (REST upload) design | factory reset |
 
 Processed images are kept in Drive only. Local files are always named by
-server-generated ids, so a client filename can never escape a storage root
-(`tests/test_image_validation.py`), and original bytes are kept unmodified.
+server-generated ids, so a client filename can never escape a storage root,
+and original bytes are kept unmodified.
 
 ## 16. Dashboard
 
@@ -310,7 +309,7 @@ test's own topic and prints a one-line summary per second while a test runs
 leaves that out. Test photos never appear in the EWS-Spark window: the test is
 processed by its own worker, not by Spark. Skip it with `run_all.py --no-kafka-monitor`; turn Spark's per-photo lines
 off with `SPARK_LIVE_LOG=false` (errors and `[ALERT]` lines always print). The
-scalability test has its own live window (SCALABILITY_TEST.md).
+scalability test has its own live window (section 32).
 
 ## 18. Installation
 
@@ -346,6 +345,28 @@ kind:
 | `RISK_THRESHOLD_HIGH` / `RISK_THRESHOLD_MEDIUM` | Risk score cutoffs | `0.6` / `0.3` |
 | `MAIL_OUTBOX_DIR` | Old e-mail outbox of the removed REST API; factory reset can still empty it | `storage/mail_outbox` |
 
+## 19a. Google Drive setup (once)
+
+1. **Google Cloud project** (<https://console.cloud.google.com/>, signed in
+   with the central Google account): create a project, enable the **Google
+   Drive API**, and set up the **OAuth consent screen** (External, scope
+   `https://www.googleapis.com/auth/drive`). While the app is in *Testing*,
+   add the central account and every farmer's Gmail as **test users**;
+   Google then expires the laptop's refresh token after 7 days, so step 2 is
+   repeated weekly.
+2. **Two OAuth clients in that same project:** a **Desktop app** client for
+   the laptop (download its JSON to `storage/google_client_secret.json`),
+   and an **Android** client with package name `com.cropdisease.app` and the
+   SHA-1 of the key that signs the APK (nothing secret goes into the app).
+3. **Laptop:** `python scripts/drive_authorize.py`, signing in with the
+   central account. It saves the token and creates
+   `CropDiseaseEWS/images` and `CropDiseaseEWS/results`; those files stay
+   on the laptop (`.gitignore`).
+4. **Each farmer:** `python scripts/drive_share_user.py farmer@gmail.com`
+   (or the dashboard's **Register farmer**) creates `images/<email>/`
+   (upload) and `results/<email>/` (read), shared only with that account.
+   Until then the app says the account cannot upload yet.
+
 ## 20. Kafka startup
 
 ```bash
@@ -370,8 +391,7 @@ spark-submit \
 
 No multi-node cluster? `spark-submit` also runs this job in local mode
 (`--master local[*]`, the default when no master is set), which still needs
-a reachable Kafka broker. The processing logic on its own is covered
-without any external infra by `pytest tests/test_streaming_pipeline.py`.
+a reachable Kafka broker.
 
 ## 22. REST API (removed)
 
@@ -406,35 +426,14 @@ this also adds the new columns it needs (`full_name`, `email_verified`,
 `verification_code_hash`, etc.) via lightweight `ALTER TABLE` migrations —
 existing rows and existing ADMIN/USER accounts are left untouched.
 
-## 25. Testing
+## 25. Verification
 
-```bash
-pytest tests/ -v
-```
-
-The whole suite passes against an isolated temp SQLite DB, temp storage
-folders, the real CNN checkpoint, an in-memory fake of Google Drive and the
-local Kafka fallback — no external infrastructure is needed (the Spark tests
-auto-skip if pyspark/JVM aren't present). Run it to see the current count.
-Some of the test files:
-
-- `test_drive_flow.py` — the whole Android → Drive → Kafka → Spark → Drive flow, private folders, MANUAL mode holding uploads, and an old (replayed) event never bypassing MANUAL mode
-- `test_image_management.py` — the SQL catalog (images with and without predictions, latest prediction with a deterministic tie-break, parameterised filters), cache verification and repair from Drive, orphans, duplicate content kept as separate records, dry-run and confirmed clean-up with audit, factory-reset preview, label decisions kept apart from predictions, admin-only access
-- `test_scalability.py` — the isolated scalability test: no production rows, topic or Drive results; real-time priority; the two averages from measured data only; one before/after pair
-- `test_reset.py` — the factory reset, refused while the Spark job or the Drive watcher runs
-
-- `test_exif.py` — real EXIF extraction, missing/malformed EXIF, never inventing a timestamp
-- `test_risk_assessment.py` — risk scoring behavior, event validation/cleaning
-- `test_streaming_pipeline.py` — runs `spark/streaming_job.py`'s own code in **Spark local mode**: `parse_events()` decoding a Kafka-style JSON value against `EVENT_SCHEMA`, `foreach_batch_sink()` persisting a real `Prediction` row from a real image, its `DataFrame.isEmpty()` guard short-circuiting an empty micro-batch, an invalid event being marked `FAILED` (never given a fake prediction), and a full file-source → `foreachBatch` → DB run that advances a real Structured Streaming checkpoint. Builds every DataFrame by reading JSON files (pure-JVM scan) to stay clear of the executor-side Python-worker crash on this Windows box (see `DOKUMENTASAUN_TETUN.md` §10)
-- `test_image_validation.py` — empty/corrupted/oversized files, path-traversal safety, no filename collisions
-- `test_dashboard_users.py` — runs the actual Streamlit dashboard script end-to-end via `streamlit.testing.v1.AppTest` (not just an import/syntax check) against a real temp database, targeting a real bug this exact technique caught during review: the "Edit user" form's Status dropdown always reflects *some* value (Streamlit widgets can't represent "untouched"), and an earlier version compared it against `target.status.value` *after* an email-change had already mutated that same field in memory — so editing only the email while leaving Status showing its pre-existing value silently overwrote the PENDING_VERIFICATION reset back to ACTIVE and skipped sending a new code. Fixed by capturing the original status before any mutation; this test proves the full loop (edit email in the dashboard → code lands in `storage/mail_outbox/` → verify → log in with the new address) actually works
-
-The upload workflow and Kafka local-file fallback were also exercised live
-end-to-end (at the time through the since-removed REST API, with real HTTP
-requests and real image bytes) during development — this caught and led
-to fixing several real bugs (EXIF sub-IFD lookup, a passlib/bcrypt
-incompatibility, a SQLite naive/aware datetime mismatch, and a pandas
-`NaT`-serializes-as-string issue in the analytics endpoint).
+The automated pytest suite has been removed from the project. To check a
+running system: `python run_all.py` reports whether the Spark job came up
+and whether any photo is stuck; the dashboard's System Status page checks
+Google Drive, Kafka, the database, Spark and the Drive watcher;
+`scripts/benchmark_inference.py` measures the CNN; and the scalability test
+(section 32) measures the whole pipeline under load.
 
 ## 26. Performance evaluation
 
@@ -453,8 +452,7 @@ timestamps only:
 
 Units: a name ending `_ms` is milliseconds, `_s` / `_seconds` is seconds.
 
-Throughput under load is measured by the scalability test (section 32,
-[SCALABILITY_TEST.md](SCALABILITY_TEST.md)) on this laptop.
+Throughput under load is measured by the scalability test (section 32) on this laptop.
 
 ## 27. Limitations
 
@@ -543,8 +541,7 @@ Isolated from the real-time pipeline: its own Kafka topic
 `prepare_image` + CNN code, no `images`/`predictions` rows, no Drive results.
 Real-time processing has priority. The page shows one before/after
 preprocessing pair and two averages — execution time per iteration and
-processing time (preprocessing + CNN) per photo, both in seconds. Details:
-[SCALABILITY_TEST.md](SCALABILITY_TEST.md).
+processing time (preprocessing + CNN) per photo, both in seconds.
 
 ## 33. Factory reset
 
@@ -598,8 +595,6 @@ crop_disease_image_system/
 ├── scalability/              isolated scalability test (dataset, run, worker, report, monitor)
 ├── dashboard/                Streamlit admin dashboard (app.py + one module per larger page)
 ├── scripts/                  Drive authorisation, farmer sharing, benchmarks, performance report
-├── tests/                    pytest suite, no external infrastructure required
-├── SCALABILITY_TEST.md, INFERENCE_BENCHMARK.md, DRIVE_SETUP.md, DOKUMENTASAUN_TETUN.md
 ├── requirements.txt, docker-compose.yml
 └── README.md
 ```
