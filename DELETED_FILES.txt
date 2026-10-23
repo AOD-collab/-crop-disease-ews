@@ -1,9 +1,0 @@
-android_app/app/src/main/java/com/cropdisease/app/ApiConfig.kt
-android_app/app/src/main/java/com/cropdisease/app/RegisterActivity.kt
-android_app/app/src/main/java/com/cropdisease/app/VerifyEmailActivity.kt
-android_app/app/src/main/res/layout/activity_register.xml
-android_app/app/src/main/res/layout/activity_verify_email.xml
-ml/heuristic_cv.py
-scripts/calibrate_maize_gate.py
-tests/test_leaf_check.py
-tests/test_image_cleaning.py
