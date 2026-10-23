@@ -137,7 +137,7 @@ def _gallery(filters, review_wanted, cache_wanted):
             check = _cache(r)
             thumb = image_cache.thumbnail(str(check.path)) if check.status in ("valid", "unverified") else None
             if thumb:
-                st.image(thumb, use_container_width=True)
+                st.image(thumb, width="stretch")
             else:
                 st.caption("No preview: " + ("not cached on this laptop" if check.status == "missing"
                                              else "cached copy does not match the original"))
@@ -171,7 +171,7 @@ def _details(image_id: str, processed_image):
         original = image_cache.original_for_display(row, performed_by=_admin())
         with left:
             if original is not None:
-                st.image(original.data, caption=f"Original — {original.source}", use_container_width=True)
+                st.image(original.data, caption=f"Original — {original.source}", width="stretch")
             else:
                 st.info("The original photo is not on this laptop and could not be fetched from Google Drive.")
         with right:
@@ -179,7 +179,7 @@ def _details(image_id: str, processed_image):
                 if processed_image and row["status"] == "COMPLETED" else None
             if processed is not None:
                 st.image(processed, caption="Processed — the marked-up image the farmer received",
-                         use_container_width=True)
+                         width="stretch")
             else:
                 st.info({"COMPLETED": "No processed image was found in the farmer's Drive results folder.",
                          "FAILED": "Processing failed, so there is no processed image."}
@@ -265,7 +265,7 @@ def _storage():
     st.dataframe(pd.DataFrame([{"Category": image_cache.CATEGORIES[u["category"]], "Files": u["files"],
                                 "MB": round(u["bytes"] / 1e6, 1),
                                 "Shared with another category (MB)": round(u["shared_bytes"] / 1e6, 1),
-                                "Note": u["note"]} for u in usage]), hide_index=True, use_container_width=True)
+                                "Note": u["note"]} for u in usage]), hide_index=True, width="stretch")
 
     records = image_cache.reconcile()
     st.markdown("**Reconciliation of the original-photo cache with the database**")
@@ -278,7 +278,7 @@ def _storage():
     if attention:
         with st.expander(f"Files and records needing attention ({len(attention)})"):
             table = pd.DataFrame(attention)
-            st.dataframe(table, hide_index=True, use_container_width=True)
+            st.dataframe(table, hide_index=True, width="stretch")
             st.download_button("Download this list (CSV)", table.to_csv(index=False).encode("utf-8"),
                                file_name=f"image_cache_reconciliation_{now_local():%Y%m%d_%H%M}.csv")
 
@@ -297,7 +297,7 @@ def _storage():
         if not candidates:
             st.success("Nothing to clean up.")
         else:
-            st.dataframe(pd.DataFrame([c.as_row() for c in candidates]), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame([c.as_row() for c in candidates]), hide_index=True, width="stretch")
             mb = sum(c.size for c in candidates) / 1e6
             st.warning(f"{len(candidates)} file(s), {mb:,.2f} MB would be deleted from this laptop.")
             if "orphan_cache" in kinds:
@@ -315,7 +315,7 @@ def _storage():
     if log:
         with st.expander("Audit log (latest 50 storage actions)"):
             st.dataframe(pd.DataFrame([{**r, "time": _when(r["time"])} for r in log]), hide_index=True,
-                         use_container_width=True)
+                         width="stretch")
 
 
 def render(processed_image=None):

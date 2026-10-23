@@ -138,7 +138,7 @@ def _login_form():
     with st.form("login_form"):
         username = st.text_input("Username")
         password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Log in", type="primary", use_container_width=True)
+        submitted = st.form_submit_button("Log in", type="primary", width="stretch")
 
     if submitted:
         init_db()
@@ -215,7 +215,7 @@ if st.session_state.get("page") not in _PAGES:
 for _p in _PAGES:
     if st.sidebar.button(f"{_NAV_ICONS[_p]}  {_NAV_LABELS.get(_p, _p)}", key=f"nav_{_p}",
                          type="primary" if st.session_state["page"] == _p else "secondary",
-                         use_container_width=True):
+                         width="stretch"):
         st.session_state["page"] = _p
         st.rerun()
 page = st.session_state["page"]
@@ -549,7 +549,7 @@ if page == "Overview":
         st.plotly_chart(
             px.pie(dist, names="predicted_class", values="count", hole=0.55,
                    color="predicted_class", color_discrete_map=color_map),
-            use_container_width=True,
+            width="stretch",
         )
 
     st.divider()
@@ -636,7 +636,7 @@ elif page == "Real-Time Monitoring":
         st.dataframe(
             recent[["location", "predicted_class", "prediction_confidence", "risk_score",
                     "risk_level", "uploaded_at", "predicted_at"]],
-            use_container_width=True, column_config=TIME_COLUMNS,
+            width="stretch", column_config=TIME_COLUMNS,
         )
 
 elif page == "Pending Review":
@@ -761,7 +761,7 @@ elif page == "Users":
             "Status": u.status.value,
             "Created": format_local(u.created_at), "Updated": format_local(u.updated_at),
             "Deleted": u.is_deleted,
-        } for u in users]), use_container_width=True)
+        } for u in users]), width="stretch")
         st.caption(f"{total} user(s) total — page {page_num} of {max_page}")
         user_choices = {f"{u.full_name or u.username} ({u.email})": u.user_id for u in users}
     finally:
@@ -922,7 +922,7 @@ elif page == "Risk Alerts":
                 "high_pct": st.column_config.ProgressColumn("Share HIGH", format="%.2f%%",
                                                             min_value=0, max_value=100),
             },
-            hide_index=True, use_container_width=True,
+            hide_index=True, width="stretch",
         )
         st.caption("Counts only photos that were analysed (photos rejected as not a leaf or not "
                    "maize are left out). Each photo counts once, with its latest result.")
@@ -959,14 +959,14 @@ elif page == "Analytics":
         st.plotly_chart(
             px.bar(dist, x="predicted_class", y="count", color="predicted_class",
                    color_discrete_map=DISEASE_COLOR_MAP, color_discrete_sequence=CATEGORICAL_HUES),
-            use_container_width=True,
+            width="stretch",
         )
         with st.expander("All predictions (table)"):
             st.dataframe(
                 df.dropna(subset=["predicted_class"])[
                     ["location", "predicted_class", "prediction_confidence", "risk_level", "predicted_at"]
                 ].sort_values("predicted_at", ascending=False),
-                use_container_width=True, column_config=TIME_COLUMNS,
+                width="stretch", column_config=TIME_COLUMNS,
             )
     # Disease trend in every municipality (replaced the risk-score trend):
     # photos per disease per day, one panel per municipality.
@@ -986,14 +986,14 @@ elif page == "Analytics":
         fig.update_yaxes(matches=None, showticklabels=True)
         fig.update_xaxes(showticklabels=True, tickformat="%d/%m", dtick="D1")
         fig.update_layout(barmode="stack", legend_title_text="Disease")
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
     rdist = analytics.risk_distribution()
     if not rdist.empty:
         st.subheader("🥧 Risk Distribution")
         st.plotly_chart(
             px.pie(rdist, names="risk_level", values="count", color="risk_level",
                    color_discrete_map=RISK_COLOR_MAP),
-            use_container_width=True,
+            width="stretch",
         )
     dt = analytics.disease_trend()
     if not dt.empty:
@@ -1001,7 +1001,7 @@ elif page == "Analytics":
         st.plotly_chart(
             px.histogram(dt, x="predicted_at", color="predicted_class",
                          color_discrete_map=DISEASE_COLOR_MAP, color_discrete_sequence=CATEGORICAL_HUES),
-            use_container_width=True,
+            width="stretch",
         )
     if dist.empty and rt.empty and rdist.empty and dt.empty:
         st.info("No analytics available yet — no images have been fully processed.")
@@ -1087,12 +1087,12 @@ elif page == "Maintenance":
         _del.dataframe(pd.DataFrame(
             [{"What": f"{k} rows", "Count": v} for k, v in _preview["deleted_rows"].items()]
             + [{"What": k + " (files)", "Count": v} for k, v in _preview["deleted_files"].items()]),
-            hide_index=True, use_container_width=True)
+            hide_index=True, width="stretch")
         _keep.markdown("Kept")
         _keep.dataframe(pd.DataFrame(
             [{"What": f"{k} rows", "Count": v} for k, v in _preview["kept_rows"].items()]
             + [{"What": k + " (files)", "Count": v} for k, v in _preview["kept_files"].items()]),
-            hide_index=True, use_container_width=True)
+            hide_index=True, width="stretch")
         st.caption(_preview["kept_note"] + " Farmers' Drive photos and results are only deleted if you tick "
                    "that box above.")
     from storage.reset import spark_job_running, drive_watcher_running

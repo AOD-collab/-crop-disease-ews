@@ -199,8 +199,8 @@ def _comparison(runs: list):
         st.caption("The image files of this test are no longer on disk.")
         return
     cols = st.columns(2)
-    cols[0].image(str(before), caption="Before preprocessing", use_container_width=True)
-    cols[1].image(str(after), caption="After preprocessing", use_container_width=True)
+    cols[0].image(str(before), caption="Before preprocessing", width="stretch")
+    cols[1].image(str(after), caption="After preprocessing", width="stretch")
 
 
 def _disease_section(first_run, df):
@@ -226,7 +226,7 @@ def _disease_section(first_run, df):
                  color_discrete_map=colors, category_orders={"location": order},
                  labels={"photos": "Photos", "location": "Municipality", "predicted_class": "Disease"})
     fig.update_layout(barmode="stack", height=max(260, 46 * len(order) + 120), legend_title_text="Disease")
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
 
     c1, c2 = st.columns([3, 2])
     with c1:
@@ -244,7 +244,7 @@ def _disease_section(first_run, df):
             fig.update_layout(mapbox_style="open-street-map", margin=dict(l=0, r=0, t=0, b=0),
                               legend_title_text="Disease")
             fig.update_traces(marker=dict(size=10, opacity=0.85))
-            st.plotly_chart(fig, use_container_width=True)
+            st.plotly_chart(fig, width="stretch")
             missing = len(done) - len(gps)
             st.caption(f"{len(gps):,} photo(s) on the map"
                        + (f"; {missing:,} without a GPS position are not shown." if missing else "."))
@@ -253,7 +253,7 @@ def _disease_section(first_run, df):
         fig = px.bar(dist, x="predicted_class", y="photos", color="predicted_class", color_discrete_map=colors,
                      labels={"predicted_class": "Disease", "photos": "Photos"}, height=420)
         fig.update_layout(showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
     high = high_risk_by_location(done)
     if not high.empty:
@@ -267,7 +267,7 @@ def _disease_section(first_run, df):
                 "high_pct": st.column_config.ProgressColumn("Share HIGH", format="%.2f%%",
                                                             min_value=0, max_value=100),
             },
-            hide_index=True, use_container_width=True,
+            hide_index=True, width="stretch",
         )
 
 
@@ -307,9 +307,9 @@ def _gallery(first_run, df):
                 before, after = preview_paths(folder, row["image_id"])
                 pics = st.columns(2)
                 if before.is_file():
-                    pics[0].image(str(before), caption="Before", use_container_width=True)
+                    pics[0].image(str(before), caption="Before", width="stretch")
                 if after.is_file():
-                    pics[1].image(str(after), caption="After", use_container_width=True)
+                    pics[1].image(str(after), caption="After", width="stretch")
                 st.badge(row["status"], color=STATUS_BADGE_COLOR.get(row["status"], "gray"))
                 if row["predicted_class"]:
                     conf = row["prediction_confidence"]
