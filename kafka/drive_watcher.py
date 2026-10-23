@@ -51,7 +51,7 @@ from storage.database import (  # noqa: E402
     RejectedEvent, get_processing_mode, now_utc,
 )
 from storage.pipeline_submit import submit_image_for_processing, UPLOAD_REJECTED_PREFIX  # noqa: E402
-from storage.image_storage import to_drive_path  # noqa: E402
+from api.image_storage import to_drive_path  # noqa: E402
 from api.auth import hash_password, normalize_email  # noqa: E402
 
 # Drive API quota: each check is ONE change-feed request (~100 units of the

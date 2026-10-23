@@ -179,7 +179,7 @@ bytes of a photo the phone captured or the user picked from their gallery.
 
 ## 7. EXIF timestamp — `captured_at`
 
-`storage/exif_utils.py` reads the JPEG's `DateTimeOriginal` EXIF tag (found in
+`api/exif_utils.py` reads the JPEG's `DateTimeOriginal` EXIF tag (found in
 the "Exif" sub-IFD, not the base IFD — this actually tripped up the first
 implementation and was fixed after a failing test caught it). If no valid
 EXIF timestamp exists, `captured_at = NULL` — the system never invents one.
@@ -664,13 +664,12 @@ afterwards (they are never deleted automatically).
 ```
 crop_disease_image_system/
 ├── run_all.py               starts Kafka/PostgreSQL (Docker), Spark, dashboard, Drive watcher
-├── api/                     REST API (kept; the app no longer uses it), auth, e-mail verification
+├── api/                     REST API (kept; the app no longer uses it), auth, image storage helpers
 ├── android_app/             farmer app (Kotlin) — Google sign-in, upload, history, settings
 ├── config/                  settings.py (env-driven), localtime.py (Timor-Leste Time)
 ├── kafka/
 │   ├── drive_watcher.py      Google Drive images/<email>/ → Kafka (respects MANUAL mode)
-│   ├── producer.py           confluent-kafka + resilient local file-queue fallback
-│   └── monitor.py            read-only live view of the topics (EWS-KafkaMonitor window)
+│   └── producer.py           confluent-kafka + resilient local file-queue fallback
 ├── spark/
 │   ├── streaming_job.py      Spark Structured Streaming: Kafka → per-photo processing
 │   ├── preprocessing.py      validation, EXIF, prepare_image, CNN call, risk, persistence, Drive results
@@ -683,20 +682,16 @@ crop_disease_image_system/
 │   └── trained_model/        saved_model_cnn.pt
 ├── storage/
 │   ├── database.py           models, views (v_tableau_images, v_admin_image_catalog), migrations
-│   ├── init_db.py            create tables + bootstrap the first admin
-│   ├── image_storage.py      where photos live (local path / gdrive:<id>), safe local writes
-│   ├── exif_utils.py         EXIF capture time, GPS, camera
 │   ├── image_catalog.py      the admin image catalog (parameterised SQL)
 │   ├── image_cache.py        managed local cache: verify, repair, reconcile, audited clean-up
 │   ├── reviews.py            administrator label decisions (image_reviews)
 │   ├── drive_client.py       Google Drive API
 │   ├── pipeline_submit.py    publish an image to Kafka (AUTOMATIC upload / MANUAL "Process")
-│   ├── requeue_stuck.py      re-publish / process images stranded before Spark
 │   ├── reset.py              factory reset (+ preview, audit)
 │   └── schema.sql            raw PostgreSQL DDL
 ├── scalability/              isolated scalability test (dataset, run, worker, report, monitor)
 ├── dashboard/                Streamlit admin dashboard (app.py + one module per larger page)
-├── scripts/                  Drive authorisation, farmer sharing, benchmarks, mail-outbox sender
+├── scripts/                  Drive authorisation, farmer sharing, benchmarks, source-code PDF
 ├── tests/                    pytest suite, no external infrastructure required
 ├── SCALABILITY_TEST.md, INFERENCE_BENCHMARK.md, DRIVE_SETUP.md, DOKUMENTASAUN_TETUN.md
 ├── requirements.txt, docker-compose.yml

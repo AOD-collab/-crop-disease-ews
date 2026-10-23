@@ -90,8 +90,7 @@ def drive_watcher_running():
 
 
 def _python_command_lines():
-    """Command lines of the running Python processes, or None if they can't
-    be read. Also used by the dashboard's System Status checks."""
+    """Command lines of the running Python processes, or None."""
     import subprocess
     try:
         if sys.platform == "win32":

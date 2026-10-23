@@ -336,6 +336,31 @@ def upload_json(name: str, data: dict, parent_id: str, app_properties: dict, may
     return upload_bytes(name, payload, "application/json", parent_id, app_properties, may_exist, existing_id)
 
 
+def list_folder(parent_id: str, created_after: Optional[str] = None, page_size: int = 100) -> list:
+    """All non-trashed files directly in `parent_id` (oldest first),
+    optionally only those created after `created_after` (RFC 3339). Used by
+    kafka/drive_watcher.py to find newly uploaded photos."""
+    _require_valid_id(parent_id, "parent folder id")
+    q = f"'{parent_id}' in parents and trashed = false"
+    if created_after:
+        q += f" and createdTime > '{_escape_query_value(created_after)}'"
+    files, page_token = [], None
+    while True:
+        params = {
+            "q": q, "spaces": "drive", "orderBy": "createdTime", "pageSize": page_size,
+            "fields": f"nextPageToken,files({FILE_METADATA_FIELDS})",
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        resp = _request("GET", f"{DRIVE_API}/files", params=params)
+        _check(resp, "list folder")
+        body = resp.json()
+        files.extend(body.get("files", []))
+        page_token = body.get("nextPageToken")
+        if not page_token:
+            return files
+
+
 def get_start_page_token() -> str:
     """Bookmark for "now" in the account's change feed: list_changes() from
     this token returns only what changes afterwards."""

@@ -29,7 +29,7 @@ from storage.database import (
     ProcessingMode, get_processing_mode, set_processing_mode, init_db, now_utc, SCALE_TEST_SOURCE,
     SCALE_TEST_USERNAME,
 )
-from storage.reset import factory_reset, _python_command_lines
+from storage.reset import factory_reset
 from storage.pipeline_submit import submit_image_for_processing, is_upload_rejected
 from storage.requeue_stuck import count_owed
 from config.localtime import format_local, now_local
@@ -38,7 +38,7 @@ from config.localtime import format_local, now_local
 _TLT_COL = st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm", timezone="Asia/Dili")
 TIME_COLUMNS = {c: _TLT_COL for c in ("captured_at", "uploaded_at", "processed_at", "predicted_at")}
 from api.auth import verify_password, normalize_email
-from storage.image_storage import is_drive_path, drive_file_id_from_path, resolve_image_path, downloaded_photo_path
+from api.image_storage import is_drive_path, drive_file_id_from_path, resolve_image_path, downloaded_photo_path
 from storage import drive_client
 from spark import analytics
 
@@ -49,14 +49,29 @@ st.set_page_config(page_title="Crop Disease EWS — Admin Dashboard", layout="wi
 # Shared color language (mirrors android_app's colors.xml so the admin
 # dashboard and the mobile app read as one system, not two). Status colors
 # are reserved for verdicts — never reused for an arbitrary chart series.
-# The maize brand colours (green + yellow) live in .streamlit/config.toml
-# and the CSS in _inject_style() below.
+#
+# COLOR_BRAND is deliberately the darker amber step (not the bright
+# #F0B429 the Android app uses for big filled CTAs): Streamlit's theme
+# reuses primaryColor as TEXT in places (links, selected-radio labels), and
+# raw bright gold fails contrast as text on a light background — same
+# reasoning as android_app's colors.xml `accent_text`. The bright gold
+# still shows up here as a FILL (KPI card accents, chart bars) where text
+# contrast isn't a concern.
 # ------------------------------------------------------------------
+# Maize palette (green + yellow). Kept in sync with .streamlit/config.toml
+# and the CSS in _inject_style() below.
+COLOR_LEAF = "#1F4D2B"        # dark maize leaf — sidebar, titles
+COLOR_BRAND = "#2E7D32"       # stalk green — buttons, chart bars (safe as text too)
+COLOR_HUSK = "#E4EEDA"        # pale husk — soft backgrounds
+COLOR_BRAND_FILL = "#F5C518"  # corn-kernel yellow — fills only, never text on white
 COLOR_GOOD = "#0CA30C"        # healthy / LOW risk
 COLOR_WARNING = "#FAB219"     # MEDIUM risk
+COLOR_SERIOUS = "#EC835A"     # FAILED pipeline status (not a verdict about the crop)
 COLOR_CRITICAL = "#D03B3B"    # HIGH risk / diseased
+COLOR_MUTED = "#898781"       # pending / unknown
 
 RISK_COLOR_MAP = {"LOW": COLOR_GOOD, "MEDIUM": COLOR_WARNING, "HIGH": COLOR_CRITICAL}
+RISK_BADGE_COLOR = {"LOW": "green", "MEDIUM": "orange", "HIGH": "red"}
 # Disease / status colours are shared with the other dashboard pages.
 from dashboard.theme import STATUS_BADGE_COLOR, CATEGORICAL_HUES, DISEASE_COLOR_MAP  # noqa: E402
 
@@ -379,6 +394,22 @@ def _processed_image(image_id: str, email):
 # ------------------------------------------------------------------
 # System Status checks
 # ------------------------------------------------------------------
+def _python_command_lines():
+    """Command lines of running Python processes (to see whether the Spark
+    job and the Drive watcher are running), or None if it can't be read."""
+    import subprocess
+    try:
+        if sys.platform == "win32":
+            cmd = ["powershell", "-NoProfile", "-Command",
+                   "Get-CimInstance Win32_Process -Filter \"Name LIKE 'python%'\" | "
+                   "ForEach-Object { $_.CommandLine }"]
+        else:
+            cmd = ["ps", "-eo", "args"]
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
+    except Exception:  # noqa: BLE001
+        return None
+
+
 @st.cache_data(ttl=15, show_spinner="Checking the system…")
 def _system_status() -> dict:
     from config import settings

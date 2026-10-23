@@ -54,6 +54,12 @@ def require_admin(user: User = Depends(get_current_user)) -> User:
     return user
 
 
+def require_user_or_admin(user: User = Depends(get_current_user)) -> User:
+    # Any authenticated, active account (USER or ADMIN) — just here for
+    # readability at call sites.
+    return user
+
+
 def assert_owns_image(image, user: User):
     """Raise 403 if `user` (a USER) does not own this image row. ADMIN
     bypasses (system-wide access)."""

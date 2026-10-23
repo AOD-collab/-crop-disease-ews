@@ -381,6 +381,16 @@ def _probabilities(loaded, image_bytes: bytes, timings: dict = None):
     return out
 
 
+def inference_settings() -> dict:
+    """What predict() is actually using now (for reports)."""
+    loaded = _load_trained_model()
+    b = loaded.get("batcher")
+    size = int(IMAGE_MODEL.get("batch_size", 1) or 1)
+    return {"device": _device_name(__import__("torch"), loaded["device"]), "precision": _precision(loaded),
+            "batch_size": b.max_batch if b else max(1, size),
+            "batch_wait_ms": IMAGE_MODEL.get("batch_wait_ms", 5) if size > 1 else None}
+
+
 def predict(image_bytes: bytes) -> dict:
     """Single entry point every real data source should call: the trained
     CNN's result for one photo (see the module docstring for the keys).

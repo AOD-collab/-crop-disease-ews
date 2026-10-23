@@ -116,8 +116,9 @@ class KafkaBackend:
 class LocalFileBackend:
     """Infrastructure fallback for environments without a Kafka broker
     installed: an append-only JSON-lines file that stands in for the topic
-    so uploads are still durably recorded; ResilientBackend drains it into
-    Kafka once the broker is back."""
+    so uploads are still durably recorded. `read_all` / `read_new_since`
+    are the consumer-side reads, available to any file-queue consumer; a
+    real Kafka + Spark deployment ignores this class entirely."""
 
     def __init__(self, topic: str):
         self.path = LOCAL_QUEUE_DIR / f"{topic}.jsonl"
@@ -126,6 +127,21 @@ class LocalFileBackend:
         line = json.dumps(message) + "\n"
         with _APPEND_LOCK, open(self.path, "a") as f:
             f.write(line)
+
+    def read_all(self):
+        if not self.path.exists():
+            return []
+        with open(self.path) as f:
+            return _parse_lines(f)[0]
+
+    def read_new_since(self, offset: int):
+        if not self.path.exists():
+            return [], offset
+        with open(self.path) as f:
+            f.seek(offset)
+            lines = f.readlines()
+            new_offset = f.tell()
+        return _parse_lines(lines)[0], new_offset
 
 
 class ResilientBackend:

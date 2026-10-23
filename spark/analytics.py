@@ -176,6 +176,11 @@ def high_risk_by_location(df: pd.DataFrame = None) -> pd.DataFrame:
     return out.sort_values(["high", "high_pct", "location"], ascending=[False, False, True]).reset_index(drop=True)
 
 
+def risk_trend() -> pd.DataFrame:
+    df = images_with_predictions().dropna(subset=["predicted_at", "risk_score"])
+    return df.sort_values("predicted_at")[["predicted_at", "location", "risk_score", "risk_level"]]
+
+
 def disease_trend() -> pd.DataFrame:
     df = images_with_predictions().dropna(subset=["predicted_at", "predicted_class"])
     return df.sort_values("predicted_at")[["predicted_at", "location", "predicted_class"]]

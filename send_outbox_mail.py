@@ -13,7 +13,7 @@ APP_PASSWORD = "mjkm foct myeb dgky"  # Replace with your 16-character Google Ap
 POLL_INTERVAL = int(os.getenv("MAIL_POLL_INTERVAL", "30"))
 
 # Where api/mailer.py drops verification emails when MAIL_HOST is not configured.
-OUTBOX_DIR = Path(os.getenv("MAIL_OUTBOX_DIR", str(Path(__file__).resolve().parent.parent / "storage" / "mail_outbox")))
+OUTBOX_DIR = Path(os.getenv("MAIL_OUTBOX_DIR", str(Path(__file__).parent / "storage" / "mail_outbox")))
 SENT_DIR = OUTBOX_DIR / "sent"
 
 

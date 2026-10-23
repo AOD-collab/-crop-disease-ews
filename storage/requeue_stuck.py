@@ -51,7 +51,7 @@ from sqlalchemy import and_, or_
 from storage.database import (
     SessionLocal, Image, ProcessingStatus, now_utc, init_db, SCALE_TEST_SOURCE,
 )
-from storage.image_storage import (
+from api.image_storage import (
     resolve_image_path, to_stored_path, is_drive_path, drive_file_id_from_path, DRIVE_PATH_PREFIX,
 )
 

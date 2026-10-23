@@ -8,7 +8,7 @@ and the SHA-256 of its bytes (images.content_hash). This laptop keeps:
 
   original_cache  DOWNLOADED_PHOTOS_DIR/<user_id>/<image_id>.jpg|.png
                   byte-for-byte copies of Drive originals, written when Spark
-                  first reads a photo (storage/image_storage.store_downloaded_photo)
+                  first reads a photo (api/image_storage.store_downloaded_photo)
   review          REVIEW_DIR/<image_id>.jpg — EXIF-stripped copies waiting on
                   the Label photos page (protected here)
   training        LABELLED_TRAIN_DIR/<class>/<image_id>.jpg — confirmed
@@ -37,11 +37,11 @@ from io import BytesIO
 from pathlib import Path
 
 from config import settings
-from storage.image_storage import (
+from api.image_storage import (
     downloaded_photo_path, store_downloaded_photo, is_drive_path, drive_file_id_from_path, _SAFE_ID_RE,
 )
 from storage.database import (
-    SessionLocal, StorageAuditLog, ScaleTestRun,
+    SessionLocal, StorageAuditLog, ScaleTestRun, now_utc,
 )
 
 CATEGORIES = {
@@ -153,7 +153,7 @@ def original_for_display(row: dict, performed_by=None, download=None) -> Origina
         return Original(str(check.path), "Local copy" + (" (verified)" if check.status == "valid" else ""))
     image_path = row.get("image_path") or ""
     if not is_drive_path(image_path):
-        from storage.image_storage import resolve_image_path
+        from api.image_storage import resolve_image_path
         try:
             return Original(str(resolve_image_path(image_path)), "Local upload (previous design)")
         except (FileNotFoundError, OSError):

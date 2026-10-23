@@ -14,7 +14,7 @@ without duplicating it.
 """
 
 from storage.database import ProcessingStatus, now_utc
-from storage.image_storage import is_drive_path, drive_file_id_from_path
+from api.image_storage import is_drive_path, drive_file_id_from_path
 from kafka.config import KAFKA_TOPIC
 from kafka.producer import get_backend
 
