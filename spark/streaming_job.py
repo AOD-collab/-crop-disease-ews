@@ -74,7 +74,7 @@ from spark.preprocessing import (
     replay_state,
 )
 from storage.database import ProcessingStatus, init_db
-from api.image_storage import is_drive_path
+from storage.image_storage import is_drive_path
 from spark import live_log
 
 CHECKPOINT_DIR = str(SPARK_CHECKPOINT_ROOT / KAFKA_TOPIC)

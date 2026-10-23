@@ -207,11 +207,3 @@ def store_downloaded_photo(user_id: str, image_id: str, original_bytes: bytes) -
     tmp.write_bytes(original_bytes)
     tmp.replace(target)
     return target
-
-
-def image_for_display(stored: str):
-    """What the Streamlit dashboard's st.image() needs: raw bytes for a
-    Drive image, a local file path string otherwise."""
-    if is_drive_path(stored):
-        return load_image_bytes(stored)
-    return str(resolve_image_path(stored))

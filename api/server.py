@@ -22,18 +22,18 @@ Run locally:
 import math
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, Form, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 from sqlalchemy import text, or_, func, case, select
 from sqlalchemy.orm import Session, aliased
 
 from config.settings import (
-    KAFKA_TOPIC, VERIFICATION_CODE_TTL_MINUTES, VERIFICATION_CODE_MAX_ATTEMPTS,
+    KAFKA_TOPIC, VERIFICATION_CODE_TTL_MINUTES,
 )
 from storage.database import (
     init_db, User, Image, Prediction,
@@ -46,8 +46,8 @@ from api.auth import (
     normalize_email, is_valid_gmail_address, password_policy_errors,
 )
 from api.deps import get_db, get_current_user, require_admin, assert_owns_image
-from api.exif_utils import extract_captured_at
-from api.image_storage import (
+from storage.exif_utils import extract_captured_at
+from storage.image_storage import (
     save_image, InvalidImage, resolve_image_path, compute_content_hash,
     is_drive_path, downloaded_photo_path, load_image_bytes,
 )
