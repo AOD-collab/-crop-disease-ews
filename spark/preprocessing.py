@@ -33,11 +33,11 @@ from config.settings import (
     ANALYSIS_MAX_PX, SAVE_DOWNLOADED_PHOTOS, SPARK_RECHECK_DRIVE_FILE,
 )
 from config.localtime import format_local
-from api.image_storage import (
+from storage.image_storage import (
     resolve_image_path, is_drive_path, drive_file_id_from_path, load_image_bytes,
     downloaded_photo_path, store_downloaded_photo,
 )
-from api.exif_utils import extract_image_metadata
+from storage.exif_utils import extract_image_metadata
 from ml.render import render_processed_image
 from storage import drive_client
 from ml.inference import predict as run_model, model_version as get_model_version, disease_heatmap
@@ -198,7 +198,7 @@ _METADATA_COLUMNS = ("camera_make", "camera_model", "image_width", "image_height
 
 def extract_metadata(event: dict, image_bytes: bytes) -> dict:
     """Metadata extraction stage: reads where/when/with-what the photo was
-    taken from the ORIGINAL file's EXIF (api.exif_utils.extract_image_metadata)
+    taken from the ORIGINAL file's EXIF (storage.exif_utils.extract_image_metadata)
     and stores it on the Image row. Must run before prepare_image(), which
     re-encodes the photo without EXIF.
 
@@ -404,7 +404,7 @@ def scale_test_run_for(event: dict):
 
 def save_downloaded_photo(user_id: str, image_id: str, original_bytes: bytes) -> None:
     """Keep the photo downloaded from Google Drive on local disk for good
-    (api.image_storage.store_downloaded_photo). A reprocess rewrites the same
+    (storage.image_storage.store_downloaded_photo). A reprocess rewrites the same
     file. Never fails the diagnosis."""
     if not SAVE_DOWNLOADED_PHOTOS:
         return
@@ -435,44 +435,19 @@ def save_for_review(image_id: str, image_bytes: bytes) -> None:
         print(f"[preprocessing] Could not save {image_id} for labelling: {e}")
 
 
-def already_completed(image_id: str) -> bool:
-    """True when this image already has its result. Replaces the streaming
-    dropDuplicates Spark used to keep (spark/streaming_job.parse_events):
-    that one remembered every image_id forever, so it silently dropped the
-    event a Reprocess / requeue_stuck published for an image Kafka had seen
-    before, leaving it INGESTED for good. Asking the database instead lets
-    a real re-submission through (its status was reset to INGESTED) while a
-    replay of an already-finished image is still skipped."""
-    session = SessionLocal()
-    try:
-        image = session.get(Image, image_id)
-        return image is not None and image.status == ProcessingStatus.COMPLETED
-    finally:
-        session.close()
-
-
-def held_for_review(image_id: str) -> bool:
-    """True while MANUAL mode holds this image (PENDING_REVIEW). The only
-    way out is the admin's Process, which sets INGESTED before it publishes
-    (storage/pipeline_submit.submit_image_for_processing). So an event that
-    finds the image still held is an OLD event — e.g. Spark replaying the
-    topic after a factory reset that kept Kafka's messages, once the Drive
-    watcher re-registered the photo in MANUAL mode — and processing it would
-    bypass manual mode."""
-    session = SessionLocal()
-    try:
-        image = session.get(Image, image_id) if image_id else None
-        return image is not None and image.status == ProcessingStatus.PENDING_REVIEW
-    finally:
-        session.close()
-
-
 def replay_state(image_id: str):
-    """held_for_review / already_completed / needs_result_upload in ONE
-    database lookup, for the Spark sink's check on every event (each of
-    those opens its own session: ~3 ms per lookup on the Docker
-    PostgreSQL). Returns "held", "completed", "result_missing" (COMPLETED
-    but its result never reached Drive) or None (process it)."""
+    """The Spark sink's replay check, in ONE database lookup per event
+    (~3 ms on the Docker PostgreSQL). Returns:
+      "held"           - MANUAL mode still holds it (PENDING_REVIEW). The admin's
+                         Process sets INGESTED before publishing, so this is an
+                         OLD event (e.g. a topic replay after a factory reset)
+                         and processing it would bypass manual mode.
+      "completed"      - already has its result; a replay is skipped. Asking the
+                         database (instead of Spark's old dropDuplicates) still
+                         lets a real Reprocess through: its status was reset.
+      "result_missing" - a COMPLETED Drive photo whose result never reached
+                         Drive (Spark stopped in between): upload it now.
+      None             - process it."""
     if not image_id:
         return None
     session = SessionLocal()
@@ -790,19 +765,6 @@ def _mark_result_published(image_id: str) -> None:
         if image is not None:
             image.result_published_at = datetime.now(timezone.utc)
             session.commit()
-    finally:
-        session.close()
-
-
-def needs_result_upload(image_id: str) -> bool:
-    """True for a COMPLETED Drive photo whose result never reached Drive
-    (Spark stopped between saving it and uploading it). A replayed event
-    for it uploads the result instead of being skipped."""
-    session = SessionLocal()
-    try:
-        image = session.get(Image, image_id) if image_id else None
-        return (image is not None and image.status == ProcessingStatus.COMPLETED
-                and is_drive_path(image.image_path) and image.result_published_at is None)
     finally:
         session.close()
 

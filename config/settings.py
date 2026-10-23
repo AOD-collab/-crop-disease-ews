@@ -178,7 +178,7 @@ RISK_THRESHOLDS = {
 # --------------------------------------------------------------------
 # EXIF DateTimeOriginal carries no timezone info at all — it's a plain
 # "YYYY:MM:DD HH:MM:SS" local wall-clock reading. Fixed offset for
-# Timor-Leste (UTC+9), attached in api/exif_utils.py so captured_at isn't
+# Timor-Leste (UTC+9), attached in storage/exif_utils.py so captured_at isn't
 # silently stored as if it were UTC.
 # --------------------------------------------------------------------
 EXIF_LOCAL_TZ_OFFSET_HOURS = int(os.getenv("EXIF_LOCAL_TZ_OFFSET_HOURS", "9"))
