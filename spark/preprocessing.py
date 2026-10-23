@@ -20,6 +20,7 @@ Classification vs risk (DIT manual section 26):
              confidence; see compute_risk)
 """
 
+import hashlib
 import json
 import re
 import threading
@@ -94,6 +95,88 @@ def normalize_location(location) -> str:
 
 class InvalidEvent(Exception):
     pass
+
+
+class DuplicateImage(InvalidEvent):
+    """The photo's bytes are identical to an earlier photo from the same user
+    (already completed, or being processed). A subclass of InvalidEvent, so every existing
+    `except InvalidEvent` handler treats it like any other rejected event."""
+
+
+# Set to False to switch the duplicate check off without touching anything else.
+SKIP_DUPLICATE_PHOTOS = True
+
+# The Spark job checks several photos of a micro-batch at once (streaming_job's
+# thread pool). The lock makes "store the fingerprint + look for a copy" one step,
+# so two copies of the same photo can't both look before either is stored; the set
+# holds the photos that PASSED the check in this process, so a copy that is being
+# processed only counts once it was accepted (two copies can't reject each other).
+_DUPLICATE_LOCK = threading.Lock()
+_ACCEPTED_IMAGE_IDS = set()
+
+
+def check_duplicate_by_hash(event: dict, original_bytes: bytes) -> None:
+    """Fingerprint (SHA-256) the ORIGINAL photo bytes, store it on the Image
+    row, and raise DuplicateImage when the same user already has a COMPLETED
+    photo with the same fingerprint, or a copy that another thread of this
+    Spark job accepted and is processing right now. Whichever copy is checked
+    first is kept; every later copy is rejected.
+
+    Never breaks a diagnosis by itself: if anything goes wrong in here (for
+    example the database is unreachable), it only logs and lets the photo
+    continue. The one deliberate exception is DuplicateImage.
+
+    It leaves alone (returns without checking) a photo that has no Image row,
+    and a photo that already has a prediction (a Reprocess / model re-run)."""
+    if not SKIP_DUPLICATE_PHOTOS:
+        return
+    session = None
+    _DUPLICATE_LOCK.acquire()
+    try:
+        session = SessionLocal()
+        image = session.get(Image, event["image_id"])
+        if image is None:
+            return      # no row to protect; persist_result already handles this case
+        if session.query(Prediction.prediction_id).filter(
+                Prediction.image_id == image.image_id).first() is not None:
+            return      # already diagnosed once (a Reprocess / model re-run): never reject it now
+        # A stored hash (older rows) is reused so every row is compared the same way;
+        # a Drive photo gets its hash here, from the bytes Spark just downloaded.
+        digest = image.content_hash or hashlib.sha256(original_bytes).hexdigest()
+        if not image.content_hash:
+            image.content_hash = digest
+            session.commit()
+        # Same photo, same farmer: already COMPLETED, or accepted by this job and
+        # being processed right now (oldest upload named first).
+        copies = (
+            session.query(Image.image_id, Image.status)
+            .filter(
+                Image.user_id == event["user_id"],
+                Image.content_hash == digest,
+                Image.image_id != event["image_id"],
+                Image.status.in_([ProcessingStatus.COMPLETED, ProcessingStatus.PROCESSING]),
+            )
+            .order_by(Image.uploaded_at, Image.image_id)
+            .all()
+        )
+        earlier = next((c for c in copies if c.status == ProcessingStatus.COMPLETED
+                        or c.image_id in _ACCEPTED_IMAGE_IDS), None)
+        if earlier is None:
+            _ACCEPTED_IMAGE_IDS.add(event["image_id"])
+    except Exception as e:  # noqa: BLE001
+        print(f"[preprocessing] Duplicate check skipped for {event.get('image_id')}: {e}")
+        if session is not None:
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                pass
+        return
+    finally:
+        if session is not None:
+            session.close()
+        _DUPLICATE_LOCK.release()
+    if earlier:
+        raise DuplicateImage(f"Duplicate photo: identical to {earlier.image_id}")
 
 
 def clean_event(event: dict) -> dict:
@@ -332,6 +415,8 @@ def process_event(event: dict) -> dict:
     else:
         original_bytes = Path(event["image_path"]).read_bytes()
     lap("read_s")
+    if scale_run is None:                         # scalability tests deliberately reuse the same photo
+        check_duplicate_by_hash(event, original_bytes)
     extract_metadata(event, original_bytes)       # EXIF: GPS, capture time, camera — needs the original
     lap("metadata_s")
     image_bytes = prepare_image(original_bytes)
