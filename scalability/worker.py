@@ -250,7 +250,7 @@ def photo_location(path, location=None, device_gps=None) -> dict:
     GPS = the photo's own EXIF GPS when it has some, else the phone's
     position the app sent (`device_gps`) — the same priority as
     spark/preprocessing.extract_metadata."""
-    from storage.exif_utils import extract_image_metadata
+    from api.exif_utils import extract_image_metadata
     lat = lon = None
     try:
         meta = extract_image_metadata(Path(path).read_bytes())
