@@ -46,8 +46,8 @@ from api.auth import (
     normalize_email, is_valid_gmail_address, password_policy_errors,
 )
 from api.deps import get_db, get_current_user, require_admin, assert_owns_image
-from api.exif_utils import extract_captured_at
-from api.image_storage import (
+from storage.exif_utils import extract_captured_at
+from storage.image_storage import (
     save_image, InvalidImage, resolve_image_path, compute_content_hash,
     is_drive_path, downloaded_photo_path, load_image_bytes,
 )

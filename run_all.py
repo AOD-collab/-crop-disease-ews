@@ -6,7 +6,7 @@ its own console window:
     * Kafka broker        docker compose up -d             localhost:9092
     * Spark streaming job  python -m spark.streaming_job
     * Admin dashboard      streamlit run dashboard/app.py   http://localhost:8501
-    * Mail-outbox sender   python send_outbox_mail.py       (only with --mail: it sends the
+    * Mail-outbox sender   python scripts/send_outbox_mail.py (only with --mail: it sends the
                            old verification-code emails; farmers now sign in with Google)
     * Drive watcher        python -m kafka.drive_watcher    (Google Drive /images -> Kafka)
 
@@ -204,7 +204,7 @@ def main() -> int:
     p.add_argument("--no-spark", action="store_true", help="don't start the Spark streaming job")
     p.add_argument("--no-dashboard", action="store_true", help="don't start the Streamlit dashboard")
     p.add_argument("--mail", action="store_true",
-                   help="also start the send_outbox_mail.py watcher (old verification-code emails; "
+                   help="also start the scripts/send_outbox_mail.py watcher (old verification-code emails; "
                         "not needed with Google sign-in)")
     p.add_argument("--no-mail", action="store_true", help=argparse.SUPPRESS)  # old flag, now the default
     p.add_argument("--no-drive", action="store_true", help="don't start the Google Drive -> Kafka watcher")
@@ -340,7 +340,7 @@ def main() -> int:
                                           ["python", "-m", "streamlit", "run", "dashboard/app.py"]))
 
     if args.mail:
-        services.append(start_service("EWS-Mail", ["python", "send_outbox_mail.py"]))
+        services.append(start_service("EWS-Mail", ["python", "scripts/send_outbox_mail.py"]))
 
     if not args.no_drive:
         from storage import drive_client

@@ -33,11 +33,11 @@ from config.settings import (
     ANALYSIS_MAX_PX, SAVE_DOWNLOADED_PHOTOS, SPARK_RECHECK_DRIVE_FILE,
 )
 from config.localtime import format_local
-from api.image_storage import (
+from storage.image_storage import (
     resolve_image_path, is_drive_path, drive_file_id_from_path, load_image_bytes,
     downloaded_photo_path, store_downloaded_photo,
 )
-from api.exif_utils import extract_image_metadata
+from storage.exif_utils import extract_image_metadata
 from ml.render import render_processed_image
 from storage import drive_client
 from ml.inference import predict as run_model, model_version as get_model_version, disease_heatmap
@@ -198,7 +198,7 @@ _METADATA_COLUMNS = ("camera_make", "camera_model", "image_width", "image_height
 
 def extract_metadata(event: dict, image_bytes: bytes) -> dict:
     """Metadata extraction stage: reads where/when/with-what the photo was
-    taken from the ORIGINAL file's EXIF (api.exif_utils.extract_image_metadata)
+    taken from the ORIGINAL file's EXIF (storage.exif_utils.extract_image_metadata)
     and stores it on the Image row. Must run before prepare_image(), which
     re-encodes the photo without EXIF.
 
@@ -404,7 +404,7 @@ def scale_test_run_for(event: dict):
 
 def save_downloaded_photo(user_id: str, image_id: str, original_bytes: bytes) -> None:
     """Keep the photo downloaded from Google Drive on local disk for good
-    (api.image_storage.store_downloaded_photo). A reprocess rewrites the same
+    (storage.image_storage.store_downloaded_photo). A reprocess rewrites the same
     file. Never fails the diagnosis."""
     if not SAVE_DOWNLOADED_PHOTOS:
         return

@@ -29,7 +29,7 @@ from storage.database import (
     ProcessingMode, get_processing_mode, set_processing_mode, init_db, now_utc, SCALE_TEST_SOURCE,
     SCALE_TEST_USERNAME,
 )
-from storage.reset import factory_reset
+from storage.reset import factory_reset, _python_command_lines
 from storage.pipeline_submit import submit_image_for_processing, is_upload_rejected
 from storage.requeue_stuck import count_owed
 from config.localtime import format_local, now_local
@@ -38,7 +38,7 @@ from config.localtime import format_local, now_local
 _TLT_COL = st.column_config.DatetimeColumn(format="DD/MM/YYYY HH:mm", timezone="Asia/Dili")
 TIME_COLUMNS = {c: _TLT_COL for c in ("captured_at", "uploaded_at", "processed_at", "predicted_at")}
 from api.auth import verify_password, normalize_email
-from api.image_storage import is_drive_path, drive_file_id_from_path, resolve_image_path, downloaded_photo_path
+from storage.image_storage import is_drive_path, drive_file_id_from_path, resolve_image_path, downloaded_photo_path
 from storage import drive_client
 from spark import analytics
 
@@ -379,22 +379,6 @@ def _processed_image(image_id: str, email):
 # ------------------------------------------------------------------
 # System Status checks
 # ------------------------------------------------------------------
-def _python_command_lines():
-    """Command lines of running Python processes (to see whether the Spark
-    job and the Drive watcher are running), or None if it can't be read."""
-    import subprocess
-    try:
-        if sys.platform == "win32":
-            cmd = ["powershell", "-NoProfile", "-Command",
-                   "Get-CimInstance Win32_Process -Filter \"Name LIKE 'python%'\" | "
-                   "ForEach-Object { $_.CommandLine }"]
-        else:
-            cmd = ["ps", "-eo", "args"]
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=20).stdout
-    except Exception:  # noqa: BLE001
-        return None
-
-
 @st.cache_data(ttl=15, show_spinner="Checking the system…")
 def _system_status() -> dict:
     from config import settings

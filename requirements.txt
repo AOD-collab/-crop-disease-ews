@@ -37,9 +37,10 @@ pytest
 httpx
 piexif
 
-# --- Scalability/performance testing (scripts/scalability_test.py,
-# scripts/perf_report.py) ---
+# --- Scalability/performance testing (scalability/, scripts/perf_report.py) ---
 psutil
 requests
+
+# --- Google Drive ---
 google-auth            # Google Drive API access (storage/drive_client.py)
 google-auth-oauthlib   # one-time OAuth consent (scripts/drive_authorize.py)

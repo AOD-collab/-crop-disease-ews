@@ -3,7 +3,7 @@ The scalability-test dataset: the original photos farmers uploaded to the
 Google Drive collection (images/<email>/), checked with the same rules the
 Drive watcher applies to a new upload, plus a verified local copy of each in
 DOWNLOADED_PHOTOS_DIR/<user_id>/<image_id>.jpg (the copy Spark itself keeps,
-api/image_storage.store_downloaded_photo).
+storage/image_storage.store_downloaded_photo).
 
 Google Drive stays the source: a local copy only counts when its size and
 SHA-256 match what Drive reports for the original. Missing or mismatched
@@ -24,7 +24,7 @@ from config.settings import MAX_IMAGE_SIZE, ALLOWED_IMAGE_CONTENT_TYPES
 from storage import drive_client
 from storage.database import SessionLocal, User
 from api.auth import normalize_email
-from api.image_storage import downloaded_photo_path, store_downloaded_photo
+from storage.image_storage import downloaded_photo_path, store_downloaded_photo
 from kafka.drive_watcher import _UUID_RE, _device_gps, _normalize_location
 
 
@@ -305,7 +305,7 @@ def local_copy_counts(candidates: list) -> dict:
 # --------------------------------------------------------------- local photos (default)
 # The default photo source: the farmer photos already on this laptop, i.e. the
 # copies Spark keeps of every Drive upload (DOWNLOADED_PHOTOS_DIR/<user_id>/
-# <image_id>.jpg, api/image_storage.store_downloaded_photo). Google Drive is
+# <image_id>.jpg, storage/image_storage.store_downloaded_photo). Google Drive is
 # never contacted: the photos are read from disk, and where each was taken
 # (municipality, the phone's GPS) comes from its row in the database.
 LOCAL_SOURCE = "local"
