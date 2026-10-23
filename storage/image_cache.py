@@ -41,7 +41,7 @@ from api.image_storage import (
     downloaded_photo_path, store_downloaded_photo, is_drive_path, drive_file_id_from_path, _SAFE_ID_RE,
 )
 from storage.database import (
-    SessionLocal, StorageAuditLog, ScaleTestRun, now_utc,
+    SessionLocal, StorageAuditLog, ScaleTestRun,
 )
 
 CATEGORIES = {

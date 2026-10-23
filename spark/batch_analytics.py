@@ -26,7 +26,7 @@ runs — same caveat as spark/streaming_job.py's Kafka connector package.
 import re
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import avg, col, count, current_timestamp, sum as _sum, to_date, when
+from pyspark.sql.functions import avg, count, current_timestamp, sum as _sum, to_date, when
 
 from config.settings import DATABASE_URL
 

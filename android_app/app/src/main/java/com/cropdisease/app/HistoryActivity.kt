@@ -31,7 +31,7 @@ class HistoryActivity : AppCompatActivity() {
         private const val AUTO_REFRESH_MS = 30_000L
     }
 
-    // label shown on the chip -> outcome_filter value sent to the API (null = no filter, "All")
+    // label shown on the chip -> the item "outcome" it keeps (null = no filter, "All")
     private val filters by lazy {
         listOf(
             getString(R.string.filter_all) to null,

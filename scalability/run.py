@@ -49,7 +49,6 @@ import argparse
 import json
 import os
 import queue as stdlib_queue
-import secrets
 import shutil
 import sys
 import time
@@ -66,10 +65,9 @@ from config import settings  # noqa: E402
 from config.settings import IMAGE_STORAGE_PATH  # noqa: E402
 from storage import drive_client  # noqa: E402
 from storage.database import (  # noqa: E402
-    SessionLocal, init_db, Image, Prediction, ProcessingEvent, RejectedEvent, User, Role, UserStatus,
-    ScaleTestRun, ScaleTestItem, SCALE_TEST_SOURCE, SCALE_TEST_USERNAME, now_utc,
+    SessionLocal, init_db, Image, Prediction, ProcessingEvent, RejectedEvent,
+    ScaleTestRun, ScaleTestItem, SCALE_TEST_SOURCE, now_utc,
 )
-from api.auth import hash_password  # noqa: E402
 from scalability import dataset, report, worker  # noqa: E402
 from scalability.monitor import ResourceMonitor, gpu_name, spark_job_running  # noqa: E402
 
@@ -894,21 +892,6 @@ def delete(run_id: str, drive_results: bool = False) -> dict:
         shutil.rmtree(out)
     log(f"{run_id}: deleted")
     return counts
-
-
-# --------------------------------------------------------------- legacy system account
-def _test_user_id(session) -> str:
-    """The inactive system account that owned test images before the
-    isolation; kept so old runs' rows stay valid until cleaned up."""
-    user = session.query(User).filter(User.username == SCALE_TEST_USERNAME).first()
-    if user is None:
-        user = User(username=SCALE_TEST_USERNAME, email=SCALE_TEST_EMAIL,
-                    full_name="Scalability test (system account)",
-                    password_hash=hash_password(secrets.token_urlsafe(32)),
-                    role=Role.USER, status=UserStatus.INACTIVE, email_verified=False)
-        session.add(user)
-        session.commit()
-    return user.user_id
 
 
 # --------------------------------------------------------------- CLI

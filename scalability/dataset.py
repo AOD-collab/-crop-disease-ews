@@ -25,7 +25,7 @@ from storage import drive_client
 from storage.database import SessionLocal, User
 from api.auth import normalize_email
 from api.image_storage import downloaded_photo_path, store_downloaded_photo
-from kafka.drive_watcher import _UUID_RE, _device_gps, _normalize_location, _parse_time
+from kafka.drive_watcher import _UUID_RE, _device_gps, _normalize_location
 
 
 @dataclass

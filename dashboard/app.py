@@ -49,29 +49,14 @@ st.set_page_config(page_title="Crop Disease EWS — Admin Dashboard", layout="wi
 # Shared color language (mirrors android_app's colors.xml so the admin
 # dashboard and the mobile app read as one system, not two). Status colors
 # are reserved for verdicts — never reused for an arbitrary chart series.
-#
-# COLOR_BRAND is deliberately the darker amber step (not the bright
-# #F0B429 the Android app uses for big filled CTAs): Streamlit's theme
-# reuses primaryColor as TEXT in places (links, selected-radio labels), and
-# raw bright gold fails contrast as text on a light background — same
-# reasoning as android_app's colors.xml `accent_text`. The bright gold
-# still shows up here as a FILL (KPI card accents, chart bars) where text
-# contrast isn't a concern.
-# ------------------------------------------------------------------
-# Maize palette (green + yellow). Kept in sync with .streamlit/config.toml
+# The maize brand colours (green + yellow) live in .streamlit/config.toml
 # and the CSS in _inject_style() below.
-COLOR_LEAF = "#1F4D2B"        # dark maize leaf — sidebar, titles
-COLOR_BRAND = "#2E7D32"       # stalk green — buttons, chart bars (safe as text too)
-COLOR_HUSK = "#E4EEDA"        # pale husk — soft backgrounds
-COLOR_BRAND_FILL = "#F5C518"  # corn-kernel yellow — fills only, never text on white
+# ------------------------------------------------------------------
 COLOR_GOOD = "#0CA30C"        # healthy / LOW risk
 COLOR_WARNING = "#FAB219"     # MEDIUM risk
-COLOR_SERIOUS = "#EC835A"     # FAILED pipeline status (not a verdict about the crop)
 COLOR_CRITICAL = "#D03B3B"    # HIGH risk / diseased
-COLOR_MUTED = "#898781"       # pending / unknown
 
 RISK_COLOR_MAP = {"LOW": COLOR_GOOD, "MEDIUM": COLOR_WARNING, "HIGH": COLOR_CRITICAL}
-RISK_BADGE_COLOR = {"LOW": "green", "MEDIUM": "orange", "HIGH": "red"}
 # Disease / status colours are shared with the other dashboard pages.
 from dashboard.theme import STATUS_BADGE_COLOR, CATEGORICAL_HUES, DISEASE_COLOR_MAP  # noqa: E402
 

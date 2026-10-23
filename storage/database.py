@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     create_engine, Column, String, Float, Integer, DateTime, ForeignKey,
-    Enum, Text, Boolean, Index, UniqueConstraint, event, inspect, text as sql_text,
+    Enum, Text, Boolean, Index, event, inspect, text as sql_text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
 

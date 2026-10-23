@@ -1,7 +1,7 @@
 # Crop Disease Early Warning — Android App (USER client)
 
 A native Android (Kotlin) app for the **USER** role (DIT manual sections
-5-6): register/log in, pick a location, take/choose one or more real leaf
+5-6): sign in with Google, pick a location, take/choose one or more real leaf
 photos, upload them, and see the disease/risk result for each once Kafka +
 Spark + the CNN finish processing it — plus a full browsable history of
 every photo ever sent, with a real thumbnail of the photo itself next to

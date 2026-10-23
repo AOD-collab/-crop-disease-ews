@@ -22,18 +22,18 @@ Run locally:
 import math
 import re
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Optional
 
 from fastapi import FastAPI, UploadFile, Form, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 from sqlalchemy import text, or_, func, case, select
 from sqlalchemy.orm import Session, aliased
 
 from config.settings import (
-    KAFKA_TOPIC, VERIFICATION_CODE_TTL_MINUTES, VERIFICATION_CODE_MAX_ATTEMPTS,
+    KAFKA_TOPIC, VERIFICATION_CODE_TTL_MINUTES,
 )
 from storage.database import (
     init_db, User, Image, Prediction,

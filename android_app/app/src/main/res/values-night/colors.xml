@@ -6,7 +6,6 @@
          reads perfectly well as light text on this dark surface, so no
          muted stand-in is needed. -->
     <color name="brand_primary">#F0B429</color>
-    <color name="brand_primary_dark">#C98500</color>
     <color name="brand_on_primary">#1B1B1B</color>
     <color name="brand_primary_container">#5C4300</color>
     <color name="brand_on_primary_container">#FCE8B0</color>
@@ -19,15 +18,12 @@
     <color name="surface">#242019</color>
     <color name="page_background">#1A1710</color>
     <color name="divider">#3A362C</color>
-    <color name="border">#1AFFFFFF</color>
 
     <!-- Status palette is fixed — same hex in both modes; already validated
          against the dark surface (see references/palette.md). -->
     <color name="status_good">#0CA30C</color>
-    <color name="status_warning">#FAB219</color>
     <color name="status_serious">#EC835A</color>
     <color name="status_critical">#D03B3B</color>
 
     <color name="error_text">#E66767</color>
-    <color name="link_text">#F0B429</color>
 </resources>

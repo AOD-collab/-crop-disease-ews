@@ -117,13 +117,8 @@ class HistoryStore(context: Context, email: String) {
         write(map)
     }
 
-    fun upsert(item: JSONObject) = merge(listOf(item))
-
     /** A just-uploaded photo, before Spark has a result. Big uploads should
      * merge() many of these at once: every save rewrites the whole file. */
-    fun addPending(imageId: String, driveFileId: String?, location: String?) =
-        upsert(pendingItem(imageId, driveFileId, location))
-
     fun pendingItem(imageId: String, driveFileId: String?, location: String?): JSONObject =
         JSONObject()
             .put("image_id", imageId)
