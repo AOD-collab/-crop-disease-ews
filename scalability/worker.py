@@ -263,6 +263,7 @@ def photo_location(path, location=None, device_gps=None) -> dict:
 
 
 PREVIEW_PX = 320
+PHOTO_PATHS_FILE = "photo_paths.json"      # {"img_size", "photos": {item_id: original}}, written by run.start
 
 
 def preview_paths(out_dir: Path, item_id: str) -> tuple:
@@ -270,15 +271,30 @@ def preview_paths(out_dir: Path, item_id: str) -> tuple:
     return folder / f"{item_id}_before.jpg", folder / f"{item_id}_after.jpg"
 
 
-def save_previews(original_path, out_dir: Path, item_id: str) -> None:
-    """The gallery's two small pictures for one photo, written AFTER the
-    timer stops: `before` = the staged original (EXIF-upright, at most
+def model_input_square(original: bytes, img_size: int):
+    """spark/preprocessing.model_input_preview without torch: the same
+    Resize + CenterCrop (torchvision on a PIL image is PIL bilinear), pixel
+    for pixel the same on 200 real photos (2026-10-24). The dashboard can't
+    import torch (WinError 1114 after pyarrow, see dashboard/model_ops.py),
+    so it gets the model's img_size from the run instead of the model."""
+    from PIL import Image as PILImage
+    from spark.preprocessing import _prepared_rgb
+    img = _prepared_rgb(original)
+    w, h = img.size
+    nw, nh = (img_size, int(img_size * h / w)) if w <= h else (int(img_size * w / h), img_size)
+    img = img.resize((nw, nh), PILImage.BILINEAR)
+    left, top = int(round((nw - img_size) / 2.0)), int(round((nh - img_size) / 2.0))
+    return img.crop((left, top, left + img_size, top + img_size))
+
+
+def save_previews(original_path, out_dir: Path, item_id: str, img_size: int) -> None:
+    """The gallery's two small pictures for one photo, made when its page
+    is first viewed: `before` = the original (EXIF-upright, at most
     PREVIEW_PX), `after` = the centre square the CNN gets
-    (spark/preprocessing.model_input_preview) — the picture the CNN
-    received. Display only; nothing here feeds the model."""
+    (model_input_square) — the picture the CNN received. Display only;
+    nothing here feeds the model."""
     from io import BytesIO
     from PIL import Image as PILImage, ImageOps
-    from spark.preprocessing import model_input_preview
     before_path, after_path = preview_paths(out_dir, item_id)
     before_path.parent.mkdir(parents=True, exist_ok=True)
     original = Path(original_path).read_bytes()
@@ -287,7 +303,23 @@ def save_previews(original_path, out_dir: Path, item_id: str) -> None:
     img = ImageOps.exif_transpose(img).convert("RGB")
     img.thumbnail((PREVIEW_PX, PREVIEW_PX))
     img.save(before_path, format="JPEG", quality=85)
-    model_input_preview(original).save(after_path, format="JPEG", quality=90)
+    model_input_square(original, img_size).save(after_path, format="JPEG", quality=90)
+
+
+def ensure_previews(out_dir: Path, item_id: str, original_path, img_size: int) -> tuple:
+    """The gallery's two pictures for one photo, made the first time its
+    page is viewed and kept in out_dir/previews. Returns (before, after),
+    or (None, None) when the original is gone or can't be read."""
+    before, after = preview_paths(out_dir, item_id)
+    if before.is_file() and after.is_file():
+        return before, after
+    if not original_path:
+        return None, None
+    try:
+        save_previews(original_path, out_dir, item_id, img_size)
+    except Exception:  # noqa: BLE001 - e.g. the original was moved or deleted
+        return None, None
+    return before, after
 
 
 def save_comparison(original_path, original_bytes: bytes, out_dir: Path) -> dict:

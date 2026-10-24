@@ -11,7 +11,8 @@ process, like the Model training page), then see for the latest test:
     municipality. These are the TEST's own CNN results (scale_test_items),
     never a farmer's diagnosis;
   * a gallery of every photo, like Pending Review: before and after
-    preprocessing, with its result (previews made after the timer stopped).
+    preprocessing, with its result (each page's previews are made when it is
+    viewed).
 The test runs in its own worker, isolated from the live pipeline
 (scalability/worker.py); every other measurement is in the CSV files under
 storage/scalability_reports/<run_id>/.
@@ -21,6 +22,7 @@ import json
 import os
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 import plotly.express as px
@@ -32,7 +34,7 @@ from kafka.config import broker_reachable
 from storage.database import SessionLocal, ScaleTestRun, ScaleTestItem
 from scalability import run as runner, reset as test_reset
 from scalability.report import REPORTS_DIR, series_averages, items_frame
-from scalability.worker import preview_paths
+from scalability.worker import PHOTO_PATHS_FILE, ensure_previews
 from spark.analytics import high_risk_by_location
 from dashboard.theme import disease_colors, STATUS_BADGE_COLOR
 
@@ -105,9 +107,7 @@ def _active_panel():
     if job.get("kind") == "prepare":
         st.info("Preparing local copies…")
         return
-    if latest_status not in runner.ACTIVE_STATUSES and phase.startswith("Saving preview images"):
-        st.info(f"All photos are processed — the results are below. {phase}…")
-    elif phase.startswith(("Paused", "Waiting")):
+    if phase.startswith(("Paused", "Waiting")):
         st.info("The scalability test is paused while farmer photos are being processed: "
                 "real-time processing comes first.")
     else:
@@ -280,9 +280,13 @@ def _gallery(first_run, df):
     after preprocessing, with its CNN result. Paged, with filters."""
     st.subheader("All test photos")
     folder = runner.run_dir(first_run.run_id)
-    if df.empty or not (folder / "previews").is_dir():
-        st.caption("Preview images are made when a test finishes; this test has none.")
+    paths_file = folder / PHOTO_PATHS_FILE
+    # newer tests: the original of each photo; older ones: previews saved after the run
+    if df.empty or not (paths_file.is_file() or (folder / "previews").is_dir()):
+        st.caption("This test has no preview images.")
         return False
+    saved = json.loads(paths_file.read_text(encoding="utf-8")) if paths_file.is_file() else {}
+    originals, img_size = saved.get("photos", {}), saved.get("img_size")
     f1, f2, f3 = st.columns([2, 2, 1])
     diseases = sorted(df["predicted_class"].dropna().unique())
     places = sorted(df["location"].unique())
@@ -304,15 +308,19 @@ def _gallery(first_run, df):
     page = int(p1.number_input("Page", 1, pages, 1, key="scale_g_page")) if pages > 1 else 1
     p2.caption(f"{len(shown):,} photo(s), page {page} of {pages}.")
     rows = shown.iloc[(page - 1) * GALLERY_PAGE_SIZE: page * GALLERY_PAGE_SIZE].to_dict("records")
+    with st.spinner("Making preview images…"), ThreadPoolExecutor(max_workers=8) as pool:
+        pictures = dict(zip((r["image_id"] for r in rows), pool.map(
+            lambda r: ensure_previews(folder, r["image_id"], originals.get(r["image_id"]), img_size), rows)))
     for start in range(0, len(rows), GALLERY_COLUMNS):
         cols = st.columns(GALLERY_COLUMNS)
         for col, row in zip(cols, rows[start:start + GALLERY_COLUMNS]):
             with col, st.container(border=True):
-                before, after = preview_paths(folder, row["image_id"])
-                pics = st.columns(2)
-                if before.is_file():
+                before, after = pictures[row["image_id"]]
+                if before is None:
+                    st.caption("Original photo no longer available")
+                else:
+                    pics = st.columns(2)
                     pics[0].image(str(before), caption="Before", width="stretch")
-                if after.is_file():
                     pics[1].image(str(after), caption="After", width="stretch")
                 st.badge(row["status"], color=STATUS_BADGE_COLOR.get(row["status"], "gray"))
                 if row["predicted_class"]:
@@ -349,8 +357,7 @@ def _results_section(busy: bool):
                     help="From pressing Start test until the system finished the last photo: preparing the "
                          "photos, loading the CNN, starting Spark, Kafka, preprocessing, CNN and saving the "
                          "results. Time spent waiting while farmer photos were processed is not counted; "
-                         "several iterations are added together; making the gallery previews afterwards is "
-                         "not included.")
+                         "several iterations are added together.")
         m[1].metric("Average Processing Time",
                     f"{avg['average_processing_s']:.2f} seconds/image" if avg["average_processing_s"] is not None
                     else "No valid measurement",

@@ -53,7 +53,7 @@ import shutil
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -372,7 +372,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
     # Total execution time (end_to_end_seconds) starts when Start test was
     # pressed: the dashboard starts this process at that moment, so a single
     # test or iteration 1 counts from the process start; a later iteration
-    # from here (the previous iteration's gallery previews are display only).
+    # from here.
     first = not series or series.get("ITERATION", 1) == 1
     started_wall = psutil.Process().create_time() if first else time.time()
     init_db()
@@ -399,7 +399,6 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
     if not _locked:
         _acquire_lock("run", run_id)
     monitor = gate = queue = stream = None
-    finalized = False
     use_spark = engine() == "spark"
     try:
         worker.lower_priority()
@@ -491,6 +490,8 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
         _set_phase(run_id, "Loading the CNN")
         _emit([f"[cnn]      loading and warming up the model, {len(ids)} photo(s) staged"])
         worker.warm_up()                        # not in the per-photo times (it is in the total)
+        if first:                       # the gallery makes its previews from these (worker.ensure_previews)
+            _save_photo_paths(run_id, {item_id: c.local_path for item_id, c in staged})
 
         def handle(item_id, received_at):
             gate.wait()                         # farmer photos first
@@ -645,16 +646,8 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
                  comparison=comparison, published=len(events) - len(failures), publish_failed=len(failures),
                  status="COMPLETED" if len(done) >= len(ids) else "INCOMPLETE",
                  spark_job_running=spark_running or spark_job_running())
-        finalized = True
-
-        # 7. the gallery previews (minutes for thousands of photos): display
-        # only, so the results above don't wait for them
-        _save_gallery_previews(run_id, ids, paths, series)
         return run_id
     except Exception as e:
-        if finalized:                   # the results are saved; only the previews failed
-            log(f"{run_id}: could not finish the preview images: {_error_text(e)}")
-            return run_id
         log(f"{run_id}: FAILED: {_error_text(e)}")
         with SessionLocal() as s:
             run = s.get(ScaleTestRun, run_id)
@@ -725,35 +718,20 @@ def _save_comparison(run_id: str, ids: list, paths: dict) -> dict:
         return {}
 
 
-def _save_gallery_previews(run_id: str, ids: list, paths: dict, series: dict = None) -> None:
-    """One small before/after preview per photo for the gallery
-    (scalability/worker.save_previews), made after the run's results are
-    saved, with its progress in the run's phase and the console. Later
-    iterations of a series repeat iteration 1's photos, so only iteration 1
-    saves previews."""
-    if series and series.get("ITERATION", 1) != 1:
-        return
+def _save_photo_paths(run_id: str, originals: dict) -> None:
+    """{item_id: original photo path} in the run's folder. The gallery
+    makes each photo's before/after preview from it when that page is
+    viewed (worker.ensure_previews), instead of 2 previews per photo after
+    every run (about 7 minutes for 9,942 photos). The originals, not the
+    hard links in images/, so cleanup() does not break the gallery. With
+    the model's img_size: the dashboard can't load the model (torch)."""
+    from ml.inference import input_spec
     out = run_dir(run_id)
-    failed = []
-
-    def one(item_id):
-        try:
-            worker.save_previews(paths[item_id], out, item_id)
-        except Exception as e:  # noqa: BLE001 - e.g. a photo the CNN could not read either
-            failed.append(f"{item_id}: {e}")
-
-    last = 0.0
-    with ThreadPoolExecutor(max_workers=max(1, settings.SCALABILITY_WORKERS)) as pool:
-        futures = [pool.submit(one, item_id) for item_id in ids]
-        for n, _ in enumerate(as_completed(futures), 1):
-            if time.monotonic() - last >= 2 or n == len(ids):
-                last = time.monotonic()
-                phase = f"Saving preview images ({n:,} of {len(ids):,})"
-                _set_phase(run_id, phase)
-                log(f"{run_id}: {phase}")
-    _set_phase(run_id, "Finished")
-    if failed:
-        log(f"{run_id}: {len(failed)} preview(s) could not be made, e.g. {failed[0]}")
+    out.mkdir(parents=True, exist_ok=True)
+    (out / worker.PHOTO_PATHS_FILE).write_text(json.dumps({
+        "img_size": input_spec()["img_size"],
+        "photos": {k: str(v) for k, v in originals.items()},
+    }), encoding="utf-8")
 
 
 def start_series(size: int, iterations: int = 1, **kwargs) -> list:
