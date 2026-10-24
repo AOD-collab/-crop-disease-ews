@@ -3372,7 +3372,7 @@ The order matters. The duplicate check comes **before** any expensive work. EXIF
         save_for_review(event["image_id"], image_bytes)
 ```
 - `run_model` is `ml.inference.predict` (imported as `run_model`). It does the following:
-  - loads the ResNet-18 checkpoint (cached, and reloaded automatically if the file changes),
+  - loads the SEResNet-18 checkpoint (`architecture: se_resnet18`, cached, and reloaded automatically if the file changes),
   - checks that the tensor it was given has the shape `(3, 224, 224)` (wrongly prepared input is refused, never classified) and runs the forward pass on the GPU if there is one, otherwise the CPU. It does **no** image preprocessing itself; `cnn_input_s` is now only that check,
   - applies softmax, takes the top class, computes `lesion_score = 1 − P(healthy)`, and sets the class to "uncertain" if confidence < 0.5.
 - With `MODEL_BATCH_SIZE > 1`, the 8 photo threads share one batched GPU forward pass (`_GpuBatcher`). The default is 1, one photo per pass.
@@ -3915,7 +3915,7 @@ sequenceDiagram
 - A first-time photo is downloaded. A Reprocess, or a replay after a reset, uses the local copy, so it needs no network.
 
 ### Scenario 6 — Preprocessing and CNN inference
-**Code path:** `check_duplicate_by_hash` → `extract_metadata` (EXIF from the original bytes, written to `images`) → `prepare_image` (draft decode, orientation fix, ≤1280 px) → `model_input` (Spark's CNN preprocessing: shorter side to 224 px, centre 224 × 224 crop, normalise) → `ml.inference.predict` (ResNet-18 on that tensor, softmax; no preprocessing of its own) → `save_for_review` → `compute_risk` (HIGH ≥ 0.6, MEDIUM ≥ 0.3, uncertain capped) → `disease_heatmap` + `heatmap_on_photo` + `render_processed_image` (Drive photos only).
+**Code path:** `check_duplicate_by_hash` → `extract_metadata` (EXIF from the original bytes, written to `images`) → `prepare_image` (draft decode, orientation fix, ≤1280 px) → `model_input` (Spark's CNN preprocessing: shorter side to 224 px, centre 224 × 224 crop, normalise) → `ml.inference.predict` (SEResNet-18 on that tensor, softmax; no preprocessing of its own) → `save_for_review` → `compute_risk` (HIGH ≥ 0.6, MEDIUM ≥ 0.3, uncertain capped) → `disease_heatmap` + `heatmap_on_photo` + `render_processed_image` (Drive photos only).
 
 ### Scenario 7 — The prediction is stored and delivered to the farmer
 **Code path:**
