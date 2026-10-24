@@ -53,7 +53,7 @@ import shutil
 import sys
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 
@@ -399,6 +399,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
     if not _locked:
         _acquire_lock("run", run_id)
     monitor = gate = queue = stream = None
+    finalized = False
     use_spark = engine() == "spark"
     try:
         worker.lower_priority()
@@ -635,22 +636,30 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
             _record(run_id, pending)
             done.update(pending)
 
-        # 5. pictures, after the timer: the before/after pair + the gallery --
-        comparison = _save_pictures(run_id, ids, paths, series)
+        # 5. the before/after pair, after the timer ---------------------------
+        comparison = _save_comparison(run_id, ids, paths)
 
-        # 6. summary -----------------------------------------------------------
+        # 6. summary: the results are on the dashboard from here ---------------
         finalize(run_id, samples=samples, execution_seconds=t1 - t0, end_to_end_seconds=end_to_end,
                  live_overlap=gate.overlapped(t0, t1), paused_seconds=gate.paused_seconds(t0, t1),
                  comparison=comparison, published=len(events) - len(failures), publish_failed=len(failures),
                  status="COMPLETED" if len(done) >= len(ids) else "INCOMPLETE",
                  spark_job_running=spark_running or spark_job_running())
+        finalized = True
+
+        # 7. the gallery previews (minutes for thousands of photos): display
+        # only, so the results above don't wait for them
+        _save_gallery_previews(run_id, ids, paths, series)
         return run_id
     except Exception as e:
-        log(f"{run_id}: FAILED: {e}")
+        if finalized:                   # the results are saved; only the previews failed
+            log(f"{run_id}: could not finish the preview images: {_error_text(e)}")
+            return run_id
+        log(f"{run_id}: FAILED: {_error_text(e)}")
         with SessionLocal() as s:
             run = s.get(ScaleTestRun, run_id)
             if run is not None:
-                run.status, run.error_message, run.finished_at = "FAILED", str(e)[:2000], now_utc()
+                run.status, run.error_message, run.finished_at = "FAILED", _error_text(e)[:2000], now_utc()
                 run.phase = "Failed"
                 s.commit()
         raise
@@ -691,27 +700,40 @@ def _record(run_id: str, outcomes: dict) -> None:
         s.commit()
 
 
-def _save_pictures(run_id: str, ids: list, paths: dict, series: dict = None) -> dict:
-    """Everything a run shows as pictures, made AFTER its timer stopped so
-    none of it is in the measurement: the before/after pair (first photo
-    that completed) and, for the gallery, one small before/after preview per
-    photo (scalability/worker.save_previews). Later iterations of a series
-    repeat iteration 1's photos, so only iteration 1 saves previews.
-    Returns the comparison pair, or {}."""
-    out = run_dir(run_id)
+def _error_text(e: Exception) -> str:
+    """str(e), or the exception's type name when even that fails: a Py4J
+    error asks the (possibly stopped) Spark JVM for its text."""
+    try:
+        return str(e)
+    except Exception:  # noqa: BLE001
+        return type(e).__name__
+
+
+def _save_comparison(run_id: str, ids: list, paths: dict) -> dict:
+    """The run's before/after pair (first photo that completed), made AFTER
+    its timer stopped. Returns the pair, or {}."""
     with SessionLocal() as s:
         completed = {i for (i,) in s.query(ScaleTestItem.image_id).filter(
             ScaleTestItem.run_id == run_id, ScaleTestItem.status == "COMPLETED")}
-    comparison = {}
     first_ok = next((i for i in ids if i in completed), None)
-    if first_ok:
-        try:
-            comparison = worker.save_comparison(paths[first_ok], paths[first_ok].read_bytes(), out)
-        except Exception as e:  # noqa: BLE001
-            log(f"{run_id}: could not save the before/after pair: {e}")
+    if not first_ok:
+        return {}
+    try:
+        return worker.save_comparison(paths[first_ok], paths[first_ok].read_bytes(), run_dir(run_id))
+    except Exception as e:  # noqa: BLE001
+        log(f"{run_id}: could not save the before/after pair: {e}")
+        return {}
+
+
+def _save_gallery_previews(run_id: str, ids: list, paths: dict, series: dict = None) -> None:
+    """One small before/after preview per photo for the gallery
+    (scalability/worker.save_previews), made after the run's results are
+    saved, with its progress in the run's phase and the console. Later
+    iterations of a series repeat iteration 1's photos, so only iteration 1
+    saves previews."""
     if series and series.get("ITERATION", 1) != 1:
-        return comparison
-    _set_phase(run_id, "Saving preview images")
+        return
+    out = run_dir(run_id)
     failed = []
 
     def one(item_id):
@@ -720,11 +742,18 @@ def _save_pictures(run_id: str, ids: list, paths: dict, series: dict = None) -> 
         except Exception as e:  # noqa: BLE001 - e.g. a photo the CNN could not read either
             failed.append(f"{item_id}: {e}")
 
+    last = 0.0
     with ThreadPoolExecutor(max_workers=max(1, settings.SCALABILITY_WORKERS)) as pool:
-        list(pool.map(one, ids))
+        futures = [pool.submit(one, item_id) for item_id in ids]
+        for n, _ in enumerate(as_completed(futures), 1):
+            if time.monotonic() - last >= 2 or n == len(ids):
+                last = time.monotonic()
+                phase = f"Saving preview images ({n:,} of {len(ids):,})"
+                _set_phase(run_id, phase)
+                log(f"{run_id}: {phase}")
+    _set_phase(run_id, "Finished")
     if failed:
         log(f"{run_id}: {len(failed)} preview(s) could not be made, e.g. {failed[0]}")
-    return comparison
 
 
 def start_series(size: int, iterations: int = 1, **kwargs) -> list:
@@ -1037,7 +1066,7 @@ def _main(argv=None) -> int:
 def _wait_for_enter(args) -> None:
     if getattr(args, "keep_open", False):
         try:
-            input("\nTest finished — results are on the dashboard's Scalability Test page. "
+            input("\nThe test has ended — see the dashboard's Scalability Test page. "
                   "Press Enter to close this window.")
         except EOFError:
             pass

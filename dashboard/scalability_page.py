@@ -88,22 +88,26 @@ def _latest_test() -> list:
 @st.fragment(run_every=3)
 def _active_panel():
     job = runner.active_job()
-    was_active = st.session_state.get("scale_was_active", False)
-    st.session_state["scale_was_active"] = bool(job)
+    with SessionLocal() as s:
+        latest = s.query(ScaleTestRun).order_by(ScaleTestRun.started_at.desc()).first()
+        latest_id, latest_status, phase = ((latest.run_id, latest.status, latest.phase or "")
+                                           if latest else (None, None, ""))
+    # The whole page refreshes once whenever a test starts, an iteration's
+    # results are saved, or the job ends — not only at the very end, so the
+    # Start button and the Results never stay out of date while a test runs.
+    state = (bool(job), latest_id, latest_status)
+    previous = st.session_state.get("scale_panel_state")
+    st.session_state["scale_panel_state"] = state
+    if previous is not None and previous != state:
+        st.rerun()
     if not job:
-        if was_active:
-            st.rerun()          # the job just finished: refresh the whole page once
         return
     if job.get("kind") == "prepare":
         st.info("Preparing local copies…")
         return
-    phase = ""
-    with SessionLocal() as s:
-        run = (s.query(ScaleTestRun).filter(ScaleTestRun.status.in_(runner.ACTIVE_STATUSES))
-               .order_by(ScaleTestRun.started_at.desc()).first())
-        if run is not None:
-            phase = run.phase or ""
-    if phase.startswith(("Paused", "Waiting")):
+    if latest_status not in runner.ACTIVE_STATUSES and phase.startswith("Saving preview images"):
+        st.info(f"All photos are processed — the results are below. {phase}…")
+    elif phase.startswith(("Paused", "Waiting")):
         st.info("The scalability test is paused while farmer photos are being processed: "
                 "real-time processing comes first.")
     else:
@@ -403,8 +407,6 @@ def _reset_message(result: dict) -> None:
 
 
 def render():
-    if msg := st.session_state.pop("scale_msg", None):
-        st.info(msg)
     if result := st.session_state.pop("scale_reset_result", None):
         _reset_message(result)
     _active_panel()
