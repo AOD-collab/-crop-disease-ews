@@ -1,6 +1,7 @@
 """
-Data cleaning, validation, image retrieval, CNN inference, and rule-based
-risk assessment for one Kafka event. Used by spark/streaming_job.py inside
+Data cleaning, validation, image retrieval, image preprocessing for the CNN
+(model_input: resize + centre crop + normalise), CNN inference, and
+rule-based risk assessment for one Kafka event. Used by spark/streaming_job.py inside
 its foreachBatch sink (Spark's Python UDFs can't easily call out to
 torch/PIL per-row inside the JVM-side DataFrame execution, so the actual
 model call happens in the driver's foreachBatch — a standard, documented
@@ -41,7 +42,7 @@ from storage.image_storage import (
 from storage.exif_utils import extract_image_metadata
 from ml.render import render_processed_image
 from storage import drive_client
-from ml.inference import predict as run_model, model_version as get_model_version, disease_heatmap
+from ml.inference import predict as run_model, model_version as get_model_version, disease_heatmap, input_spec
 from storage.database import (
     SessionLocal, Image, Prediction, ProcessingStatus, ProcessingEvent,
     RejectedEvent, User, ScaleTestItem, ScaleTestRun, SCALE_TEST_SOURCE,
@@ -317,16 +318,86 @@ def extract_metadata(event: dict, image_bytes: bytes) -> dict:
     return meta
 
 
+def model_input(original_bytes: bytes, prepared_bytes: bytes = None):
+    """The CNN's input for one photo, as a float32 (3, S, S) tensor. All of
+    the image preprocessing happens here in Spark; the CNN only classifies:
+        prepare_image (upright, at most ANALYSIS_MAX_PX) -> decode ->
+        resize the SHORTER side to S (aspect kept) -> centre S x S crop ->
+        to [0, 1] -> (x - mean) / std.
+    S, mean and std are the deployed checkpoint's (ml.inference.input_spec),
+    so a retrained model is followed automatically.
+
+    Why a centre crop and not the training evaluation's squeeze to S x S:
+    on the model's held-out test split (646 photos, 2026-10-24) the crop
+    scored 95.67% and the squeeze 94.74%; on its 78 real field photos 78.2%
+    against 70.5% (padding 64.1%, three crops averaged 75.6%). Squeezing a
+    wide field photo distorts the leaf. The crop leaves out the edges of a
+    non-square photo, so the leaf should be in the middle of the picture.
+
+    `prepared_bytes`: prepare_image(original_bytes) when the caller already
+    has it (process_event)."""
+    from torchvision import transforms
+    spec = input_spec()
+    size = spec["img_size"]
+    img = _prepared_rgb(original_bytes, prepared_bytes)
+    to_model = transforms.Compose([
+        transforms.Resize(size),
+        transforms.CenterCrop(size),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=spec["mean"], std=spec["std"]),
+    ])
+    return to_model(img)
+
+
+def model_input_preview(original_bytes: bytes, prepared_bytes: bytes = None):
+    """The picture the CNN receives, viewable: model_input() before the
+    normalisation (the centre S x S square), as a PIL image. Display only
+    (scalability test previews)."""
+    from torchvision import transforms
+    size = input_spec()["img_size"]
+    img = _prepared_rgb(original_bytes, prepared_bytes)
+    return transforms.CenterCrop(size)(transforms.Resize(size)(img))
+
+
+def heatmap_on_photo(cam, prepared_bytes: bytes):
+    """Places the CNN's Grad-CAM (ml.inference.disease_heatmap: the map of
+    the S x S square model_input() cut out) on the photo itself: an (H, W)
+    float array in [0, 1] at the photo's size, the map stretched over the
+    centre square the CNN saw and 0 on the cropped-off edges. None stays
+    None (the model saw no disease)."""
+    if cam is None:
+        return None
+    import numpy as np
+    import torch
+    import torch.nn.functional as F
+    w, h = _prepared_rgb(None, prepared_bytes).size
+    side = min(w, h)
+    cam = torch.as_tensor(cam, dtype=torch.float32)[None, None]
+    cam = F.interpolate(cam, size=(side, side), mode="bilinear", align_corners=False)[0, 0]
+    cam = (cam / cam.max()).numpy()
+    heat = np.zeros((h, w), dtype=np.float32)
+    top, left = (h - side) // 2, (w - side) // 2
+    heat[top:top + side, left:left + side] = cam
+    return heat
+
+
+def _prepared_rgb(original_bytes, prepared_bytes=None):
+    """prepare_image()'s copy of the photo, decoded as upright RGB."""
+    from io import BytesIO
+    from PIL import Image as PILImage, ImageOps
+    data = prepared_bytes if prepared_bytes is not None else prepare_image(original_bytes)
+    return ImageOps.exif_transpose(PILImage.open(BytesIO(data)).convert("RGB"))
+
+
 def prepare_image(image_bytes: bytes) -> bytes:
     """The photo every later step works on: upright (EXIF orientation
     applied), at most ANALYSIS_MAX_PX on its longer side, re-encoded without
-    EXIF. Every step already works on a small copy (CNN 224 px, the
-    processed image 600 px), but
-    each used to decode the full 8-12 MP phone photo itself — about seven
-    full decodes plus a full-size JPEG re-encode per photo. JPEG draft mode
-    decodes straight at a reduced scale, so even this one decode is cheap.
-    Run extract_metadata() on the ORIGINAL bytes first. An unreadable image
-    is passed through unchanged for the later steps to reject."""
+    EXIF — the CNN input (model_input), the farmer's marked-up image and the
+    labelling copy all start from it, instead of each decoding the full
+    8-12 MP phone photo. JPEG draft mode decodes straight at a reduced
+    scale, so even this one decode is cheap. Run extract_metadata() on the
+    ORIGINAL bytes first. An unreadable image is passed through unchanged
+    for the later steps to reject."""
     from io import BytesIO
     from PIL import Image as PILImage, ImageOps
     try:
@@ -368,8 +439,9 @@ def compute_risk(features: dict, is_uncertain: bool = False) -> tuple:
 
 def process_event(event: dict) -> dict:
     """Full per-image processing: validate -> read image -> extract EXIF
-    metadata (GPS, capture time, camera) -> CNN inference -> risk
-    assessment. Returns a dict ready to persist as a Prediction row.
+    metadata (GPS, capture time, camera) -> prepare the CNN input
+    (model_input) -> CNN inference -> risk assessment. Returns a dict ready
+    to persist as a Prediction row.
     Raises InvalidEvent / whatever ml.inference raises (e.g.
     ModelNotAvailable) on failure — callers must NOT substitute a fake
     prediction, per section 24/43."""
@@ -420,13 +492,14 @@ def process_event(event: dict) -> dict:
     extract_metadata(event, original_bytes)       # EXIF: GPS, capture time, camera — needs the original
     lap("metadata_s")
     image_bytes = prepare_image(original_bytes)
+    cnn_input = model_input(original_bytes, image_bytes)   # Spark's preprocessing for the CNN
     lap("preprocess_s")
-    features = run_model(image_bytes)
+    features = run_model(cnn_input)
     lap("cnn_s")
     used = features.get("inference") or {}
     timings["cnn_batch_size"] = used.get("batch_size")      # batch this photo ran in
     timings["cnn_precision"] = used.get("precision")
-    timings["cnn_input_s"] = used.get("input_s")            # decode + transforms, inside cnn_s
+    timings["cnn_input_s"] = used.get("input_s")            # checking the prepared input, inside cnn_s
     timings["cnn_forward_s"] = used.get("forward_s")        # waiting for + running the forward pass
     if scale_run is None:
         save_for_review(event["image_id"], image_bytes)
@@ -460,7 +533,7 @@ def process_event(event: dict) -> dict:
         # in Drive next to the result). A drawing problem never fails the
         # diagnosis itself.
         try:
-            heatmap = disease_heatmap(image_bytes) if not is_uncertain else None
+            heatmap = heatmap_on_photo(disease_heatmap(cnn_input), image_bytes) if not is_uncertain else None
             result["processed_image_jpeg"] = render_processed_image(image_bytes, result, heatmap)
         except Exception as e:
             print(f"[preprocessing] Could not draw processed image for {event['image_id']}: {e}")

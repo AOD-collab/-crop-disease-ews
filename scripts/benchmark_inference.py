@@ -3,8 +3,8 @@ CNN inference benchmark (ml/inference.py) on this laptop's real hardware.
 
 Uses the verified local copies of the Google Drive photo collection
 (storage/downloaded_photos, prepared by `python -m scalability.run prepare`),
-each put through the exact Spark preprocessing (spark/preprocessing.
-prepare_image) and the model's own transforms, then measures:
+each put through the exact Spark preprocessing for the CNN (spark/
+preprocessing.model_input), then measures:
 
   1. startup     model load + warm-up, reported apart from everything else
   2. cnn-only    forward passes on already-prepared tensors, batch sizes
@@ -42,10 +42,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import torch  # noqa: E402  - before pandas/pyarrow (WinError 1114 on Windows)
 
 from config.settings import (  # noqa: E402
-    DOWNLOADED_PHOTOS_DIR, IMAGE_MODEL, SCALABILITY_REPORTS_DIR, ANALYSIS_MAX_PX,
+    DOWNLOADED_PHOTOS_DIR, IMAGE_MODEL, SCALABILITY_REPORTS_DIR,
 )
 from ml import inference  # noqa: E402
-from spark.preprocessing import prepare_image, compute_risk  # noqa: E402
+from spark.preprocessing import model_input, compute_risk  # noqa: E402
 
 FOLDER_ALIASES = {"blight": "northern_leaf_blight", "northern_leaf_blight": "northern_leaf_blight",
                   "common_rust": "common_rust", "gray_leaf_spot": "gray_leaf_spot", "healthy": "healthy"}
@@ -119,22 +119,19 @@ def spark_like(prepped, threads, batch_size, precision, legacy=False):
     IMAGE_MODEL["batch_size"], IMAGE_MODEL["precision"] = batch_size, precision
     loaded = inference._load_trained_model()
     loaded["batcher"] = None
-    inference._input_cache.clear()
     if legacy:
-        def one(b):
-            _, tensor = inference._prepared_input(loaded, b)
+        def one(x):
+            tensor = inference._as_input(loaded, x)
             t = time.perf_counter()
             p = legacy_forward(loaded, tensor)
             return p, time.perf_counter() - t, 1
     else:
-        def one(b):
-            _, tensor = inference._prepared_input(loaded, b)
+        def one(x):
             t = time.perf_counter()
-            p, size = inference._probabilities(loaded, b)
+            p, size = inference._probabilities(loaded, x)
             return p, time.perf_counter() - t, size
-    for b in prepped[:threads * 2]:          # warm the path (and the batcher thread)
-        one(b)
-    inference._input_cache.clear()
+    for x in prepped[:threads * 2]:          # warm the path (and the batcher thread)
+        one(x)
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     mon = ResourceMonitor(interval=0.5).start()
@@ -161,8 +158,7 @@ def accuracy(loaded, folder: Path, precisions, batch_size) -> dict:
         if cls is None or cls not in loaded["class_names"]:
             continue
         items += [(f, cls) for f in sorted(sub.iterdir()) if f.suffix.lower() in (".jpg", ".jpeg", ".png")]
-    tensors = [inference._prepared_input(loaded, prepare_image(f.read_bytes()))[1] for f, _ in items]
-    inference._input_cache.clear()
+    tensors = [inference._as_input(loaded, model_input(f.read_bytes())) for f, _ in items]
     out = {"images": len(items), "per_class_images": {}}
     for f, c in items:
         out["per_class_images"][c] = out["per_class_images"].get(c, 0) + 1
@@ -200,9 +196,9 @@ def markdown(r: dict) -> str:
          "## Startup (excluded from the timings below)", "",
          f"- model load: {r['startup']['model_load_s']} s, warm-up: {r['startup']['warmup_s']} s", "",
          "## Preprocessing (CPU, one thread, per photo)", "",
-         f"- prepare_image (Spark: decode, upright, <= {ANALYSIS_MAX_PX} px, JPEG): "
-         f"{r['preprocess']['prepare_image_ms']} ms",
-         f"- decode + model transforms (resize 224, crop, tensor, normalise): {r['preprocess']['to_tensor_ms']} ms", "",
+         f"- model_input (Spark: prepare_image, resize, centre crop, normalise): "
+         f"{r['preprocess']['model_input_ms']} ms",
+         f"- check + wrap as a tensor (ml/inference): {r['preprocess']['to_tensor_ms']} ms", "",
          "## CNN only (forward + copy to/from GPU + softmax, CUDA-synchronised)", "",
          "| Precision | Batch | Images/s | ms/image | Peak GPU MB | Class changes vs original | Max confidence diff |",
          "|---|---|---|---|---|---|---|"]
@@ -258,13 +254,11 @@ def main(argv=None):
     if not files:
         sys.exit("No local copies found - run: python -m scalability.run prepare --size 100")
     t = time.perf_counter()
-    prepped = [prepare_image(f.read_bytes()) for f in files]
+    prepped = [model_input(f.read_bytes()) for f in files]
     prep_ms = 1000 * (time.perf_counter() - t) / len(files)
-    inference._input_cache.clear()
     t = time.perf_counter()
-    tensors = [inference._prepared_input(loaded, b)[1] for b in prepped]
+    tensors = [inference._as_input(loaded, x) for x in prepped]
     tensor_ms = 1000 * (time.perf_counter() - t) / len(files)
-    inference._input_cache.clear()
 
     t = time.perf_counter()
     for prec in precisions:              # warm-up: cuDNN algorithm choice, CUDA context, autocast
@@ -275,7 +269,7 @@ def main(argv=None):
     sync()
     warm_s = time.perf_counter() - t
 
-    print(f"{len(files)} photos, prepare_image {prep_ms:.1f} ms, to-tensor {tensor_ms:.1f} ms per photo")
+    print(f"{len(files)} photos, model_input {prep_ms:.1f} ms, to-tensor {tensor_ms:.1f} ms per photo")
     # 2. original + cnn-only grid
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
@@ -334,7 +328,7 @@ def main(argv=None):
         "device": inference._device_name(torch, loaded["device"]), "torch": torch.__version__,
         "cuda": torch.version.cuda, "model": Path(IMAGE_MODEL["weights_path"]).name,
         "startup": {"model_load_s": round(load_s, 3), "warmup_s": round(warm_s, 3)},
-        "preprocess": {"prepare_image_ms": round(prep_ms, 2), "to_tensor_ms": round(tensor_ms, 2)},
+        "preprocess": {"model_input_ms": round(prep_ms, 2), "to_tensor_ms": round(tensor_ms, 2)},
         "cnn_only": {"original": original, "configs": configs,
                      "pinned_vs_not": {"batch_size": best["batch_size"], "precision": best["precision"],
                                        "pinned_images_per_s": pinned["images_per_s"],

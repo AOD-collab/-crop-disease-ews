@@ -1,15 +1,20 @@
-# Drop your trained model here
+# The deployed model
 
-This folder is the integration point. Once you've trained a model in the
-separate `maize_model_training/` project and run its `export_model.py`,
-copy the resulting file here:
+`saved_model_cnn.pt` in this folder is the CNN the system uses: an
+SE-ResNet-18 trained in the separate `crop_disease_ews` training project
+(`TRAINING_PROJECT_DIR`), with classes `common_rust`, `gray_leaf_spot`,
+`healthy` and `northern_leaf_blight`.
 
-```
-ml/trained_model/saved_model_cnn.pt
-```
+To replace it, train from the dashboard's **Model training** page. A new
+model that beats the one in use is copied here automatically (the old file
+goes to `backups/`), or you can deploy one by hand from that page.
+`ml/inference.py` reloads the file when it changes, so the Spark job uses
+the new model without a restart.
 
-That's it — `ml/inference.py` picks it up automatically, and
-`spark/streaming_job.py` uses it for every real Android/API image upload.
+The checkpoint also carries the input the model expects (`img_size`,
+`mean`, `std`). Spark prepares every photo with those values
+(`spark/preprocessing.model_input`), so a retrained model with other values
+needs no code change.
 
 If you keep the file elsewhere, point `MODEL_PATH` at it instead:
 
@@ -20,6 +25,3 @@ export MODEL_PATH=/path/to/your/saved_model_cnn.pt
 No file here? Predictions fail loudly with `ModelNotAvailable` (DIT manual
 section 24: "If the model is unavailable, return a clear model-not-found
 error"). There is no fallback analyzer: every result comes from the model.
-A real trained checkpoint already ships at `saved_model_cnn.pt` in this
-folder (classes: `common_rust`, `gray_leaf_spot`, `healthy`,
-`northern_leaf_blight`), so this only matters if you replace or remove it.

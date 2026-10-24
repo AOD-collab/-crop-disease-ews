@@ -166,8 +166,10 @@ storage.requeue_stuck --inline`).
 Per event: read the photo (the local copy in `storage/downloaded_photos/`
 when there is one, otherwise a download from Google Drive, saved as the
 local copy) → read its EXIF metadata (GPS, capture time, camera) →
-`prepare_image` (upright, at most `ANALYSIS_MAX_PX` on the longer side) →
-`ml.inference.predict()` (the CNN, section 12) → the model's
+Spark's image preprocessing: `prepare_image` (upright, at most
+`ANALYSIS_MAX_PX` on the longer side) then `model_input` (resize the shorter
+side to the model's 224 px, centre 224 × 224 crop, normalise with the
+checkpoint's mean/std) → `ml.inference.predict()` (the CNN, section 12) → the model's
 `lesion_score` (1 − P(healthy)) feeds a separate, rule-based risk score
 (`spark/preprocessing.compute_risk`) → a marked-up image (`ml/render.py`).
 Corrupted/missing images raise `InvalidEvent` and the image is marked
@@ -176,17 +178,27 @@ Corrupted/missing images raise `InvalidEvent` and the image is marked
 ## 12. CNN / ML
 
 `ml/inference.py` runs the trained CNN, and only the CNN: it loads
-`ml/trained_model/saved_model_cnn.pt`, a real ResNet18 checkpoint trained
-on real photos (4 classes: `common_rust`, `gray_leaf_spot`, `healthy`,
-`northern_leaf_blight`). There is no pixel-math fallback, leaf/maize gate
-or background removal: the photo goes to the model as taken (upright, at
-most `ANALYSIS_MAX_PX`). If the checkpoint is missing, prediction fails
-loudly (`ModelNotAvailable`). The marked-up image the farmer sees
-(`ml/render.py`) shows the model's Grad-CAM disease area.
+`ml/trained_model/saved_model_cnn.pt`, an SE-ResNet-18 checkpoint trained on
+real photos (4 classes: `common_rust`, `gray_leaf_spot`, `healthy`,
+`northern_leaf_blight`), and classifies the input Spark prepared
+(`spark/preprocessing.model_input`). It does no image preprocessing itself;
+it only tells Spark the input the model expects (`input_spec()`: 224 px,
+ImageNet mean/std, read from the checkpoint). There is no pixel-math
+fallback, leaf/maize gate or background removal. If the checkpoint is
+missing, prediction fails loudly (`ModelNotAvailable`). The marked-up image
+the farmer sees (`ml/render.py`) shows the model's Grad-CAM disease area,
+placed on the photo by Spark (`heatmap_on_photo`).
 
-Training the CNN itself happens in a **separate** project
-(`maize_model_training/`, not included in this repo) — see
-`ml/trained_model/README.md` for the handoff format.
+Why a centre crop: on the model's held-out test split (646 photos) the crop
+scored 95.67 % against 94.74 % for squeezing the whole photo to 224 × 224
+(the training project's evaluation); on its 78 real field photos 78.2 %
+against 70.5 % (padding 64.1 %, three crops averaged 75.6 %). The crop
+leaves out the edges of a non-square photo, so farmers should keep the leaf
+in the middle of the picture.
+
+The CNN is trained in a **separate** project, `crop_disease_ews`
+(`TRAINING_PROJECT_DIR`, not in this repo), from the dashboard's Model
+training page — see `ml/trained_model/README.md`.
 
 ## 13. Risk assessment
 
@@ -271,7 +283,7 @@ factory reset).
          ▼
    Spark Structured Streaming (spark/streaming_job.py)
          │  clean_event → read photo (local cache or Drive) → EXIF metadata
-         │  → prepare_image → CNN (ml/inference.py) → rule-based risk
+         │  → prepare_image → model_input → CNN (ml/inference.py) → risk
          ▼
    PostgreSQL (images, predictions, processing_events)
          │                                  │
@@ -538,7 +550,7 @@ The dashboard's **Image management** page (`dashboard/image_management_page.py`)
 
 Isolated from the real-time pipeline: its own Kafka topic
 (`SCALABILITY_KAFKA_TOPIC`), consumer group and worker process, the same
-`prepare_image` + CNN code, no `images`/`predictions` rows, no Drive results.
+`prepare_image` + `model_input` + CNN code, no `images`/`predictions` rows, no Drive results.
 Real-time processing has priority. The page shows one before/after
 preprocessing pair and two averages — execution time per iteration and
 processing time (preprocessing + CNN) per photo, both in seconds.
@@ -570,12 +582,12 @@ crop_disease_image_system/
 │   └── monitor.py            read-only live view of the topics (EWS-KafkaMonitor window)
 ├── spark/
 │   ├── streaming_job.py      Spark Structured Streaming: Kafka → per-photo processing
-│   ├── preprocessing.py      validation, EXIF, prepare_image, CNN call, risk, persistence, Drive results
+│   ├── preprocessing.py      validation, EXIF, image preprocessing (model_input), CNN call, risk, persistence, Drive results
 │   ├── analytics.py          dashboard/Tableau analytics and performance metrics
 │   ├── batch_analytics.py    Spark batch job (JDBC) — daily summary per municipality
 │   └── data_quality.py       duplicate / outlier / missing-value checks
 ├── ml/
-│   ├── inference.py          the CNN (and model_input_image for display)
+│   ├── inference.py          the CNN: loads the checkpoint, classifies Spark's prepared input
 │   ├── render.py             marked-up image (Grad-CAM + banner)
 │   └── trained_model/        saved_model_cnn.pt
 ├── storage/

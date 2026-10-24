@@ -12,7 +12,7 @@ Timer boundaries:
       is COMPLETED or FAILED. Includes the test topic, reading each staged
       file, preprocessing, CNN inference and recording the measurement.
   Processing time (one photo) — time.perf_counter() around
-      spark/preprocessing.prepare_image + ml/inference.predict only. Queue
+      spark/preprocessing.model_input + ml/inference.predict only. Queue
       waiting, file reading, Google Drive and database time are excluded.
 """
 

@@ -706,8 +706,7 @@ def _save_pictures(run_id: str, ids: list, paths: dict, series: dict = None) -> 
     first_ok = next((i for i in ids if i in completed), None)
     if first_ok:
         try:
-            from spark.preprocessing import prepare_image
-            comparison = worker.save_comparison(paths[first_ok], prepare_image(paths[first_ok].read_bytes()), out)
+            comparison = worker.save_comparison(paths[first_ok], paths[first_ok].read_bytes(), out)
         except Exception as e:  # noqa: BLE001
             log(f"{run_id}: could not save the before/after pair: {e}")
     if series and series.get("ITERATION", 1) != 1:

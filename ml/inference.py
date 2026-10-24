@@ -1,27 +1,26 @@
 """
-Shared inference wrapper — THIS IS THE PLACE TO PLUG IN YOUR TRAINED MODEL.
+The CNN: loads the trained model and classifies a photo that Spark has
+already prepared. It does no image preprocessing of its own.
 
-Everything that classifies a photo (spark/streaming_job.py, the
-scalability worker, scripts/benchmark_inference.py) calls
-`predict(image_bytes)` from this module instead of duplicating
-model-loading code. Every result comes from the trained CNN
-checkpoint at IMAGE_MODEL["weights_path"]; there is no pixel-math
-fallback. A missing checkpoint raises ModelNotAvailable.
-
---------------------------------------------------------------------------
-TO GO LIVE WITH YOUR TRAINED MODEL:
-  1. Train it in `maize_model_training/` (separate project, own venv).
-  2. Run `maize_model_training/export_model.py` — this writes a single
-     checkpoint file (default: saved_model_cnn.pt) in the exact format
-     this module expects (see `_CHECKPOINT_FORMAT` below).
-  3. Copy that file to ml/trained_model/saved_model_cnn.pt in THIS project
-     (or point IMAGE_MODEL_WEIGHTS at wherever you put it).
-  4. Done — Spark, the scalability test and the benchmark all pick it up
-     automatically, no other code changes.
+Spark (spark/preprocessing.model_input) turns a photo into the model's
+input: decode, resize, centre img_size x img_size crop, normalise with
+mean/std. The values it needs come from the checkpoint, through
+input_spec(). predict() and
+disease_heatmap() take that prepared (3, img_size, img_size) array. Every
+result comes from the trained CNN checkpoint at IMAGE_MODEL["weights_path"];
+there is no pixel-math fallback. A missing checkpoint raises
+ModelNotAvailable.
 
 --------------------------------------------------------------------------
-_CHECKPOINT_FORMAT (what export_model.py in the training project writes,
-and what `_load_trained_model()` below reads):
+TO GO LIVE WITH A NEWLY TRAINED MODEL:
+  Train it in the crop_disease_ews training project (TRAINING_PROJECT_DIR)
+  from the dashboard's Model training page. When it beats the model in
+  use, it is copied to ml/trained_model/saved_model_cnn.pt (or deploy it
+  by hand there), and this module reloads the file by itself.
+
+--------------------------------------------------------------------------
+_CHECKPOINT_FORMAT (what the Model training page deploys, and what
+`_load_trained_model()` below reads):
 
     torch.save({
         "state_dict": model.state_dict(),
@@ -48,11 +47,8 @@ What predict() returns, all from the model's class probabilities:
                                   dashboard/API to show farmers directly.
 """
 
-import hashlib
-import itertools
 import os
 import threading
-from collections import OrderedDict
 from pathlib import Path
 
 from config.settings import IMAGE_MODEL
@@ -69,10 +65,6 @@ class ModelNotAvailable(Exception):
 
 _model_cache = {"key": None, "value": None}
 _model_cache_lock = threading.Lock()
-# Numbers each loaded model, so the input cache below can't hand a reloaded
-# model a tensor prepared for the previous one (id() of a freed dict can be
-# reused by the next).
-_load_generation = itertools.count(1)
 
 
 def _load_trained_model():
@@ -124,13 +116,13 @@ def _device_name(torch, device) -> str:
 def _load_checkpoint(weights_path: str):
     if not os.path.exists(weights_path):
         raise ModelNotAvailable(
-            f"No trained model checkpoint was found at '{weights_path}'. Train a "
-            f"model in maize_model_training/, run its export_model.py, and copy the "
-            f"resulting .pt file there — or point MODEL_PATH at the right path."
+            f"No trained model checkpoint was found at '{weights_path}'. Train and "
+            f"deploy a model from the dashboard's Model training page (the "
+            f"crop_disease_ews training project), or point MODEL_PATH at the right path."
         )
 
     import torch
-    from torchvision import models, transforms
+    from torchvision import models
 
     checkpoint = torch.load(weights_path, map_location="cpu")
 
@@ -155,26 +147,17 @@ def _load_checkpoint(weights_path: str):
     model.to(device).eval()
     threads = int(IMAGE_MODEL.get("torch_threads", 0) or 0)
     if threads > 0 and device.type == "cuda":
-        # Only the CPU-side transforms use these threads when the CNN is on
+        # Only CPU-side tensor work uses these threads when the CNN is on
         # the GPU; with Spark's photo threads on top, the default (one per
         # core, in every thread) oversubscribes the CPU. Elementwise ops give
         # the same numbers with any thread count.
         torch.set_num_threads(threads)
 
-    img_size = checkpoint.get("img_size", 224)
-    mean = checkpoint.get("mean", [0.485, 0.456, 0.406])
-    std = checkpoint.get("std", [0.229, 0.224, 0.225])
-
-    # Resize the shorter side to img_size (preserving aspect ratio) then
-    # center-crop the square — NOT Resize((img_size, img_size)), which
-    # stretches/squashes a non-square photo (e.g. a 576x1280 phone photo)
-    # to fit, distorting leaf shape/proportions before the CNN ever sees it.
-    preprocess = transforms.Compose([
-        transforms.Resize(img_size),
-        transforms.CenterCrop(img_size),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=mean, std=std),
-    ])
+    # The model's input contract (input_spec): Spark prepares every photo
+    # with these values, as the training project did.
+    img_size = int(checkpoint.get("img_size", 224))
+    mean = [float(v) for v in checkpoint.get("mean", [0.485, 0.456, 0.406])]
+    std = [float(v) for v in checkpoint.get("std", [0.229, 0.224, 0.225])]
 
     healthy_class_name = checkpoint.get("healthy_class_name", "healthy")
     if healthy_class_name not in class_names:
@@ -197,48 +180,35 @@ def _load_checkpoint(weights_path: str):
     return {
         "model": model,
         "device": device,
-        "preprocess": preprocess,
+        "input_spec": {"img_size": img_size, "mean": mean, "std": std},
         "class_names": class_names,
         "healthy_class_name": healthy_class_name,
         "version": f"cnn-{architecture}:{Path(weights_path).name}@{deployed}",
-        "generation": next(_load_generation),
     }
 
 
 # ---------------------------------------------------------------------------
-# Input preparation (CPU) — the SAME transforms for every path below
+# Input contract — what Spark must hand the model
 # ---------------------------------------------------------------------------
-# The last few prepared inputs, so disease_heatmap() right after predict() on
-# the same photo (spark/preprocessing.process_event) doesn't decode and
-# transform it a second time. Keyed by the bytes' hash: identical bytes give
-# an identical tensor, so reusing it changes nothing the model sees.
-_INPUT_CACHE_SIZE = 32
-_input_cache = OrderedDict()
-_input_cache_lock = threading.Lock()
+def input_spec() -> dict:
+    """{"img_size", "mean", "std"} of the deployed checkpoint: the input the
+    model was trained on. spark/preprocessing.model_input prepares every
+    photo with these, so a retrained model with other values is followed
+    without code changes. Raises ModelNotAvailable without a checkpoint."""
+    return dict(_load_trained_model()["input_spec"])
 
 
-def _prepared_input(loaded, image_bytes: bytes):
-    """(EXIF-upright PIL image, normalized CHW float tensor on the CPU)."""
-    from io import BytesIO
-    from PIL import Image, ImageOps
-
-    key = (loaded.get("generation", id(loaded)), hashlib.sha1(image_bytes).digest())
-    with _input_cache_lock:
-        hit = _input_cache.get(key)
-        if hit is not None:
-            _input_cache.move_to_end(key)
-            return hit
-    img = Image.open(BytesIO(image_bytes)).convert("RGB")
-    # A phone photo's pixels are often stored sideways/upside-down with
-    # only an EXIF Orientation tag saying how to display it — without this,
-    # the CNN sees a rotated image.
-    img = ImageOps.exif_transpose(img)
-    value = (img, loaded["preprocess"](img))
-    with _input_cache_lock:
-        _input_cache[key] = value
-        while len(_input_cache) > _INPUT_CACHE_SIZE:
-            _input_cache.popitem(last=False)
-    return value
+def _as_input(loaded, model_input):
+    """The prepared photo as a float32 CHW tensor on the CPU, after checking
+    it has the shape the model expects — wrongly prepared input is refused,
+    never classified."""
+    import torch
+    tensor = torch.as_tensor(model_input, dtype=torch.float32)
+    size = loaded["input_spec"]["img_size"]
+    if tuple(tensor.shape) != (3, size, size):
+        raise ValueError(f"model input must have shape (3, {size}, {size}) — "
+                         f"prepare it with spark.preprocessing.model_input; got {tuple(tensor.shape)}")
+    return tensor
 
 
 # ---------------------------------------------------------------------------
@@ -364,13 +334,13 @@ def _batcher(loaded):
         return loaded["batcher"]
 
 
-def _probabilities(loaded, image_bytes: bytes, timings: dict = None):
-    """(probability vector, batch size it ran in) for one photo. `timings`,
-    when given, gets input_s (decode + transforms) and forward_s (waiting
-    for and running the forward pass)."""
+def _probabilities(loaded, model_input, timings: dict = None):
+    """(probability vector, batch size it ran in) for one prepared photo.
+    `timings`, when given, gets input_s (checking and wrapping the prepared
+    input) and forward_s (waiting for and running the forward pass)."""
     import time
     t0 = time.perf_counter()
-    _, tensor = _prepared_input(loaded, image_bytes)
+    tensor = _as_input(loaded, model_input)
     t1 = time.perf_counter()
     batcher = _batcher(loaded)
     if batcher is not None:
@@ -382,13 +352,14 @@ def _probabilities(loaded, image_bytes: bytes, timings: dict = None):
     return out
 
 
-def predict(image_bytes: bytes) -> dict:
-    """Single entry point every real data source should call: the trained
-    CNN's result for one photo (see the module docstring for the keys).
-    Raises ModelNotAvailable when there is no checkpoint."""
+def predict(model_input) -> dict:
+    """The trained CNN's result for one photo, given the input Spark
+    prepared for it (spark/preprocessing.model_input) — see the module
+    docstring for the keys. Raises ModelNotAvailable when there is no
+    checkpoint, ValueError when the input doesn't have the model's shape."""
     loaded = _load_trained_model()
     timings = {}
-    probs, batch_size = _probabilities(loaded, image_bytes, timings)
+    probs, batch_size = _probabilities(loaded, model_input, timings)
     result = _result_from_probs(loaded, probs)
     result["inference"] = {"batch_size": batch_size, "precision": _precision(loaded), **timings}
     return result
@@ -432,16 +403,16 @@ def _result_from_probs(loaded, probs) -> dict:
     }
 
 
-def disease_heatmap(image_bytes: bytes):
-    """Grad-CAM for the trained ResNet-18: WHERE in the photo the model saw
-    the disease it predicted. Returns an (H, W) float array in [0, 1] at the
-    photo's own (EXIF-upright) size, or None when there is nothing honest to
-    show — the model's top class is healthy (a "healthy" heatmap would just highlight healthy tissue and
-    read as disease on the processed image).
-
-    Only the center square the CNN actually sees (see the Resize +
-    CenterCrop preprocessing in _load_trained_model) gets heat; the parts
-    of a non-square photo cropped off before inference stay 0.
+def disease_heatmap(model_input):
+    """Grad-CAM for the trained ResNet-18: WHERE in its input the model saw
+    the disease it predicted, for the same prepared input predict() got
+    (spark/preprocessing.model_input). Returns the raw map over that input
+    (a small 2-D float array, >= 0, e.g. 7 x 7 for a 224 input), or None
+    when there is nothing honest to show — the model's top class is healthy
+    (a "healthy" heatmap would just highlight healthy tissue and read as
+    disease on the processed image). Spark places it on the photo
+    (spark/preprocessing.heatmap_on_photo), since only Spark knows which
+    part of the photo the input was cut from.
 
     Grad-CAM is computed by running the ResNet stages by hand and asking
     autograd for d(class score)/d(layer4 activations) — no forward/backward
@@ -449,7 +420,6 @@ def disease_heatmap(image_bytes: bytes):
     each other's hook state."""
     loaded = _load_trained_model()
 
-    import numpy as np
     import torch
     import torch.nn.functional as F
 
@@ -457,9 +427,7 @@ def disease_heatmap(image_bytes: bytes):
     class_names = loaded["class_names"]
     healthy_class_name = loaded["healthy_class_name"]
 
-    # same photo as the predict() just before it -> same prepared input, not decoded again
-    img, tensor = _prepared_input(loaded, image_bytes)
-    tensor = tensor.unsqueeze(0).to(loaded["device"])
+    tensor = _as_input(loaded, model_input).unsqueeze(0).to(loaded["device"])
 
     # always FP32: gradients in FP16 would change the map, and it's one photo
     with torch.enable_grad():
@@ -476,33 +444,7 @@ def disease_heatmap(image_bytes: bytes):
     if float(cam.max()) <= 0:
         return None
 
-    # the CNN saw the center min(W, H) square of the photo, resized to img_size
-    w, h = img.size
-    side = min(w, h)
-    cam = F.interpolate(cam, size=(side, side), mode="bilinear", align_corners=False)[0, 0]
-    cam = (cam / cam.max()).cpu().numpy()
-    heat = np.zeros((h, w), dtype=np.float32)
-    top, left = (h - side) // 2, (w - side) // 2
-    heat[top:top + side, left:left + side] = cam
-    return heat
-
-
-def model_input_image(image_bytes: bytes):
-    """The photo as the CNN receives it, as a PIL image for display: the
-    same decode, EXIF rotation and Resize + CenterCrop as _prepared_input,
-    using the loaded model's own transform objects. ToTensor and Normalize
-    only rescale the pixel values for the network, so they are left out to
-    keep the picture viewable. Display only: predictions never use it."""
-    from io import BytesIO
-    from PIL import Image, ImageOps
-    from torchvision import transforms
-
-    loaded = _load_trained_model()
-    img = ImageOps.exif_transpose(Image.open(BytesIO(image_bytes)).convert("RGB"))
-    for step in loaded["preprocess"].transforms:
-        if not isinstance(step, (transforms.ToTensor, transforms.Normalize)):
-            img = step(img)
-    return img
+    return cam[0, 0].cpu().numpy()
 
 
 def model_version() -> str:

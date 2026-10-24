@@ -9,8 +9,8 @@ test shares none of that path:
     by their own consumer group (SCALABILITY_CONSUMER_GROUP) in the runner's
     process (scalability/run.py) — never by the Spark job;
   * each photo is processed here by the SAME functions the Spark job calls,
-    spark/preprocessing.prepare_image and ml/inference.predict (same CNN
-    checkpoint, same transforms), and the result is thrown away: only
+    spark/preprocessing.model_input and ml/inference.predict (same CNN
+    checkpoint, same preprocessing), and the result is thrown away: only
     timings are kept, in scale_test_items;
   * nothing is written to images, predictions, processing_events or Drive.
 
@@ -209,29 +209,29 @@ def warm_up() -> None:
     loading and CUDA start-up are not image processing."""
     from io import BytesIO
     from PIL import Image as PILImage
-    from spark.preprocessing import prepare_image
+    from spark.preprocessing import model_input
     from ml.inference import predict
     buf = BytesIO()
     PILImage.new("RGB", (256, 256), (60, 140, 50)).save(buf, format="JPEG")
-    predict(prepare_image(buf.getvalue()))
+    predict(model_input(buf.getvalue()))
 
 
 def process_photo(path) -> tuple:
     """Reads one staged photo and runs exactly the live pipeline's
-    preprocessing (spark/preprocessing.prepare_image) and CNN inference
+    preprocessing (spark/preprocessing.model_input) and CNN inference
     (ml/inference.predict) on it. Returns (timings, prediction).
     The prediction (class, confidence, uncertain flag, rule-based risk
     level — spark/preprocessing.compute_risk, as the live pipeline) is kept
     only in scale_test_items, for the test page's disease charts; it never
     becomes a diagnosis a farmer sees. Only the two stages are timed
     (time.perf_counter); reading the file and the risk rule are not."""
-    from spark.preprocessing import prepare_image, compute_risk
+    from spark.preprocessing import model_input, compute_risk
     from ml.inference import predict
     original = Path(path).read_bytes()
     t0 = time.perf_counter()
-    image_bytes = prepare_image(original)
+    cnn_input = model_input(original)
     t1 = time.perf_counter()
-    features = predict(image_bytes)
+    features = predict(cnn_input)
     t2 = time.perf_counter()
     is_uncertain = bool(features.get("is_uncertain", False))
     prediction = {
@@ -273,13 +273,12 @@ def preview_paths(out_dir: Path, item_id: str) -> tuple:
 def save_previews(original_path, out_dir: Path, item_id: str) -> None:
     """The gallery's two small pictures for one photo, written AFTER the
     timer stops: `before` = the staged original (EXIF-upright, at most
-    PREVIEW_PX), `after` = prepare_image's output put through the model's own
-    Resize + CenterCrop (ml/inference.model_input_image) — the picture the
-    CNN received. Display only; nothing here feeds the model."""
+    PREVIEW_PX), `after` = the centre square the CNN gets
+    (spark/preprocessing.model_input_preview) — the picture the CNN
+    received. Display only; nothing here feeds the model."""
     from io import BytesIO
     from PIL import Image as PILImage, ImageOps
-    from spark.preprocessing import prepare_image
-    from ml.inference import model_input_image
+    from spark.preprocessing import model_input_preview
     before_path, after_path = preview_paths(out_dir, item_id)
     before_path.parent.mkdir(parents=True, exist_ok=True)
     original = Path(original_path).read_bytes()
@@ -288,20 +287,20 @@ def save_previews(original_path, out_dir: Path, item_id: str) -> None:
     img = ImageOps.exif_transpose(img).convert("RGB")
     img.thumbnail((PREVIEW_PX, PREVIEW_PX))
     img.save(before_path, format="JPEG", quality=85)
-    model_input_image(prepare_image(original)).convert("RGB").save(after_path, format="JPEG", quality=90)
+    model_input_preview(original).save(after_path, format="JPEG", quality=90)
 
 
-def save_comparison(original_path, image_bytes: bytes, out_dir: Path) -> dict:
+def save_comparison(original_path, original_bytes: bytes, out_dir: Path) -> dict:
     """The run's one before/after pair, from the photo the run actually
-    processed: `before` = the staged original file, `after` = the bytes
-    prepare_image produced for it, put through the model's own Resize +
-    CenterCrop (ml/inference.model_input_image) — the picture the CNN
-    received. Returns their paths relative to `out_dir`. A photo read in
-    place from another drive (run._stage) is copied here, that one only."""
+    processed: `before` = the staged original file, `after` = that photo
+    cut and resized for the model (spark/preprocessing.model_input_preview)
+    — the picture the CNN received. Returns their paths relative to
+    `out_dir`. A photo read in place from another drive (run._stage) is
+    copied here, that one only."""
     import shutil
-    from ml.inference import model_input_image
+    from spark.preprocessing import model_input_preview
     out_dir.mkdir(parents=True, exist_ok=True)
-    model_input_image(image_bytes).save(out_dir / "after_preprocessing.png")
+    model_input_preview(original_bytes).save(out_dir / "after_preprocessing.png")
     original_path = Path(original_path)
     if not original_path.resolve().is_relative_to(Path(out_dir).resolve()):
         before = Path(out_dir) / f"before_preprocessing{original_path.suffix.lower()}"

@@ -7,14 +7,16 @@ Pipeline:
       -> Read Stream
       -> Parse JSON
       -> Validate / Data Cleaning   (spark/preprocessing.clean_event)
-      -> Retrieve Image
+      -> Retrieve Image             (Google Drive, or the local copy)
       -> Metadata Extraction: EXIF GPS location, capture time, camera
                                      (spark/preprocessing.extract_metadata)
-      -> Image Cleaning: drop non-maize leaves, remove background
-                                     (spark/preprocessing.clean_image)
-      -> CNN Inference + Risk Assessment
+      -> Image Preprocessing: upright, resize, centre crop to the model's
+         size, normalise — the CNN only classifies
+                                     (spark/preprocessing.model_input)
+      -> CNN Inference (ml/inference.predict) + Risk Assessment
                                      (spark/preprocessing.process_event)
       -> Write predictions + update image status to PostgreSQL
+      -> Result to the farmer's Google Drive folder
 
 Checkpointing: this job writes to CHECKPOINT_DIR (below) so a restart
 resumes from the last committed Kafka offset instead of silently skipping
@@ -272,10 +274,12 @@ def _warm_up_model() -> None:
     from io import BytesIO
     from PIL import Image as PILImage
     from ml import inference
+    from spark.preprocessing import model_input
     buf = BytesIO()
     PILImage.new("RGB", (256, 256), (60, 140, 50)).save(buf, format="JPEG")
-    inference.predict(buf.getvalue())
-    inference.disease_heatmap(buf.getvalue())
+    x = model_input(buf.getvalue())
+    inference.predict(x)
+    inference.disease_heatmap(x)
 
 
 def run():
