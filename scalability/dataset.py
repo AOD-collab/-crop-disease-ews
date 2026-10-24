@@ -65,8 +65,8 @@ class Collection:
 
 
 def _problem(meta: dict, folder_email: str, users: dict) -> str | None:
-    """Why this Drive file can't be in the dataset (the Drive watcher's
-    upload rules, kafka/drive_watcher.register_drive_file), or None."""
+    """Why this Drive file can't be in the dataset (the upload rules Spark's
+    ingestion step applies, spark/ingestion.register_upload), or None."""
     props = meta.get("appProperties") or {}
     image_id = props.get("image_id") or ""
     owners = meta.get("owners") or []

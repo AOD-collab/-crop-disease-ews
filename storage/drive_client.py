@@ -225,6 +225,20 @@ def download_file(file_id: str) -> bytes:
     return resp.content
 
 
+def download_thumbnail(file_id: str, size_px: int = 220) -> Optional[bytes]:
+    """Google's own small preview of a file (a few KB instead of the whole
+    photo), or None when Drive hasn't made one."""
+    _require_valid_id(file_id)
+    resp = _get_with_retry(f"{DRIVE_API}/files/{file_id}", {"fields": "thumbnailLink"})
+    _check(resp, f"get thumbnail link for {file_id}")
+    link = resp.json().get("thumbnailLink")
+    if not link:
+        return None
+    # thumbnailLink ends in "=s220"; ask for the size the page needs
+    resp = _get_with_retry(re.sub(r"=s\d+$", f"=s{int(size_px)}", link), {})
+    return resp.content if resp.status_code < 400 else None
+
+
 def find_file_in_folder(name: str, parent_id: str) -> Optional[dict]:
     """Returns {id, name, appProperties} of the newest non-trashed file
     called `name` directly inside `parent_id`, or None."""

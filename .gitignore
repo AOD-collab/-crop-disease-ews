@@ -5,6 +5,7 @@ storage/google_client_secret.json
 storage/google_drive_token.json
 storage/google_drive_folders.json
 storage/drive_watcher_state.json
+storage/processing_mode.json
 test.txt
 
 # Local database + storage

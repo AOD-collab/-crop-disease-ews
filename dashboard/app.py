@@ -26,9 +26,12 @@ from sqlalchemy import or_ as sa_or
 
 from storage.database import (
     SessionLocal, User, Image, Prediction, RejectedEvent, Role, UserStatus, ProcessingStatus,
-    ProcessingMode, get_processing_mode, set_processing_mode, init_db, now_utc, SCALE_TEST_SOURCE,
-    SCALE_TEST_USERNAME,
+    init_db, now_utc, SCALE_TEST_SOURCE, SCALE_TEST_USERNAME,
 )
+from storage.processing_mode import ProcessingMode, get_processing_mode, set_processing_mode
+from storage import drive_inventory
+from kafka.config import KAFKA_TOPIC
+from kafka.producer import get_backend
 from storage.reset import factory_reset, _python_command_lines
 from storage.pipeline_submit import submit_image_for_processing, is_upload_rejected
 from storage.requeue_stuck import count_owed
@@ -222,40 +225,42 @@ page = st.session_state["page"]
 
 
 # ------------------------------------------------------------------
-# Image-processing mode switch (AUTOMATIC / MANUAL). Persisted in the
-# system_settings table so the Drive watcher sees the same value.
+# Image-processing mode switch (AUTOMATIC / MANUAL). Kept in
+# storage/processing_mode.json, which the Drive watcher reads (it has no
+# database). In MANUAL the watcher publishes nothing: the photos wait in
+# Drive and Pending Review lists the ones with no database row yet.
 # ------------------------------------------------------------------
 def _switch_to_manual():
-    s = SessionLocal()
-    try:
-        set_processing_mode(s, ProcessingMode.MANUAL)
-    finally:
-        s.close()
+    set_processing_mode(ProcessingMode.MANUAL)
 
 
 def _switch_to_automatic_and_drain():
-    """Switch to AUTOMATIC and immediately push every held (PENDING_REVIEW)
-    image into the pipeline — same as clicking 'Process all'. Returns
-    (released, failed)."""
-    s = SessionLocal()
+    """Switch to AUTOMATIC and immediately send every photo still waiting
+    in Drive — same as clicking 'Process all'. Returns (released, failed)."""
+    set_processing_mode(ProcessingMode.AUTOMATIC)
+    with SessionLocal() as s:
+        waiting = drive_inventory.unprocessed_photos(s)
+    released, failed = drive_inventory.send_for_processing(waiting, get_backend(KAFKA_TOPIC))
+    _pending_drive_photos.clear()
+    return released, failed
+
+
+@st.cache_data(ttl=60, show_spinner="Checking Google Drive…")
+def _pending_drive_photos() -> list:
+    """[(Drive metadata, folder email)] of the farmer photos in Drive that
+    Spark hasn't registered yet (storage/drive_inventory.py), or [] when
+    Drive isn't reachable. Cached for a minute: it lists every farmer folder
+    (~7 s for 650 photos); Process and the mode switch clear it."""
+    if not drive_client.is_configured():
+        return []
     try:
-        set_processing_mode(s, ProcessingMode.AUTOMATIC)
-        held = (s.query(Image)
-                .filter(Image.status == ProcessingStatus.PENDING_REVIEW).all())
-        released = failed = 0
-        for img in held:
-            try:
-                submit_image_for_processing(s, img)
-                released += 1
-            except Exception:  # noqa: BLE001 - marked FAILED inside; keep going
-                failed += 1
-        return released, failed
-    finally:
-        s.close()
+        with SessionLocal() as s:
+            return drive_inventory.unprocessed_photos(s)
+    except Exception:  # noqa: BLE001 - Drive hiccup: show nothing this round
+        return []
 
 
-with SessionLocal() as _s:
-    current_mode = get_processing_mode(_s)
+current_mode = get_processing_mode()
 
 st.sidebar.divider()
 st.sidebar.markdown(f"**Processing mode** &nbsp; `{current_mode.value}`")
@@ -270,11 +275,11 @@ if current_mode == ProcessingMode.AUTOMATIC:
         _switch_to_manual()
         st.rerun()
 else:
-    st.sidebar.caption("Uploads wait in **Pending Review** until you press Process. "
-                       "Switching back to AUTOMATIC releases everything held.")
+    st.sidebar.caption("Uploads stay in Google Drive and wait in **Pending Review** until you press "
+                       "Process. Switching back to AUTOMATIC sends everything still waiting.")
     if st.sidebar.button("Switch to AUTOMATIC", icon="🔀"):
         released, failed = _switch_to_automatic_and_drain()
-        msg = f"Switched to AUTOMATIC — released {released} held image(s)"
+        msg = f"Switched to AUTOMATIC — sent {released} waiting photo(s)"
         if failed:
             msg += f", {failed} failed to publish"
         st.session_state["_mode_switch_msg"] = msg + "."
@@ -342,6 +347,15 @@ def _farmer_folder_emails():
 @st.cache_data(ttl=3600, max_entries=300, show_spinner=False)
 def _drive_bytes(file_id: str) -> bytes:
     return drive_client.download_file(file_id)
+
+
+@st.cache_data(ttl=3600, max_entries=500, show_spinner=False)
+def _drive_thumbnail(file_id: str):
+    """Drive's small preview of a photo, else the photo itself; None if neither."""
+    try:
+        return drive_client.download_thumbnail(file_id) or drive_client.download_file(file_id)
+    except Exception:  # noqa: BLE001 - Drive hiccup / file gone: show "(not found)"
+        return None
 
 
 @st.cache_data(ttl=300, max_entries=300, show_spinner=False)
@@ -474,7 +488,8 @@ def _system_status() -> dict:
                      .filter(Image.status.in_([ProcessingStatus.UPLOADED, ProcessingStatus.INGESTED,
                                                ProcessingStatus.PROCESSING]),
                              Image.uploaded_at < cutoff, Image.source != SCALE_TEST_SOURCE).count())
-            pending = s_.query(Image).filter(Image.status == ProcessingStatus.PENDING_REVIEW).count()
+            # photos in Drive not sent for processing yet (MANUAL mode, or a lost event)
+            pending = len(_pending_drive_photos())
             failed = (s_.query(Image).filter(Image.status == ProcessingStatus.FAILED,
                                              Image.uploaded_at >= now_utc() - timedelta(hours=24)).count())
             undelivered = count_owed(s_)["undelivered"]
@@ -482,7 +497,7 @@ def _system_status() -> dict:
             rejected = (s_.query(RejectedEvent)
                         .filter(RejectedEvent.created_at >= now_utc() - timedelta(hours=24)).count())
         lines = [f"{stuck} photo(s) waiting longer than 2 minutes",
-                 f"{pending} photo(s) held for review (manual mode)",
+                 f"{pending} photo(s) in Google Drive not sent for processing yet",
                  f"{failed} failed in the last 24 hours",
                  f"{undelivered} finished result(s) not delivered to the farmer's Google Drive",
                  f"{rejected} unreadable Kafka event(s) in the last 24 hours (table rejected_events)"]
@@ -639,84 +654,84 @@ elif page == "Real-Time Monitoring":
         )
 
 elif page == "Pending Review":
-    st.subheader("Images held for manual processing")
+    st.subheader("Photos waiting in Google Drive")
     st.caption(
-        "In MANUAL mode an upload is stored but not sent to the CNN pipeline. "
-        "Pressing **Process** publishes it to Kafka and marks it INGESTED — the "
-        "exact same step automatic mode does on upload — and the Spark job takes "
-        "it from there."
+        "In MANUAL mode the Drive watcher sends nothing: a farmer's photo stays in Google "
+        "Drive. This list is every photo in the farmers' Drive folders that hasn't been "
+        "sent for processing yet. Pressing **Process** sends it to Kafka — the same event "
+        "automatic mode sends — and Spark registers and analyses it."
     )
 
-    def _held_ids() -> list:
-        with SessionLocal() as s:
-            return [i for (i,) in s.query(Image.image_id)
-                    .filter(Image.status == ProcessingStatus.PENDING_REVIEW)
-                    .order_by(Image.uploaded_at.desc())]
+    # Sent from this page and not registered by Spark yet: hidden until then.
+    sent = st.session_state.setdefault("_sent_pending", set())
 
-    # Auto refresh: a cheap id-only check every _REFRESH_SECONDS; the whole
-    # page (with its photos) is only redrawn when the held list changed —
-    # new uploads arrived, or photos were processed elsewhere.
+    def _waiting() -> list:
+        return [(m, f) for m, f in reversed(_pending_drive_photos())   # newest first
+                if (m.get("appProperties") or {}).get("image_id") not in sent]
+
+    def _waiting_ids(photos) -> list:
+        return [(m.get("appProperties") or {}).get("image_id") for m, _ in photos]
+
+    def _send(photos) -> tuple:
+        result = drive_inventory.send_for_processing(photos, get_backend(KAFKA_TOPIC))
+        sent.update(_waiting_ids(photos))
+        _pending_drive_photos.clear()
+        return result
+
+    # Auto refresh: a cheap check every _REFRESH_SECONDS; the whole page (with
+    # its photos) is only redrawn when the waiting list changed — new uploads
+    # arrived, or photos were processed elsewhere.
     if _REFRESH_SECONDS > 0:
         @st.fragment(run_every=_REFRESH_SECONDS)
-        def _watch_held(shown: list):
-            if _held_ids() != shown:
+        def _watch_waiting(shown: list):
+            if _waiting_ids(_waiting()) != shown:
                 st.rerun(scope="app")
-            st.caption(f"🔄 Checks for new uploads every {_REFRESH_SECONDS}s.")
+            st.caption("🔄 Checks Google Drive for new uploads about once a minute.")
 
-    session = SessionLocal()
-    try:
-        held = (
-            session.query(Image)
-            .filter(Image.status == ProcessingStatus.PENDING_REVIEW)
-            .order_by(Image.uploaded_at.desc())
-            .all()
-        )
-        if _REFRESH_SECONDS > 0:
-            _watch_held([img.image_id for img in held])
+    waiting = _waiting()
+    if _REFRESH_SECONDS > 0:
+        _watch_waiting(_waiting_ids(waiting))
 
-        if not held:
-            st.success(
-                f"Nothing is waiting. Current mode: `{get_processing_mode(session).value}`."
-            )
-        else:
-            st.write(f"**{len(held)}** image(s) awaiting processing.")
-            if st.button(f"Process all {len(held)}", icon="⚡", type="primary"):
-                ok = fail = 0
-                for img in held:
-                    try:
-                        submit_image_for_processing(session, img)
-                        ok += 1
-                    except Exception as e:  # noqa: BLE001 - surface, keep going
-                        fail += 1
-                        st.error(f"{img.image_id[:8]}…: {e}")
-                st.success(f"Released {ok} image(s)." + (f" {fail} failed." if fail else ""))
-                st.rerun()
+    if not waiting:
+        st.success(f"Nothing is waiting. Current mode: `{get_processing_mode().value}`.")
+    else:
+        st.write(f"**{len(waiting)}** photo(s) awaiting processing.")
+        if st.button(f"Process all {len(waiting)}", icon="⚡", type="primary"):
+            ok, fail = _send(waiting)
+            st.success(f"Sent {ok} photo(s)." + (f" {fail} failed." if fail else ""))
+            st.rerun()
 
-            st.divider()
-            for img in held:
-                with st.container(border=True):
-                    c1, c2 = st.columns([4, 1])
-                    with c1:
-                        st.markdown(f"`{img.image_id}`")
-                        st.caption(
-                            f"{img.location or 'no location'} · user "
-                            f"{img.user_id[:8]}… · uploaded {format_local(img.uploaded_at)}"
-                        )
-                        # local copy when there is one, else Drive (fetched once, cached)
-                        photo = _original_image(img.image_path, img.user_id, img.image_id)
-                        if photo is not None:
-                            st.image(photo, width=180)
-                        else:
-                            st.caption("(image file not found on disk or in Google Drive)")
-                    if c2.button("Process", key=f"process_{img.image_id}", type="primary"):
-                        try:
-                            submit_image_for_processing(session, img)
-                            st.success(f"Released {img.image_id[:8]}… into the pipeline.")
-                            st.rerun()
-                        except Exception as e:  # noqa: BLE001
-                            st.error(f"Failed to queue: {e}")
-    finally:
-        session.close()
+        st.divider()
+        per_page = 24
+        pages = max(1, -(-len(waiting) // per_page))
+        page_no = int(st.number_input("Page", 1, pages, 1, key="pending_page")) if pages > 1 else 1
+        if pages > 1:
+            st.caption(f"Page {page_no} of {pages}, newest first.")
+        for meta, folder_email in waiting[(page_no - 1) * per_page: page_no * per_page]:
+            props = meta.get("appProperties") or {}
+            image_id = props.get("image_id")
+            with st.container(border=True):
+                c1, c2 = st.columns([4, 1])
+                with c1:
+                    st.markdown(f"`{image_id}`")
+                    uploaded = drive_inventory.uploaded_at(meta)
+                    st.caption(
+                        f"{props.get('location') or 'no location'} · {folder_email or 'unknown farmer'} · "
+                        f"uploaded {format_local(uploaded) if uploaded else '?'}"
+                    )
+                    # Drive's small preview (fetched once, cached)
+                    photo = _drive_thumbnail(meta["id"])
+                    if photo is not None:
+                        st.image(photo, width=180)
+                    else:
+                        st.caption("(image file not found in Google Drive)")
+                if c2.button("Process", key=f"process_{image_id}", type="primary"):
+                    ok, _ = _send([(meta, folder_email)])
+                    if ok:
+                        st.success(f"Sent {image_id[:8]}… to the pipeline.")
+                        st.rerun()
+                    else:
+                        st.error("Failed to send it to Kafka — see the dashboard console.")
 
 elif page == "Users":
     PAGE_SIZE = 10
@@ -794,7 +809,7 @@ elif page == "Users":
                 st.error("Google Drive is not set up on this laptop yet — run "
                          "`python scripts\\drive_authorize.py` first (see README 'Google Drive setup').")
             else:
-                from kafka.drive_watcher import get_or_create_farmer
+                from storage.farmers import get_or_create_farmer
                 done = []
                 for email in emails:
                     try:

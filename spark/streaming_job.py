@@ -6,6 +6,8 @@ Pipeline:
     Kafka (maize-disease-images)
       -> Read Stream
       -> Parse JSON
+      -> Register a new upload: farmer, upload checks, duplicate skip,
+         first database row         (spark/ingestion.register_upload)
       -> Validate / Data Cleaning   (spark/preprocessing.clean_event)
       -> Retrieve Image             (Google Drive, or the local copy)
       -> Metadata Extraction: EXIF GPS location, capture time, camera
@@ -60,7 +62,7 @@ if os.name == "nt" and "HADOOP_HOME" not in os.environ:
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, concat, current_timestamp, from_json, initcap, lit, regexp_replace, to_timestamp, trim, when,
+    coalesce, col, concat, current_timestamp, from_json, initcap, lit, regexp_replace, to_timestamp, trim, when,
 )
 from pyspark.sql.types import StructType, StructField, StringType
 
@@ -76,21 +78,40 @@ from spark.preprocessing import (
 from storage.database import ProcessingStatus, init_db
 from storage.image_storage import is_drive_path
 from spark import live_log
+from spark.ingestion import register_upload
 
 CHECKPOINT_DIR = str(SPARK_CHECKPOINT_ROOT / KAFKA_TOPIC)
 
 EVENT_SCHEMA = StructType([
+    # "drive_upload": a new photo, from its Drive metadata (kafka/drive_watcher.
+    # build_drive_event) — spark/ingestion registers it. "submit" (or no kind,
+    # older events): a photo already in the database is sent again
+    # (storage/pipeline_submit.build_upload_event).
+    StructField("kind", StringType()),
     StructField("image_id", StringType()),
-    StructField("user_id", StringType()),
+    StructField("user_id", StringType()),         # submit only; ingestion resolves it for drive_upload
     StructField("location", StringType()),
     StructField("image_path", StringType()),
     StructField("drive_file_id", StringType()),   # Google Drive file id (None for legacy local images)
     StructField("captured_at", StringType()),
     StructField("uploaded_at", StringType()),
+    # drive_upload only: what the Drive watcher read from the file's metadata
+    StructField("file_name", StringType()),
+    StructField("mime_type", StringType()),
+    StructField("size_bytes", StringType()),
+    StructField("owner_email", StringType()),
+    StructField("owner_name", StringType()),
+    StructField("folder_email", StringType()),
+    StructField("original_filename", StringType()),
+    StructField("content_hash", StringType()),
+    StructField("device_gps_lat", StringType()),
+    StructField("device_gps_lon", StringType()),
     # Only on scalability-test events published here before the test got its
     # own topic (2026-10-10); _process_one skips them. Null for every upload.
     StructField("run_id", StringType()),
 ])
+
+DRIVE_UPLOAD = "drive_upload"
 
 
 def build_spark():
@@ -114,7 +135,8 @@ def build_spark():
 def parse_events(raw):
     """Kafka record value (JSON bytes) -> one typed row per upload event,
     then a genuine distributed-DataFrame cleaning stage (DIT manual 5.4):
-    check the required fields, validate captured_at as a real timestamp
+    check the required fields (owner_email for a drive_upload, user_id for
+    a submit event), validate captured_at as a real timestamp
     that is not in the future, and normalize location casing/whitespace.
     This runs as real Spark SQL transformations on the streaming DataFrame
     — NOT per-row Python — before foreachBatch's per-row CNN inference /
@@ -151,9 +173,15 @@ def parse_events(raw):
     def missing(field):
         return col(field).isNull() | (col(field) == "")
 
+    # A drive_upload names its uploader by Google account (ingestion resolves
+    # the user_id); a submit event already carries the user_id.
+    is_upload = coalesce(col("kind"), lit("")) == DRIVE_UPLOAD
     rejected_reason = when(lit(False), lit(None))
-    for field in ("image_id", "user_id", "image_path", "uploaded_at"):
+    for field in ("image_id", "image_path", "uploaded_at"):
         rejected_reason = rejected_reason.when(missing(field), lit(f"Missing required field: {field}"))
+    rejected_reason = (rejected_reason
+                       .when(is_upload & missing("owner_email"), lit("Missing required field: owner_email"))
+                       .when(~is_upload & missing("user_id"), lit("Missing required field: user_id")))
     rejected_reason = rejected_reason.when(
         to_timestamp(col("captured_at")) > current_timestamp(),
         concat(lit("captured_at is in the future: "), col("captured_at")),
@@ -235,6 +263,20 @@ def _process_one(event: dict):
     raw_value = event.pop("raw_value", None)
     if rejected_reason and not event.get("image_id"):
         event["raw_value"] = raw_value       # rejected_events.raw_event keeps what Kafka carried
+    if event.get("kind") == DRIVE_UPLOAD and not rejected_reason:
+        # A new photo from Drive: farmer, upload checks, duplicate skip and its
+        # first database row (spark/ingestion.py). A refused upload gets its
+        # row and fails below with the reason, like any invalid event.
+        try:
+            outcome = register_upload(event)
+        except InvalidEvent as e:
+            outcome, rejected_reason = "new", str(e)
+        if outcome != "new":
+            why = ("already registered" if outcome == "duplicate"
+                   else "its image_id belongs to another Drive file (see rejected_events)")
+            print(f"[streaming_job] {event.get('image_id')}: Drive file {event.get('drive_file_id')} "
+                  f"{why}, skipping")
+            return None
     state = replay_state(event.get("image_id"))      # one lookup instead of three
     if state == "held":
         # MANUAL mode holds this photo; an admin's Process sets it INGESTED

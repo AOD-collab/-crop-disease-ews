@@ -16,8 +16,8 @@ What it clears:
     folders and their sharing are kept so the app keeps working), plus a
     reset marker that makes each phone clear its saved history copy
   * the Drive watcher's bookmark (storage/drive_watcher_state.json): after
-    the restart every photo still in Drive is registered and processed
-    again, from its local copy (no new download)
+    the restart every photo still in Drive is published, registered by
+    Spark and processed again, from its local copy (no new download)
 
 What it never touches: the local copies of downloaded Drive photos under
 DOWNLOADED_PHOTOS_DIR (storage/downloaded_photos/), the review and training
@@ -224,7 +224,7 @@ def reset_preview() -> dict:
         "kept_files": {image_cache.CATEGORIES[c]: usage[c]["files"]
                        for c in ("original_cache", "review", "training", "scalability")},
         "kept_note": (f"After the reset, the {usage['original_cache']['files']} cached original photo(s) have no "
-                      "database record until the Drive watcher registers their Drive originals again; any that "
+                      "database record until Spark registers their Drive originals again; any that "
                       "stay unmatched show as potentially orphaned on the Image management page, where they "
                       "can be reviewed — they are never deleted automatically."),
     }
@@ -290,9 +290,10 @@ def factory_reset(clear_kafka: bool = False, clear_drive: bool = False,
 
 def _clear_watcher_bookmark() -> str:
     """Deletes the Drive watcher's bookmark, so that after the reset it
-    registers EVERY photo still in the farmers' Drive folders again (with its
+    publishes EVERY photo still in the farmers' Drive folders again (with its
     original upload time, location and phone GPS from Drive) and Spark
-    processes them from their local copies. Without this, only the photos
+    registers and processes them from their local copies (in MANUAL mode
+    they wait on Pending Review instead). Without this, only the photos
     in the watcher's 2-minute look-back window came back. With --drive the
     photos are gone from Drive, so nothing comes back."""
     from kafka import drive_watcher

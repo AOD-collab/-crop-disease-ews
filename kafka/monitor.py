@@ -52,8 +52,12 @@ def describe(value: bytes, partition: int, offset: int) -> str:
     except (ValueError, ImportError):
         pass
     source = "Drive file" if event.get("drive_file_id") else "local file"
-    return (f"p{partition} offset {offset}: photo {(event.get('image_id') or '?')[:8]} "
-            f"from {farmer_label(event.get('user_id'))} ({event.get('location') or 'no location'}), "
+    # A new upload names its farmer by Google account (Spark resolves the
+    # user_id); a re-sent photo already has its user_id.
+    farmer = event.get("owner_email") or farmer_label(event.get("user_id"))
+    kind = "new photo" if event.get("kind") == "drive_upload" else "photo sent again"
+    return (f"p{partition} offset {offset}: {kind} {(event.get('image_id') or '?')[:8]} "
+            f"from {farmer} ({event.get('location') or 'no location'}), "
             f"uploaded {uploaded}, {source} -> waiting for Spark")
 
 

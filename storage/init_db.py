@@ -15,10 +15,12 @@ from config.settings import (
 )
 from storage.database import init_db, SessionLocal, User, Role, UserStatus
 from storage.auth import hash_password
+from storage.processing_mode import migrate_from_database
 
 
 def run():
     init_db()
+    migrate_from_database()     # the processing mode's old system_settings row -> its file
     session = SessionLocal()
     try:
         existing = session.query(User).count()

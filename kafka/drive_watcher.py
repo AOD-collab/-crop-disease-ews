@@ -6,25 +6,26 @@ architecture). Runs on the laptop/server next to Kafka and Spark.
     THIS SCRIPT: follows the central account's Drive change feed (one
                  request per check, every 1 s while uploads arrive, up to
                  3 s when quiet) for new files in EVERY farmer's
-                 /images/<email>/ folder, registers each one in the database and
-                 publishes a Kafka event carrying the Drive file id +
-                 metadata (never the image bytes). A full folder search
-                 (scan_once) runs at start-up and every 10 minutes as a
-                 safety net.
+                 /images/<email>/ folder and publishes one Kafka event per
+                 photo, built from the file's Drive metadata (never the
+                 image bytes). A full folder search (scan_once) runs at
+                 start-up and every 10 minutes as a safety net.
     Kafka -> Spark (spark/streaming_job.py) -> Drive /results -> Android
 
 It is the system's only way in for photos: the phone never talks to a
 server of ours — only to Google Drive.
 
+Stateless: no database. The watcher only reads Drive and publishes. Spark's
+ingestion step (spark/ingestion.register_upload) resolves the farmer,
+checks the upload, skips duplicates and writes the first database row.
+In MANUAL mode (storage/processing_mode.json) nothing is published: the
+dashboard's Pending Review page lists the Drive photos that have no
+database row yet, and the administrator sends them.
+
 Trust model: the image_id / location / capture time come from the phone
 (Drive appProperties), but WHO uploaded the file comes from Google itself
 (the file's owner in Drive metadata), so one user can't upload in someone
-else's name. A new owner email becomes a normal USER account in the
-database automatically (the admin already approved them by sharing the
-/images folder — scripts/drive_share_user.py). An admin can still
-deactivate that account in the dashboard, and the watcher then rejects the
-account's uploads. A photo is also rejected unless it sits in its owner's
-own folder, so one farmer's upload can never be filed under another's.
+else's name; the event carries that owner and the folder the photo is in.
 
 Run:
     python -m kafka.drive_watcher           # loop forever (run_all.py starts it)
@@ -34,28 +35,18 @@ import argparse
 import json
 import os
 import re
-import secrets
 import sys
 import time
+from collections import OrderedDict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config.settings import (  # noqa: E402
-    BASE_DIR, KAFKA_TOPIC, MAX_IMAGE_SIZE, ALLOWED_IMAGE_CONTENT_TYPES,
-)
+from config.settings import BASE_DIR, KAFKA_TOPIC  # noqa: E402
 from storage import drive_client  # noqa: E402
-from storage.database import (  # noqa: E402
-    SessionLocal, init_db, Image, User, Role, UserStatus, ProcessingStatus, ProcessingMode,
-    RejectedEvent, get_processing_mode, now_utc,
-)
-from storage.pipeline_submit import submit_image_for_processing, UPLOAD_REJECTED_PREFIX  # noqa: E402
 from storage.image_storage import to_drive_path  # noqa: E402
-from storage.auth import hash_password, normalize_email  # noqa: E402
-# A refused upload never reaches Spark: its FAILED result is written to Drive
-# the way Spark writes one.
-from spark.preprocessing import publish_result_to_drive_safely  # noqa: E402
+from storage.processing_mode import ProcessingMode, get_processing_mode  # noqa: E402
 
 # Drive API quota: each check is ONE change-feed request (~100 units of the
 # 325,000/minute per-user limit), whatever the number of farmers.
@@ -66,10 +57,16 @@ FULL_SCAN_SECONDS = float(os.getenv("DRIVE_WATCH_FULL_SCAN_SECONDS", "600"))  # 
 STATE_FILE = Path(os.getenv("DRIVE_WATCHER_STATE_FILE", str(BASE_DIR / "storage" / "drive_watcher_state.json")))
 # Re-scan a small window before the last seen createdTime, so a file whose
 # listing appears slightly late in Drive's index is never missed. Files seen
-# twice are skipped by image_id, so the overlap is harmless.
+# twice are not published twice (_PUBLISHED below; Spark also skips them).
 OVERLAP = timedelta(minutes=2)
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+# Drive files this process already published: the change feed and the
+# safety-net scan can both report the same upload. Bounded; Spark's
+# ingestion step is the real duplicate check.
+_PUBLISHED: "OrderedDict[str, None]" = OrderedDict()
+_PUBLISHED_MAX = 20000
 
 
 def _device_gps(props: dict):
@@ -95,165 +92,73 @@ def _parse_time(value):
         return None
 
 
-def _get_or_create_user(session, email: str, display_name: str):
-    email = normalize_email(email)
-    user = session.query(User).filter(User.email == email).first()
-    if user is not None:
-        return user
-    user = User(
-        username=email,
-        full_name=display_name or email,
-        email=email,
-        # Drive users sign in with Google on the phone; this random password
-        # is never shown to anyone, so the account can't log in anywhere else.
-        password_hash=hash_password(secrets.token_urlsafe(32)),
-        role=Role.USER,
-        status=UserStatus.ACTIVE,
-        email_verified=True,  # verified by Google sign-in
-    )
-    session.add(user)
-    session.commit()
-    print(f"[drive_watcher] New user from Google Drive: {email}")
-    return user
-
-
-# Public name, used by the dashboard's "Register farmer" button so a farmer
-# shows up in Farmer Management before their first upload.
-get_or_create_farmer = _get_or_create_user
-
-
-def _publish_failure(image_id: str) -> None:
-    """Writes the FAILED result to Drive /results so the phone shows why."""
-    with SessionLocal() as s:
-        img = s.get(Image, image_id)
-        message = img.error_message if img else None
-    publish_result_to_drive_safely({"image_id": image_id}, ProcessingStatus.FAILED, message)
-
-
-def register_drive_file(meta: dict, backend=None, folder_email: str = None) -> dict:
-    """Registers ONE file found in a farmer's /images/<email>/ folder
-    (`folder_email` = that folder's email). Returns {"image_id", "status"}
-    where status is: registered | pending_review | failed | rejected |
-    already_registered. Never raises for a bad file."""
-    file_id = meta.get("id", "")
+def build_drive_event(meta: dict, folder_email: str = None) -> dict:
+    """The Kafka event for one Drive photo, from its Drive metadata alone
+    (kind "drive_upload"). Used by this watcher, the dashboard's Process
+    button and storage/requeue_stuck --from-drive, so all three publish the
+    same event. Every value is a string or None (spark/streaming_job's
+    EVENT_SCHEMA reads them as strings)."""
     props = meta.get("appProperties") or {}
-    image_id = props.get("image_id", "")
     owners = meta.get("owners") or []
-    owner_email = owners[0].get("emailAddress") if owners else None
-    owner_name = owners[0].get("displayName") if owners else None
+    owner = owners[0] if owners else {}
+    file_id = meta.get("id") or ""
+    captured_at = _parse_time(props.get("captured_at_client"))
+    gps = _device_gps(props)
+    return {
+        "kind": "drive_upload",
+        "image_id": props.get("image_id") or None,
+        "user_id": None,                                   # Spark resolves it from owner_email
+        "drive_file_id": file_id,
+        "image_path": to_drive_path(file_id),
+        "file_name": meta.get("name"),
+        "mime_type": meta.get("mimeType"),
+        "size_bytes": str(meta["size"]) if meta.get("size") is not None else None,
+        "owner_email": owner.get("emailAddress"),
+        "owner_name": owner.get("displayName"),
+        "folder_email": folder_email,
+        "uploaded_at": meta.get("createdTime"),            # Google's clock, not the phone's
+        "captured_at": captured_at.isoformat() if captured_at else None,
+        "location": props.get("location"),                 # as the phone sent it; Spark cleans it
+        "original_filename": props.get("original_filename") or meta.get("name"),
+        "content_hash": meta.get("sha256Checksum"),
+        "device_gps_lat": f"{gps[0]}" if gps else None,
+        "device_gps_lon": f"{gps[1]}" if gps else None,
+    }
 
-    session = SessionLocal()
+
+def publish_drive_file(meta: dict, backend=None, folder_email: str = None) -> dict:
+    """Publishes ONE file found in a farmer's /images/<email>/ folder
+    (`folder_email` = that folder's email). Returns {"image_id", "status"}
+    where status is: published | held (MANUAL mode) | already_published."""
+    file_id = meta.get("id", "")
+    image_id = (meta.get("appProperties") or {}).get("image_id") or None
+    if file_id in _PUBLISHED:
+        return {"image_id": image_id, "status": "already_published"}
+    if get_processing_mode() == ProcessingMode.MANUAL:
+        # Nothing is sent; the dashboard's Pending Review page lists it
+        # straight from Drive until the administrator presses Process.
+        return {"image_id": image_id, "status": "held"}
+    event = build_drive_event(meta, folder_email)
+    backend.send(event)
+    _PUBLISHED[file_id] = None
+    while len(_PUBLISHED) > _PUBLISHED_MAX:
+        _PUBLISHED.popitem(last=False)
+    print(f"[drive_watcher] new photo {(image_id or '?')[:8]} from {event['owner_email']} "
+          f"({event['location'] or 'no location'}) -> Kafka topic '{KAFKA_TOPIC}' (Drive file {file_id})")
+    return {"image_id": image_id, "status": "published"}
+
+
+def _publish_safely(meta: dict, backend, folder_email) -> dict:
+    """publish_drive_file for one file of a scan, never raising: one file
+    that can't be sent (Kafka down with the file fallback off) must not stop
+    the scan — the change feed's bookmark would never move otherwise. The
+    10-minute scan, or requeue_stuck --from-drive, sends it later."""
     try:
-        existing = session.get(Image, image_id) if image_id else None
-        if existing is not None:
-            if existing.image_path == to_drive_path(file_id):
-                return {"image_id": image_id, "status": "already_registered"}
-            reason = f"image_id {image_id} already belongs to another file"
-        elif not _UUID_RE.match(image_id or ""):
-            reason = "file has no valid image_id (not uploaded by the Android app)"
-        elif not owner_email:
-            reason = "could not determine the uploader's Google account"
-        else:
-            reason = None
-
-        if reason:
-            # No usable Image row can be made: keep a trace, but only once per file.
-            already = session.query(RejectedEvent).filter(RejectedEvent.raw_event.contains(file_id)).first()
-            if already is None:
-                session.add(RejectedEvent(image_id=image_id or None,
-                                          raw_event=json.dumps(meta, default=str), reason=reason))
-                session.commit()
-                print(f"[drive_watcher] Rejected Drive file {file_id}: {reason}")
-            return {"image_id": image_id or None, "status": "rejected"}
-
-        user = _get_or_create_user(session, owner_email, owner_name)
-
-        problems = []
-        if user.status != UserStatus.ACTIVE or getattr(user, "is_deleted", False):
-            problems.append("your account is not active — contact the administrator")
-        if folder_email is not None and normalize_email(folder_email) != normalize_email(owner_email):
-            problems.append("photo was not uploaded into your own folder")
-        if not (meta.get("name") or "").startswith(image_id):
-            problems.append("file name does not match its image_id")
-        if (meta.get("mimeType") or "").lower() not in ALLOWED_IMAGE_CONTENT_TYPES:
-            problems.append(f"unsupported image type {meta.get('mimeType')}")
-        size = int(meta.get("size") or 0)
-        if size <= 0:
-            problems.append("empty file")
-        elif size > MAX_IMAGE_SIZE:
-            problems.append(f"file exceeds max size of {MAX_IMAGE_SIZE} bytes")
-
-        captured_at = _parse_time(props.get("captured_at_client"))
-        uploaded_at = _parse_time(meta.get("createdTime")) or now_utc()  # Google's clock, not the phone's
-        content_hash = meta.get("sha256Checksum")
-        device_gps = _device_gps(props)
-
-        image = Image(
-            image_id=image_id,
-            location=props.get("location"),     # as the phone sent it; Spark cleans it
-            user_id=user.user_id,
-            original_filename=props.get("original_filename") or meta.get("name"),
-            image_path=to_drive_path(file_id),
-            source="android_drive_upload",
-            content_hash=content_hash,
-            captured_at=captured_at,
-            captured_at_source="client_trusted" if captured_at else None,
-            uploaded_at=uploaded_at,
-            gps_latitude=device_gps[0] if device_gps else None,
-            gps_longitude=device_gps[1] if device_gps else None,
-            gps_source="device" if device_gps else None,
-            status=ProcessingStatus.UPLOADED,
-        )
-        session.add(image)
-        session.commit()
-
-        if problems:
-            image.status = ProcessingStatus.FAILED
-            image.error_message = UPLOAD_REJECTED_PREFIX + "; ".join(problems)
-            session.commit()
-            print(f"[drive_watcher] {image_id} rejected: {image.error_message}")
-            session.close()
-            _publish_failure(image_id)
-            return {"image_id": image_id, "status": "failed"}
-
-        if get_processing_mode(session) == ProcessingMode.MANUAL:
-            image.status = ProcessingStatus.PENDING_REVIEW
-            session.commit()
-            print(f"[drive_watcher] {image_id} held for manual review")
-            return {"image_id": image_id, "status": "pending_review"}
-
-        try:
-            submit_image_for_processing(session, image, backend=backend)
-            print(f"[drive_watcher] new photo {image_id[:8]} from {owner_email} "
-                  f"({image.location or 'no location'}) -> Kafka topic '{KAFKA_TOPIC}' (Drive file {file_id})")
-            return {"image_id": image_id, "status": "registered"}
-        except Exception as e:  # submit_image_for_processing already marked it FAILED
-            print(f"[drive_watcher] {image_id} could not be published to Kafka: {e}")
-            return {"image_id": image_id, "status": "failed"}
-    finally:
-        session.close()
-
-
-def _register_safely(meta: dict, backend, folder_email) -> dict:
-    """register_drive_file for one file of a scan, never raising: a file that
-    can't be registered (e.g. its uploader's e-mail is already some other
-    account's username -> IntegrityError) is logged once as a RejectedEvent
-    and skipped. Before, the exception aborted the whole scan, so the change
-    feed's bookmark never moved and no farmer's photos got registered again."""
-    try:
-        return register_drive_file(meta, backend=backend, folder_email=folder_email)
+        return publish_drive_file(meta, backend=backend, folder_email=folder_email)
     except Exception as e:  # noqa: BLE001 - this file only
-        file_id = meta.get("id", "")
         image_id = (meta.get("appProperties") or {}).get("image_id") or None
-        reason = f"could not register: {type(e).__name__}: {str(e).splitlines()[0][:300]}"
-        print(f"[drive_watcher] Skipped Drive file {file_id}: {reason}")
-        try:
-            with SessionLocal() as s:
-                if s.query(RejectedEvent).filter(RejectedEvent.raw_event.contains(file_id)).first() is None:
-                    s.add(RejectedEvent(image_id=image_id, raw_event=json.dumps(meta, default=str), reason=reason))
-                    s.commit()
-        except Exception as log_error:  # noqa: BLE001 - e.g. the database itself is down
-            print(f"[drive_watcher] Could not record the skipped file {file_id}: {log_error}")
+        print(f"[drive_watcher] Could not publish Drive file {meta.get('id', '')}: "
+              f"{type(e).__name__}: {str(e).splitlines()[0][:300]}")
         return {"image_id": image_id, "status": "error"}
 
 
@@ -271,7 +176,7 @@ def _save_state(state: dict) -> None:
 
 def scan_once(backend=None) -> list:
     """Lists every farmer's /images/<email>/ folder for files created since
-    the last scan (minus a small overlap) and registers each new one.
+    the last scan (minus a small overlap) and publishes each new one.
     Returns the per-file outcomes."""
     state = _load_state()
     created_after = None
@@ -289,7 +194,7 @@ def scan_once(backend=None) -> list:
     outcomes = []
     for meta in files:
         parent = next((p for p in meta.get("parents") or [] if p in user_folders), None)
-        outcomes.append(_register_safely(meta, backend, user_folders.get(parent)))
+        outcomes.append(_publish_safely(meta, backend, user_folders.get(parent)))
 
     newest = max((f.get("createdTime") for f in files if f.get("createdTime")), default=None)
     if newest and (last is None or _parse_time(newest) > last):
@@ -305,7 +210,7 @@ class NoBookmark(RuntimeError):
 
 
 def scan_changes(user_folders: dict, backend=None) -> list:
-    """Registers the new photos in Drive's change feed since the saved
+    """Publishes the new photos in Drive's change feed since the saved
     bookmark: ONE request (up to 1000 changes) however many farmers there
     are, and no search-index delay, unlike scan_once(). `user_folders`
     ({folder id: email} of /images/<email>/) is updated in place when the
@@ -329,7 +234,7 @@ def scan_changes(user_folders: dict, backend=None) -> list:
         parent = next((p for p in parents if p in user_folders), None)
         if parent is None:                                   # our own results, other files
             continue
-        outcomes.append(_register_safely(meta, backend, user_folders[parent]))
+        outcomes.append(_publish_safely(meta, backend, user_folders[parent]))
     state["changes_page_token"] = new_token
     _save_state(state)
     return outcomes
@@ -362,7 +267,6 @@ def main() -> int:
     p.add_argument("--once", action="store_true", help="scan once and exit")
     args = p.parse_args()
 
-    init_db()
     from kafka.producer import get_backend
     backend = get_backend(KAFKA_TOPIC)
     if args.once:
@@ -390,20 +294,21 @@ def main() -> int:
             outcomes = scan_changes(user_folders, backend=backend)
             if time.monotonic() - last_full_scan >= FULL_SCAN_SECONDS:
                 # Safety net: the old folder search, rarely. Catches anything
-                # the change feed ever missed; already-registered files are skipped.
+                # the change feed ever missed; already-published files are skipped.
                 outcomes += scan_once(backend=backend)
                 last_full_scan = time.monotonic()
-            new = [o for o in outcomes if o["status"] != "already_registered"]
+            new = [o for o in outcomes if o["status"] == "published"]
             found_new = bool(new)
             if new:
-                print(f"[drive_watcher] {len(new)} new file(s): {new}")
+                print(f"[drive_watcher] {len(new)} new file(s) published")
         except drive_client.DriveNotConfigured as e:
             print(f"[drive_watcher] {e}")
             return 1
         except NoBookmark:
             # A factory reset removed the bookmark while we were running:
             # start over (new bookmark + full scan of every farmer's folder).
-            print("[drive_watcher] Bookmark gone (factory reset?) — registering every photo in Drive again")
+            print("[drive_watcher] Bookmark gone (factory reset?) — publishing every photo in Drive again")
+            _PUBLISHED.clear()
             user_folders, found_new = None, True
         except Exception as e:  # network hiccup etc. — keep watching
             print(f"[drive_watcher] scan failed, retrying: {e}")

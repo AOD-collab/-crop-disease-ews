@@ -40,6 +40,12 @@ Examples
     python -m storage.requeue_stuck --all --inline        # backfill everything now
     python -m storage.requeue_stuck --older-than 300        # re-publish rows stuck > 5 min
     python -m storage.requeue_stuck --all --include-failed  # also retry Kafka-publish failures
+    python -m storage.requeue_stuck --from-drive            # Drive photos Spark never registered
+
+The database only has a row for a photo Spark registered (spark/ingestion.py),
+so a photo whose drive_upload event never reached Spark is found by
+--from-drive (Drive minus database, storage/drive_inventory.py), not by the
+row-based modes above.
 """
 
 import argparse
@@ -220,6 +226,30 @@ def process_inline(images, dry_run: bool) -> int:
     return done
 
 
+def republish_from_drive(dry_run: bool) -> int:
+    """Photos in a farmer's Drive images/<email>/ folder that Spark never
+    registered (no `images` row): their Kafka event was lost, or they were
+    uploaded in MANUAL mode and not sent. Re-publishes the Drive watcher's
+    drive_upload event for each. Returns how many were sent."""
+    from kafka.config import KAFKA_TOPIC
+    from kafka.producer import get_backend
+    from storage import drive_inventory
+    with SessionLocal() as session:
+        photos = drive_inventory.unprocessed_photos(session)
+    if not photos:
+        print("Every photo in the farmers' Drive folders is registered. Nothing to do.")
+        return 0
+    print(f"Found {len(photos)} photo(s) in Google Drive with no database row:")
+    for meta, folder_email in photos:
+        print(f"  {(meta.get('appProperties') or {}).get('image_id')}  ({folder_email})")
+    if dry_run:
+        return 0
+    sent, failed = drive_inventory.send_for_processing(photos, get_backend(KAFKA_TOPIC))
+    print(f"\nPublished {sent} drive_upload event(s) to Kafka topic '{KAFKA_TOPIC}'"
+          + (f", {failed} failed." if failed else "."))
+    return sent
+
+
 def main() -> int:
     p = argparse.ArgumentParser(
         description=__doc__,
@@ -235,8 +265,14 @@ def main() -> int:
                    help="process now via spark.preprocessing instead of re-publishing to Kafka")
     p.add_argument("--dry-run", action="store_true",
                    help="list what would be done and exit")
+    p.add_argument("--from-drive", action="store_true",
+                   help="re-publish the Drive photos that have no database row (lost events / MANUAL mode)")
     args = p.parse_args()
     init_db()
+
+    if args.from_drive:
+        republish_from_drive(args.dry_run)
+        return 0
 
     with SessionLocal() as session:
         stuck = find_stuck(session, args.older_than, args.include_failed, args.all)

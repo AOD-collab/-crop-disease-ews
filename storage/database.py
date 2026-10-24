@@ -279,10 +279,10 @@ class RejectedEvent(Base):
 
 
 # ----------------------------------------------------------------------
-# system_settings — tiny key/value store for runtime-toggleable settings
-# that must be shared across separate processes (the Streamlit dashboard
-# and the Drive watcher run independently). Currently holds only the
-# image-processing mode.
+# system_settings — tiny key/value store for runtime-toggleable settings.
+# It held the image-processing mode until that moved to
+# storage/processing_mode.json (the Drive watcher reads it without a
+# database); processing_mode.migrate_from_database() copies the old value.
 # ----------------------------------------------------------------------
 class SystemSetting(Base):
     __tablename__ = "system_settings"
@@ -502,41 +502,9 @@ ANALYTICS_TABLES = (
 )
 
 
-class ProcessingMode(str, enum.Enum):
-    # AUTOMATIC: the original, unchanged behaviour — an upload is published
-    # to Kafka the moment it is stored and Spark processes it immediately.
-    AUTOMATIC = "AUTOMATIC"
-    # MANUAL: an upload is stored and held at ProcessingStatus.PENDING_REVIEW.
-    # Nothing is published until an admin clicks "Process".
-    MANUAL = "MANUAL"
-
-
-PROCESSING_MODE_KEY = "processing_mode"
-
-
-def get_processing_mode(session) -> ProcessingMode:
-    """Current image-processing mode. Defaults to AUTOMATIC when unset so a
-    database that predates this feature behaves exactly as before."""
-    row = session.get(SystemSetting, PROCESSING_MODE_KEY)
-    if row is None:
-        return ProcessingMode.AUTOMATIC
-    try:
-        return ProcessingMode(row.value)
-    except ValueError:
-        return ProcessingMode.AUTOMATIC
-
-
-def set_processing_mode(session, mode) -> ProcessingMode:
-    """Persist the processing mode. Accepts a ProcessingMode or its string
-    value; raises ValueError for anything else. Commits on `session`."""
-    mode = ProcessingMode(mode)
-    row = session.get(SystemSetting, PROCESSING_MODE_KEY)
-    if row is None:
-        session.add(SystemSetting(key=PROCESSING_MODE_KEY, value=mode.value))
-    else:
-        row.value = mode.value
-    session.commit()
-    return mode
+# The image-processing mode lives in storage/processing_mode.json
+# (storage/processing_mode.py), so the Drive watcher needs no database.
+from storage.processing_mode import ProcessingMode  # noqa: E402,F401 - re-exported
 
 
 # ----------------------------------------------------------------------

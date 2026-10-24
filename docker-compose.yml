@@ -21,7 +21,10 @@ services:
     container_name: crop-disease-ews-kafka
     restart: unless-stopped
     ports:
-      - "9092:9092"
+      # Bound to localhost only, like PostgreSQL: Spark registers a new photo
+      # under the Google account its Kafka event names, so nobody else on the
+      # same network may publish to the topic.
+      - "127.0.0.1:9092:9092"
     environment:
       # Single-node KRaft mode (no separate Zookeeper container needed).
       KAFKA_NODE_ID: 1

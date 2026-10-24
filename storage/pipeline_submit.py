@@ -1,16 +1,12 @@
 """
-The single "submit an uploaded image into the streaming pipeline" step.
+Sending a photo that is ALREADY in the database into the streaming pipeline
+again: the dashboard's Reprocess / Retry of a FAILED photo and
+storage/requeue_stuck. It publishes a "submit" event to Kafka and marks the
+row INGESTED.
 
-In AUTOMATIC mode the Drive watcher (kafka/drive_watcher.py) calls
-`submit_image_for_processing()` the moment it registers a new photo, which
-publishes the upload event to Kafka and marks the row INGESTED. MANUAL mode
-stores the image at ProcessingStatus.PENDING_REVIEW and does nothing else
-until an admin clicks "Process" on the dashboard — which calls it too.
-
-Either way the event that lands on the `maize-disease-images` topic, and
-everything downstream of it (spark/streaming_job.py), is identical. This is
-factored out so the manual path runs exactly the automatic path's step
-without duplicating it.
+New photos don't come through here: the Drive watcher (and the dashboard's
+Pending Review in MANUAL mode) publish a "drive_upload" event built from
+the file's Drive metadata, and Spark creates the row (spark/ingestion.py).
 """
 
 from storage.database import ProcessingStatus, now_utc
@@ -27,6 +23,10 @@ def build_upload_event(image) -> dict:
     this reference + metadata, never the image bytes. drive_file_id is None
     for legacy local-disk images."""
     return {
+        # A photo already in the database, sent again (Process of a FAILED
+        # row's Reprocess/Retry, requeue_stuck). New photos come from Drive as
+        # "drive_upload" events (kafka/drive_watcher.build_drive_event).
+        "kind": "submit",
         "image_id": image.image_id,
         "user_id": image.user_id,
         "location": image.location,
@@ -37,8 +37,9 @@ def build_upload_event(image) -> dict:
     }
 
 
-# error_message prefix kafka/drive_watcher.register_drive_file gives an upload
-# it refused (inactive account, not the farmer's own folder, wrong type/size).
+# error_message prefix Spark's ingestion step (spark/ingestion.register_upload)
+# gives an upload it refused (inactive account, not the farmer's own folder,
+# wrong name/type/size).
 UPLOAD_REJECTED_PREFIX = "Upload rejected: "
 
 

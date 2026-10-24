@@ -242,12 +242,12 @@ def _clean_drive_event(event: dict) -> dict:
     if event.get("drive_file_id") and event["drive_file_id"] != file_id:
         raise InvalidEvent("drive_file_id does not match image_path")
     event["drive_file_id"] = file_id
-    if not SPARK_RECHECK_DRIVE_FILE and _registered_by_watcher(event):
-        # The Drive watcher checked this very file moments ago (owner, own
-        # folder, image_id tag, name, type, size) and recorded it under this
-        # image_id. Asking Drive again cost 0.5 s per photo, and up to 2 min
-        # when Google throttled a large batch. If the file has gone since, the
-        # download fails and the photo is marked FAILED.
+    if not SPARK_RECHECK_DRIVE_FILE and _registered_from_drive(event):
+        # spark/ingestion checked this very file moments ago from its Drive
+        # metadata (owner, own folder, image_id tag, name, type, size) and
+        # recorded it under this image_id. Asking Drive again cost 0.5 s per
+        # photo, and up to 2 min when Google throttled a large batch. If the
+        # file has gone since, the download fails and the photo is marked FAILED.
         return event
     try:
         meta = drive_client.get_file_metadata(file_id)
@@ -262,11 +262,11 @@ def _clean_drive_event(event: dict) -> dict:
     return event
 
 
-def _registered_by_watcher(event: dict) -> bool:
-    """True when the database has this image_id as a Drive upload the
-    watcher registered for exactly this Drive file, by this user. The event
-    alone is never trusted: an event naming any other file gets the full
-    Drive check."""
+def _registered_from_drive(event: dict) -> bool:
+    """True when the database has this image_id as a Drive upload registered
+    (spark/ingestion.register_upload, from the file's Drive metadata) for
+    exactly this Drive file, by this user. An event naming any other file
+    gets the full Drive check."""
     session = SessionLocal()
     try:
         image = session.get(Image, event["image_id"])
