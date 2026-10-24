@@ -71,19 +71,19 @@ Android (Kotlin) code, `ml/inference.py`, `storage/exif_utils.py` and `ml/render
 ```mermaid
 flowchart TD
     A[Android app<br/>DriveUploader.kt] -- "multipart upload<br/>+ appProperties" --> D1[(Google Drive<br/>images/&lt;email&gt;/)]
-    D1 -- "changes feed<br/>(list_changes)" --> W[kafka/drive_watcher.py<br/>register_drive_file]
-    W -- "INSERT images<br/>status UPLOADED" --> DB[(PostgreSQL)]
-    W -- "submit_image_for_processing<br/>status INGESTED" --> P[kafka/producer.py<br/>ResilientBackend.send]
+    D1 -- "changes feed<br/>(list_changes)" --> W[kafka/drive_watcher.py<br/>publish_drive_file<br/>no database]
+    W -- "drive_upload event<br/>(AUTOMATIC mode only)" --> P[kafka/producer.py<br/>ResilientBackend.send]
     P -- "JSON event" --> K[[Kafka topic<br/>maize-disease-images]]
     P -. "broker down" .-> Q[(storage/local_queue/<br/>maize-disease-images.jsonl)]
     Q -. "drain() when broker back" .-> K
     K -- "readStream.format('kafka')" --> S[spark/streaming_job.py<br/>parse_events → foreach_batch_sink]
+    S -- "kind drive_upload:<br/>register_upload → row INGESTED" --> DB[(PostgreSQL)]
     S -- "_process_one → process_event" --> PRE[spark/preprocessing.py]
     PRE -- "download_file" --> D1
     PRE -- "predictions, processing_events,<br/>status COMPLETED/FAILED" --> DB
     PRE -- "publish_result_to_drive<br/>&lt;id&gt;.json + &lt;id&gt;_processed.jpg" --> D2[(Google Drive<br/>results/&lt;email&gt;/)]
     D2 -- "findResults / appProperties" --> A
-    DASH[dashboard/app.py<br/>Process / Reprocess] -- "submit_image_for_processing" --> P
+    DASH[dashboard/app.py<br/>Pending Review Process / Reprocess] -- "drive_upload / submit event" --> P
 ```
 
 The phone never talks to a server of this project. It only talks to Google Drive. Everything on the right of Drive runs on the laptop.
@@ -528,7 +528,7 @@ def download_file(file_id: str) -> bytes:
 - **Callers:** `get_file_metadata` is called by `spark/preprocessing._clean_drive_event`, only when `SPARK_RECHECK_DRIVE_FILE=true` or when the event was not registered by the watcher. `download_file` is called by `storage/image_storage.load_image_bytes`, which Spark runs in the `_DOWNLOADS` thread pool.
 - **Failure behaviour:** 404 (file deleted) becomes `DriveError(status_code=404)`, and `load_image_bytes` re-raises it as `FileNotFoundError`. An invalid id raises `DriveError(400)` before any network call.
 
-### I.3.10 `find_file_in_folder` — lines 228–248
+### I.3.10 `find_file_in_folder` — lines 242–262
 
 ```python
 def find_file_in_folder(name: str, parent_id: str) -> Optional[dict]:
@@ -560,7 +560,7 @@ def find_file_in_folder(name: str, parent_id: str) -> Optional[dict]:
 - **Note:** this uses `_request`, not `_get_with_retry`, so rate limits are retried but a network drop is not retried *here*. The upload retry loop in `upload_bytes` covers it when this is called from there.
 - **Concept, search-index delay:** `files.list` with `q` uses Drive's search index, which can lag behind a write by a few seconds. That is one reason the watcher prefers the **changes feed** (I.3.17).
 
-### I.3.11 `_multipart_body` — lines 251–260
+### I.3.11 `_multipart_body` — lines 265–274
 
 ```python
 def _multipart_body(metadata: dict, payload: bytes, mime_type: str = "application/json"):
@@ -584,7 +584,7 @@ def _multipart_body(metadata: dict, payload: bytes, mime_type: str = "applicatio
   - The return value is the body plus the `Content-Type` header value that announces the boundary.
 - **Concept:** `multipart/related` is the MIME type Drive expects for `uploadType=multipart`. Drive recommends it for files under 5 MB, which covers the result JSON and the 600 px processed JPEG.
 
-### I.3.12 `_short_app_properties` — lines 263–274
+### I.3.12 `_short_app_properties` — lines 277–288
 
 ```python
 def _short_app_properties(app_properties: dict) -> dict:
@@ -604,7 +604,7 @@ def _short_app_properties(app_properties: dict) -> dict:
 - **Example:** `error_message` is already cut to 80 characters by the caller. A long location such as `"Baucau, Venilale, Uma Ana Ulu, near the school…"` is trimmed until `len("location" + value) <= 124`.
 - **Academic explanation:** "A cosmetic field must never be able to make the delivery of a diagnosis fail, so values are shortened to fit the documented limit."
 
-### I.3.13 `upload_bytes` — retry wrapper (lines 277–300)
+### I.3.13 `upload_bytes` — retry wrapper (lines 291–314)
 
 ```python
 def upload_bytes(name: str, payload: bytes, mime_type: str, parent_id: str, app_properties: dict,
@@ -632,7 +632,7 @@ def upload_bytes(name: str, payload: bytes, mime_type: str, parent_id: str, app_
 - **Concept, idempotent write:** an operation that can safely be repeated. A POST create is not idempotent. Turning "retry a create" into "search, then PATCH if found" makes it idempotent in practice.
 - **Failure behaviour:** HTTP errors from `_check` (`DriveError`) are **not** retried here; they go to the caller. Network errors are retried 3 times and then raised. In Spark the caller is `publish_result_to_drive_safely`, which catches everything and logs.
 
-### I.3.14 `_upload_once` and `upload_json` — lines 303–336
+### I.3.14 `_upload_once` and `upload_json` — lines 317–350
 
 ```python
 def _upload_once(name, payload, mime_type, parent_id, app_properties, may_exist, existing_id=None):
@@ -676,7 +676,7 @@ def upload_json(name: str, data: dict, parent_id: str, app_properties: dict, may
 - **Example:** the first result for photo `3f2a…` POSTs `3f2a….json` into `results/maria…/`. A Reprocess of the same photo later PATCHes the same file id, so the phone sees the result update in place.
 - **Academic explanation:** "Writes are upserts keyed on (folder, file name). Combined with the database's delete-then-insert of the prediction, re-processing an image gives exactly one result in both places."
 
-### I.3.15 Change feed: `get_start_page_token` and `list_changes` — lines 339–365
+### I.3.15 Change feed: `get_start_page_token` and `list_changes` — lines 353–379
 
 ```python
 def get_start_page_token() -> str:
@@ -714,7 +714,7 @@ def list_changes(page_token: str) -> tuple:
 - **Concept, cursor-based polling:** the client keeps a cursor and asks only for "what's new since the cursor". The cost is the same whether there are 5 farmers or 5,000.
 - **Academic explanation:** "Detection uses Drive's change log. Each poll is one request no matter how many farmers there are, and it does not depend on the search index, which can lag behind recent writes."
 
-### I.3.16 Folder listing: `list_subfolders` and `list_files_in_folders` — lines 368–410
+### I.3.16 Folder listing: `list_subfolders` and `list_files_in_folders` — lines 382–424
 
 ```python
 def list_subfolders(parent_id: str) -> list:
@@ -768,7 +768,7 @@ def list_files_in_folders(parent_ids: list, created_after: Optional[str] = None)
 - **Callers:** `kafka/drive_watcher.scan_once` (the safety-net scan), `_ResultFolderIndex._index` (to list a results folder once), and `storage/reset.clear_drive_files`.
 - **Academic explanation:** "The folder search is the fallback detection path. It is batched (20 folders per query) and paged (100 files per page) so it scales with the number of farmers and files."
 
-### I.3.17 Per-farmer folders: `user_folder_id` and `_find_or_create_user_folder` — lines 413–452
+### I.3.17 Per-farmer folders: `user_folder_id` and `_find_or_create_user_folder` — lines 427–466
 
 ```python
 USER_IMAGES_KIND = "user_images"
@@ -814,7 +814,7 @@ def _find_or_create_user_folder(email, kind, key, create, share_role):
 - **Failure behaviour:** Drive errors raise `DriveError` to the caller (Spark's `publish_result_to_drive_safely` logs it). If the folder is deleted in Drive while the process is running, the cached id is stale and uploads fail with 404 until the process restarts. This is a limitation.
 - **Academic explanation:** "Each farmer gets a private folder pair. Creating it is serialised with a lock and cached, so concurrent Spark threads neither duplicate folders nor repeat look-ups."
 
-### I.3.18 `register_farmer`, `share_with`, `ensure_folder`, `account_info` — lines 455–532
+### I.3.18 `register_farmer`, `share_with`, `ensure_folder`, `account_info` — lines 469–546
 
 ```python
 def register_farmer(email: str) -> dict:
@@ -1002,55 +1002,112 @@ def store_downloaded_photo(user_id: str, image_id: str, original_bytes: bytes) -
 
 ---
 
-## I.7 Upload detection and registration — `kafka/drive_watcher.py`
+## I.7 Upload detection — `kafka/drive_watcher.py`
 
 This process is the **bridge from Google Drive into Kafka**. It is started by `run_all.py` in its own console window `EWS-DriveWatcher` with `python -m kafka.drive_watcher`.
 
-### I.7.1 Imports and tuning constants — lines 33–72
+Since commit `3577409` the watcher is **stateless**: it has no database connection. It reads Drive and publishes one `drive_upload` event per new photo, built from the file's Drive metadata. Everything that needs the database (the farmer's account, the upload checks, the duplicate skip, the first `images` row) happens in Spark's ingestion step, `spark/ingestion.register_upload` (III.1.9). In MANUAL mode the watcher publishes nothing; the photos wait in Drive and the dashboard lists them (I.7.11).
+
+### I.7.1 The module docstring — lines 1–33
 
 ```python
+"""
+Google Drive -> Kafka producer (the "Drive -> Kafka" link of the
+architecture). Runs on the laptop/server next to Kafka and Spark.
+
+    Android --upload--> Drive /images/<email>/<image_id>.jpg  (the farmer's own folder)
+    THIS SCRIPT: follows the central account's Drive change feed (one
+                 request per check, every 1 s while uploads arrive, up to
+                 3 s when quiet) for new files in EVERY farmer's
+                 /images/<email>/ folder and publishes one Kafka event per
+                 photo, built from the file's Drive metadata (never the
+                 image bytes). A full folder search (scan_once) runs at
+                 start-up and every 10 minutes as a safety net.
+    Kafka -> Spark (spark/streaming_job.py) -> Drive /results -> Android
+
+It is the system's only way in for photos: the phone never talks to a
+server of ours — only to Google Drive.
+
+Stateless: no database. The watcher only reads Drive and publishes. Spark's
+ingestion step (spark/ingestion.register_upload) resolves the farmer,
+checks the upload, skips duplicates and writes the first database row.
+In MANUAL mode (storage/processing_mode.json) nothing is published: the
+dashboard's Pending Review page lists the Drive photos that have no
+database row yet, and the administrator sends them.
+
+Trust model: the image_id / location / capture time come from the phone
+(Drive appProperties), but WHO uploaded the file comes from Google itself
+(the file's owner in Drive metadata), so one user can't upload in someone
+else's name; the event carries that owner and the folder the photo is in.
+
+Run:
+    python -m kafka.drive_watcher           # loop forever (run_all.py starts it)
+    python -m kafka.drive_watcher --once    # one scan, then exit
+"""
+```
+
+- **Purpose:** the docstring states the design in four parts: the data flow (lines 5–13), "the system's only way in for photos" (lines 15–16), **stateless, no database** (lines 18–23) and the trust model (lines 25–28).
+- **Trust model:** `image_id`, location and capture time come from the phone (`appProperties`), but **who** uploaded the file comes from Google (the Drive file's `owners`). The event carries that owner and the folder the file is in, so Spark can refuse a photo placed in someone else's folder.
+- **Academic explanation:** "The watcher is a thin, stateless producer: Drive change → Kafka event. Validation and persistence are centralised in the consumer, so there is one place that decides what becomes a database row."
+
+### I.7.2 Imports and tuning constants — lines 34–69
+
+```python
+import argparse
+import json
+import os
+import re
+import sys
+import time
+from collections import OrderedDict
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config.settings import (  # noqa: E402
-    BASE_DIR, KAFKA_TOPIC, MAX_IMAGE_SIZE, ALLOWED_IMAGE_CONTENT_TYPES,
-)
+from config.settings import BASE_DIR, KAFKA_TOPIC  # noqa: E402
 from storage import drive_client  # noqa: E402
-from storage.database import (  # noqa: E402
-    SessionLocal, init_db, Image, User, Role, UserStatus, ProcessingStatus, ProcessingMode,
-    RejectedEvent, get_processing_mode, now_utc,
-)
-from storage.pipeline_submit import submit_image_for_processing, UPLOAD_REJECTED_PREFIX  # noqa: E402
 from storage.image_storage import to_drive_path  # noqa: E402
-from storage.auth import hash_password, normalize_email  # noqa: E402
-# A refused upload never reaches Spark: its FAILED result is written to Drive
-# the way Spark writes one.
-from spark.preprocessing import publish_result_to_drive_safely  # noqa: E402
+from storage.processing_mode import ProcessingMode, get_processing_mode  # noqa: E402
 
+# Drive API quota: each check is ONE change-feed request (~100 units of the
+# 325,000/minute per-user limit), whatever the number of farmers.
+# At 1 s that is ~6,000 units/minute, under 2% of the limit.
 POLL_SECONDS = float(os.getenv("DRIVE_WATCH_INTERVAL_SECONDS", "1"))        # while uploads arrive
 IDLE_POLL_SECONDS = float(os.getenv("DRIVE_WATCH_IDLE_SECONDS", "3"))       # slowest, when quiet
 FULL_SCAN_SECONDS = float(os.getenv("DRIVE_WATCH_FULL_SCAN_SECONDS", "600"))  # safety-net folder search
 STATE_FILE = Path(os.getenv("DRIVE_WATCHER_STATE_FILE", str(BASE_DIR / "storage" / "drive_watcher_state.json")))
+# Re-scan a small window before the last seen createdTime, so a file whose
+# listing appears slightly late in Drive's index is never missed. Files seen
+# twice are not published twice (_PUBLISHED below; Spark also skips them).
 OVERLAP = timedelta(minutes=2)
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+# Drive files this process already published: the change feed and the
+# safety-net scan can both report the same upload. Bounded; Spark's
+# ingestion step is the real duplicate check.
+_PUBLISHED: "OrderedDict[str, None]" = OrderedDict()
+_PUBLISHED_MAX = 20000
 ```
 
-- `sys.path.insert(0, project root)` lets `python kafka/drive_watcher.py` also find the `config`, `storage` and `spark` packages. `# noqa: E402` silences the linter warning about imports placed after code.
+- `sys.path.insert(0, project root)` lets `python kafka/drive_watcher.py` also find the `config` and `storage` packages. `# noqa: E402` silences the linter warning about imports placed after code.
+- **No database import.** Lines 46–49 import only the settings, the Drive client, `to_drive_path` and `get_processing_mode`. The deep test of 2026-10-24 checked that importing the watcher does not load `storage.database`.
 - **Name-collision note:** the project's own package is called `kafka/`. That is why the producer uses `confluent_kafka` and not `kafka-python`, whose import name `kafka` would clash (explained in `kafka/producer.py`).
-- **Timing constants:**
-  - `POLL_SECONDS = 1`: the poll interval while uploads are arriving.
-  - `IDLE_POLL_SECONDS = 3`: the slowest interval when it is quiet.
-  - `FULL_SCAN_SECONDS = 600`: the safety-net folder search every 10 minutes.
-  - The module docstring (lines 7–8) gives the same 1 s / 3 s.
-- `publish_result_to_drive_safely` is imported at the top: the watcher writes the FAILED result of a refused upload to Drive with the very function Spark uses (I.7.4, I.8.4). Importing `spark.preprocessing` does **not** load torch: `ml.inference` imports torch only inside its functions.
-- `STATE_FILE`, `storage/drive_watcher_state.json`, holds two bookmarks: `changes_page_token` (for the change feed) and `last_created_time` (for the folder scan).
-- `OVERLAP = 2 minutes`: the folder scan looks 2 minutes further back than the last file it saw, to allow for search-index delay. Files seen twice are skipped by `image_id`.
-- `_UUID_RE` accepts only a lower-case UUID. A file **not** uploaded by the app has no valid `image_id` and is rejected.
+- **Timing constants:** `POLL_SECONDS = 1` while uploads arrive, `IDLE_POLL_SECONDS = 3` when quiet, `FULL_SCAN_SECONDS = 600` for the safety-net folder search. Lines 51–53: one change-feed request costs about 100 of Google's 325,000 quota units per minute; at 1 s that is under 2 % of the limit.
+- `STATE_FILE`, `storage/drive_watcher_state.json`, holds two bookmarks: `changes_page_token` (change feed) and `last_created_time` (folder scan). It is the watcher's **only** state.
+- `OVERLAP = 2 minutes`: the folder scan looks 2 minutes further back than the last file it saw, to allow for search-index delay.
+- `_UUID_RE` accepts only a lower-case UUID, the app's `image_id` format. `spark/ingestion` and `storage/drive_inventory` reuse this one rule.
+- `_PUBLISHED` (lines 65–69): an `OrderedDict` of Drive file ids this process already published, bounded at 20,000 (oldest dropped first). The change feed and the 10-minute scan can both report the same upload; this stops the second send. It is **not** the real duplicate check: if a file is sent twice anyway (after a restart, say), Spark's `register_upload` returns `"duplicate"` and skips it.
 
-### I.7.2 Small helpers — lines 75–95
+### I.7.3 Small helpers: `_device_gps` and `_parse_time` — lines 72–92
 
 ```python
 def _device_gps(props: dict):
+    """(lat, lon) the Android app attached for a photo taken with its camera
+    (appProperties gps_lat / gps_lon), or None if absent or not a real
+    coordinate. Client-supplied, so only range-checked and used when the
+    photo has no GPS tags of its own (see spark/preprocessing.extract_metadata)."""
     try:
         lat, lon = float(props["gps_lat"]), float(props["gps_lon"])
     except (KeyError, TypeError, ValueError):
@@ -1069,284 +1126,110 @@ def _parse_time(value):
         return None
 ```
 
-- There is no location helper any more: the watcher stores the location **as the phone sent it**, and Spark cleans it (III.1.4, III.2.3). One rule in one place, so a place is always grouped the same way.
-- `_device_gps`: the phone's GPS comes from the client and is untrusted, so it is parsed defensively. `KeyError` means the property is missing, `TypeError` means it is `None`, `ValueError` means it isn't a number. Out-of-range values and `(0, 0)` ("Null Island", a typical "no fix" value) are rejected.
-- `_parse_time`: before Python 3.11, `datetime.fromisoformat` did not accept a trailing `Z`, so `Z` is replaced by `+00:00`. Bad input returns `None` (not an exception), because a bad timestamp must not reject the photo.
+- `_device_gps` reads the GPS position the app attached (`appProperties.gps_lat`/`gps_lon`). It is client-supplied, so it is only range-checked; `(0, 0)` and out-of-range values become `None`. Spark uses it only when the photo has no GPS tags of its own (III.2.10).
+- `_parse_time` parses an ISO-8601 time, turning Drive's trailing `Z` into `+00:00`; anything unreadable is `None`. A bad phone time therefore never blocks a photo. Spark's ingestion step imports this same function.
 
-### I.7.3 `_get_or_create_user` — lines 98–122
-
-```python
-def _get_or_create_user(session, email: str, display_name: str):
-    email = normalize_email(email)
-    user = session.query(User).filter(User.email == email).first()
-    if user is not None:
-        return user
-    user = User(
-        username=email,
-        full_name=display_name or email,
-        email=email,
-        password_hash=hash_password(secrets.token_urlsafe(32)),
-        role=Role.USER,
-        status=UserStatus.ACTIVE,
-        email_verified=True,  # verified by Google sign-in
-    )
-    session.add(user)
-    session.commit()
-    print(f"[drive_watcher] New user from Google Drive: {email}")
-    return user
-
-get_or_create_farmer = _get_or_create_user
-```
-
-- **Purpose:** the first upload from a Google account creates its database user automatically. The admin already approved that farmer by sharing a folder with them.
-- **Line by line:**
-  - `normalize_email` lower-cases and trims.
-  - A `SELECT … WHERE email = ? LIMIT 1` looks for an existing user.
-  - `password_hash=hash_password(secrets.token_urlsafe(32))` stores a hash of a random 256-bit password that is never shown to anyone, so the account cannot be used to log in to the dashboard.
-  - `email_verified=True`: Google has already verified the identity.
-  - `get_or_create_farmer` is a public alias used by the dashboard.
-- **Failure behaviour:** if the email already exists as another account's `username`, a unique constraint fails with `IntegrityError` on `commit()`. It propagates to `_register_safely` (I.7.7), which logs a `RejectedEvent`.
-
-### I.7.4 `_publish_failure` — lines 125–130
+### I.7.4 `build_drive_event` — the `drive_upload` event (lines 95–126)
 
 ```python
-def _publish_failure(image_id: str) -> None:
-    """Writes the FAILED result to Drive /results so the phone shows why."""
-    with SessionLocal() as s:
-        img = s.get(Image, image_id)
-        message = img.error_message if img else None
-    publish_result_to_drive_safely({"image_id": image_id}, ProcessingStatus.FAILED, message)
-```
-
-- `_publish_failure`: when an upload is refused at the door (inactive account, wrong folder, wrong type), the farmer still gets a FAILED result file in Drive explaining why, written by Spark's own `publish_result_to_drive_safely` (I.8.4).
-- The watcher has **no** duplicate check of its own. An earlier `_find_duplicate` only printed a line; it was removed. The duplicate rule is Spark's `check_duplicate_by_hash` (III.2.6), which compares per farmer and uses the `content_hash` the watcher stores.
-
-### I.7.5 `register_drive_file` — the core of ingestion (lines 133–234)
-
-This is the most important Drive-side function. It is split into sections.
-
-#### Section A — read the Drive metadata (lines 138–145)
-
-```python
-    file_id = meta.get("id", "")
+def build_drive_event(meta: dict, folder_email: str = None) -> dict:
+    """The Kafka event for one Drive photo, from its Drive metadata alone
+    (kind "drive_upload"). Used by this watcher, the dashboard's Process
+    button and storage/requeue_stuck --from-drive, so all three publish the
+    same event. Every value is a string or None (spark/streaming_job's
+    EVENT_SCHEMA reads them as strings)."""
     props = meta.get("appProperties") or {}
-    image_id = props.get("image_id", "")
     owners = meta.get("owners") or []
-    owner_email = owners[0].get("emailAddress") if owners else None
-    owner_name = owners[0].get("displayName") if owners else None
-
-    session = SessionLocal()
+    owner = owners[0] if owners else {}
+    file_id = meta.get("id") or ""
+    captured_at = _parse_time(props.get("captured_at_client"))
+    gps = _device_gps(props)
+    return {
+        "kind": "drive_upload",
+        "image_id": props.get("image_id") or None,
+        "user_id": None,                                   # Spark resolves it from owner_email
+        "drive_file_id": file_id,
+        "image_path": to_drive_path(file_id),
+        "file_name": meta.get("name"),
+        "mime_type": meta.get("mimeType"),
+        "size_bytes": str(meta["size"]) if meta.get("size") is not None else None,
+        "owner_email": owner.get("emailAddress"),
+        "owner_name": owner.get("displayName"),
+        "folder_email": folder_email,
+        "uploaded_at": meta.get("createdTime"),            # Google's clock, not the phone's
+        "captured_at": captured_at.isoformat() if captured_at else None,
+        "location": props.get("location"),                 # as the phone sent it; Spark cleans it
+        "original_filename": props.get("original_filename") or meta.get("name"),
+        "content_hash": meta.get("sha256Checksum"),
+        "device_gps_lat": f"{gps[0]}" if gps else None,
+        "device_gps_lon": f"{gps[1]}" if gps else None,
+    }
 ```
 
-- `meta` is one file's metadata from `list_changes` or `list_files_in_folders`.
-- **Trust model:** `image_id`, location and capture time come from the **phone** (`appProperties`), which is client-controlled. The **uploader's identity** comes from `owners`, which **Google** fills in from the authenticated account that created the file. A farmer cannot fake it.
-- `or {}` and `or []` turn a missing field or `None` into an empty container.
-- `SessionLocal()` opens a SQLAlchemy session, closed in the `finally` at line 234.
+- **Purpose:** turn one Drive file's metadata into the Kafka event. Three producers call it — this watcher, the dashboard's Process button and `requeue_stuck --from-drive` — so all three publish exactly the same event (lines 97–99).
+- **Line by line:**
+  - Lines 101–104: the app's tags (`appProperties`), the first owner (`owners[0]`, Google's identity of the uploader) and the file id.
+  - Line 109: `image_id` from the tags; a file the app didn't upload has none, and Spark refuses it.
+  - Line 110: `user_id` is `None` — Spark resolves the account from `owner_email`.
+  - Lines 116–118: `owner_email`, `owner_name` and `folder_email`. Spark compares the owner with the folder.
+  - Line 119: `uploaded_at` is Drive's `createdTime`: Google's clock, not the phone's.
+  - Line 121: the location exactly as the phone sent it; Spark cleans it.
+  - Line 123: `content_hash` is Drive's own `sha256Checksum`.
+  - Lines 115, 124–125: numbers are sent as strings (`str(meta["size"])`, `f"{gps[0]}"`), because Spark's `EVENT_SCHEMA` reads every field as a string (lines 99–100).
+- **Inputs → outputs:** Drive metadata `dict` → event `dict` with 18 keys, all `str` or `None`.
+- **Example:** Maria's photo becomes `{"kind": "drive_upload", "image_id": "3f2a9c1e-…", "owner_email": "maria.soares@gmail.com", "folder_email": "maria.soares@gmail.com", "image_path": "gdrive:1AbC…", "location": " viqueque ", "size_bytes": "2417733", …}`.
+- **Academic explanation:** "The event is a claim check plus the facts needed to admit the photo: who owns it (from Google), where it is, its type, size and hash. The consumer can validate and register it without asking Drive again."
 
-#### Section B — identity checks that prevent creating any row (lines 147–167)
-
-```python
-        existing = session.get(Image, image_id) if image_id else None
-        if existing is not None:
-            if existing.image_path == to_drive_path(file_id):
-                return {"image_id": image_id, "status": "already_registered"}
-            reason = f"image_id {image_id} already belongs to another file"
-        elif not _UUID_RE.match(image_id or ""):
-            reason = "file has no valid image_id (not uploaded by the Android app)"
-        elif not owner_email:
-            reason = "could not determine the uploader's Google account"
-        else:
-            reason = None
-
-        if reason:
-            already = session.query(RejectedEvent).filter(RejectedEvent.raw_event.contains(file_id)).first()
-            if already is None:
-                session.add(RejectedEvent(image_id=image_id or None,
-                                          raw_event=json.dumps(meta, default=str), reason=reason))
-                session.commit()
-                print(f"[drive_watcher] Rejected Drive file {file_id}: {reason}")
-            return {"image_id": image_id or None, "status": "rejected"}
-```
-
-- **Duplicate-event handling, first layer:** `session.get(Image, image_id)` looks the image up by primary key.
-  - Same `image_id` **and** same Drive file means this file was seen before (the change feed and the full scan overlap, or the 2-minute window). The result is `"already_registered"` and **nothing happens**. That makes registration **idempotent**.
-  - Same `image_id` but a **different** file means a collision or a forged tag. The file is rejected, and the existing image is not overwritten.
-- No valid UUID means a file the farmer dropped in manually through the Drive website, or anything else not made by the app.
-- No owner email is a defensive check.
-- **Rejected without a row:** without a valid `image_id` no `Image` row can be made (it is the primary key), so the file is logged in the `rejected_events` table. `RejectedEvent.raw_event.contains(file_id)` becomes SQL `LIKE '%<file_id>%'`, so a file is logged **only once**, even though the safety-net scan sees it again every 10 minutes.
-- **Output:** `{"status": "rejected"}`. No Kafka event is sent and the farmer gets no result (there is no `image_id` to name the result after).
-
-#### Section C — the user (line 169)
+### I.7.5 `publish_drive_file` and `_publish_safely` — lines 129–162
 
 ```python
-        user = _get_or_create_user(session, owner_email, owner_name)
-```
-This finds or creates the database user for the **Google-verified** owner (I.7.3).
+def publish_drive_file(meta: dict, backend=None, folder_email: str = None) -> dict:
+    """Publishes ONE file found in a farmer's /images/<email>/ folder
+    (`folder_email` = that folder's email). Returns {"image_id", "status"}
+    where status is: published | held (MANUAL mode) | already_published."""
+    file_id = meta.get("id", "")
+    image_id = (meta.get("appProperties") or {}).get("image_id") or None
+    if file_id in _PUBLISHED:
+        return {"image_id": image_id, "status": "already_published"}
+    if get_processing_mode() == ProcessingMode.MANUAL:
+        # Nothing is sent; the dashboard's Pending Review page lists it
+        # straight from Drive until the administrator presses Process.
+        return {"image_id": image_id, "status": "held"}
+    event = build_drive_event(meta, folder_email)
+    backend.send(event)
+    _PUBLISHED[file_id] = None
+    while len(_PUBLISHED) > _PUBLISHED_MAX:
+        _PUBLISHED.popitem(last=False)
+    print(f"[drive_watcher] new photo {(image_id or '?')[:8]} from {event['owner_email']} "
+          f"({event['location'] or 'no location'}) -> Kafka topic '{KAFKA_TOPIC}' (Drive file {file_id})")
+    return {"image_id": image_id, "status": "published"}
 
-#### Section D — business checks (lines 171–184)
 
-```python
-        problems = []
-        if user.status != UserStatus.ACTIVE or getattr(user, "is_deleted", False):
-            problems.append("your account is not active — contact the administrator")
-        if folder_email is not None and normalize_email(folder_email) != normalize_email(owner_email):
-            problems.append("photo was not uploaded into your own folder")
-        if not (meta.get("name") or "").startswith(image_id):
-            problems.append("file name does not match its image_id")
-        if (meta.get("mimeType") or "").lower() not in ALLOWED_IMAGE_CONTENT_TYPES:
-            problems.append(f"unsupported image type {meta.get('mimeType')}")
-        size = int(meta.get("size") or 0)
-        if size <= 0:
-            problems.append("empty file")
-        elif size > MAX_IMAGE_SIZE:
-            problems.append(f"file exceeds max size of {MAX_IMAGE_SIZE} bytes")
-```
-
-- All problems are **collected** into a list, not stopped at the first one, so the farmer sees every reason at once.
-- An admin-deactivated account is blocked here. `getattr(user, "is_deleted", False)` tolerates a model version without that column.
-- **Folder ownership:** `folder_email` is the *name of the folder* the file is in. If Maria's account somehow wrote into João's folder, the folder email and owner email differ and the upload is rejected, so one farmer's photo can never be filed under another's.
-- MIME type must be in `{"image/jpeg", "image/png"}`. Size must be above 0 and at most 15 MB (`MAX_IMAGE_SIZE`). Drive reports `size` as a **string**, hence `int(...)`.
-
-#### Section E — create the `Image` row (lines 186–208)
-
-```python
-        captured_at = _parse_time(props.get("captured_at_client"))
-        uploaded_at = _parse_time(meta.get("createdTime")) or now_utc()  # Google's clock, not the phone's
-        content_hash = meta.get("sha256Checksum")
-        device_gps = _device_gps(props)
-
-        image = Image(
-            image_id=image_id,
-            location=props.get("location"),     # as the phone sent it; Spark cleans it
-            user_id=user.user_id,
-            original_filename=props.get("original_filename") or meta.get("name"),
-            image_path=to_drive_path(file_id),
-            source="android_drive_upload",
-            content_hash=content_hash,
-            captured_at=captured_at,
-            captured_at_source="client_trusted" if captured_at else None,
-            uploaded_at=uploaded_at,
-            gps_latitude=device_gps[0] if device_gps else None,
-            gps_longitude=device_gps[1] if device_gps else None,
-            gps_source="device" if device_gps else None,
-            status=ProcessingStatus.UPLOADED,
-        )
-        session.add(image)
-        session.commit()
-```
-
-- `uploaded_at` comes from **Google's** `createdTime`, a trusted server clock, not the phone's clock, which may be wrong.
-- `captured_at` from the phone is labelled `captured_at_source="client_trusted"`, so later code and reports know where it came from. Spark may fill it from EXIF if it is empty (III.2.10).
-- `content_hash` is Drive's SHA-256 of the file. Google computes it at no cost to us, and Spark's duplicate check reuses it.
-- `image_path = "gdrive:<file id>"` (I.6.1). `source="android_drive_upload"` is checked later by Spark's `_registered_by_watcher`.
-- `status=UPLOADED`: the row exists and nothing has been published yet.
-- `location` is stored **as the phone sent it** (for example `" viqueque "`). Spark's cleaning stage normalises it and `persist_result` writes the cleaned value back (III.2.17 Section B); the analytics job applies the same rule to photos Spark never processed (III.5).
-- **Note:** the row is committed **even if `problems` is non-empty**, so a rejected photo is visible in the dashboard with its reason.
-
-#### Section F — rejected upload: mark FAILED and tell the farmer (lines 210–217)
-
-```python
-        if problems:
-            image.status = ProcessingStatus.FAILED
-            image.error_message = UPLOAD_REJECTED_PREFIX + "; ".join(problems)
-            session.commit()
-            print(f"[drive_watcher] {image_id} rejected: {image.error_message}")
-            session.close()
-            _publish_failure(image_id)
-            return {"image_id": image_id, "status": "failed"}
-```
-
-- `UPLOAD_REJECTED_PREFIX = "Upload rejected: "` (defined in `pipeline_submit.py`) marks a *door* rejection. Because of it, the dashboard hides "Reprocess", and `submit_image_for_processing` refuses with `NotResubmittable`, so the admin cannot push a refused upload around the checks.
-- `session.close()` is called before `_publish_failure` so no database connection is held during a slow Drive upload. Closing again in `finally` is harmless.
-- Nothing is sent to Kafka.
-
-#### Section G — duplicates
-
-The watcher does not look for duplicates (the old notice was removed). Spark checks the stored `content_hash` against the farmer's earlier photos (III.2.6).
-
-#### Section H — MANUAL mode (lines 219–223)
-
-```python
-        if get_processing_mode(session) == ProcessingMode.MANUAL:
-            image.status = ProcessingStatus.PENDING_REVIEW
-            session.commit()
-            print(f"[drive_watcher] {image_id} held for manual review")
-            return {"image_id": image_id, "status": "pending_review"}
-```
-The processing mode is read from the `system_settings` table on **every** file, so a switch on the dashboard takes effect immediately without restarting the watcher. In MANUAL mode the image is held and **no Kafka event is sent** until an admin clicks *Process*.
-
-#### Section I — AUTOMATIC mode: publish to Kafka (lines 225–234)
-
-```python
-        try:
-            submit_image_for_processing(session, image, backend=backend)
-            print(f"[drive_watcher] new photo {image_id[:8]} from {owner_email} "
-                  f"({image.location or 'no location'}) -> Kafka topic '{KAFKA_TOPIC}' (Drive file {file_id})")
-            return {"image_id": image_id, "status": "registered"}
-        except Exception as e:  # submit_image_for_processing already marked it FAILED
-            print(f"[drive_watcher] {image_id} could not be published to Kafka: {e}")
-            return {"image_id": image_id, "status": "failed"}
-    finally:
-        session.close()
-```
-
-- **This is the hand-off from Drive to Kafka.** `submit_image_for_processing` (II.5.3) sets INGESTED, commits, and calls `backend.send(event)`.
-- `backend` is the watcher's long-lived `ResilientBackend` (II.4.6), passed in so one producer connection is reused.
-- On failure the image is already FAILED with "Kafka publish failed: …". The watcher only logs and returns `"failed"`. Section B makes sure the next scan does not register the file again, and the recovery path is `requeue_stuck --include-failed` (II.8).
-
-**Function summary:**
-
-| Input | Output (`status`) | Database effect | Kafka effect | Drive effect |
-|---|---|---|---|---|
-| Already known file | `already_registered` | none | none | none |
-| No/invalid `image_id`, or no owner | `rejected` | 1 `rejected_events` row, once | none | none |
-| Door problems | `failed` | `images` row FAILED "Upload rejected: …" | none | FAILED result JSON |
-| MANUAL mode | `pending_review` | `images` row PENDING_REVIEW | none | none |
-| AUTOMATIC, publish OK | `registered` | `images` row INGESTED | 1 event | none yet |
-| AUTOMATIC, publish failed | `failed` | `images` row FAILED "Kafka publish failed" | none | none |
-
-**Academic explanation:**
-> "`register_drive_file` is the system's admission controller. It derives identity from Google, not from the client. It is idempotent on (image_id, Drive file id). It records every refusal either as a rejected event or as a FAILED image the farmer can see. Only a fully validated photo becomes a Kafka event, and the event carries a reference, not the image itself."
-
-### I.7.6 Execution of a single registration (step by step)
-
-1. `meta` arrives from `scan_changes` together with `folder_email="maria.soares@gmail.com"`.
-2. `SELECT images WHERE image_id='3f2a…'` finds no row.
-3. The UUID regex passes, and the owner email `maria.soares@gmail.com` is present.
-4. `SELECT users WHERE email=…` finds Maria (ACTIVE).
-5. All checks pass, so `problems == []`.
-6. `INSERT images (… status='UPLOADED', location='Viqueque', image_path='gdrive:1AbC…')`, then COMMIT.
-7. `SELECT system_settings` returns AUTOMATIC.
-8. `submit_image_for_processing`: `UPDATE images SET status='INGESTED', ingested_at=now()`, COMMIT, then `backend.send({...})`.
-9. It returns `{"image_id": "3f2a…", "status": "registered"}`.
-
-### I.7.7 `_register_safely` — lines 237–257
-
-```python
-def _register_safely(meta: dict, backend, folder_email) -> dict:
+def _publish_safely(meta: dict, backend, folder_email) -> dict:
+    """publish_drive_file for one file of a scan, never raising: one file
+    that can't be sent (Kafka down with the file fallback off) must not stop
+    the scan — the change feed's bookmark would never move otherwise. The
+    10-minute scan, or requeue_stuck --from-drive, sends it later."""
     try:
-        return register_drive_file(meta, backend=backend, folder_email=folder_email)
+        return publish_drive_file(meta, backend=backend, folder_email=folder_email)
     except Exception as e:  # noqa: BLE001 - this file only
-        file_id = meta.get("id", "")
         image_id = (meta.get("appProperties") or {}).get("image_id") or None
-        reason = f"could not register: {type(e).__name__}: {str(e).splitlines()[0][:300]}"
-        print(f"[drive_watcher] Skipped Drive file {file_id}: {reason}")
-        try:
-            with SessionLocal() as s:
-                if s.query(RejectedEvent).filter(RejectedEvent.raw_event.contains(file_id)).first() is None:
-                    s.add(RejectedEvent(image_id=image_id, raw_event=json.dumps(meta, default=str), reason=reason))
-                    s.commit()
-        except Exception as log_error:  # noqa: BLE001 - e.g. the database itself is down
-            print(f"[drive_watcher] Could not record the skipped file {file_id}: {log_error}")
+        print(f"[drive_watcher] Could not publish Drive file {meta.get('id', '')}: "
+              f"{type(e).__name__}: {str(e).splitlines()[0][:300]}")
         return {"image_id": image_id, "status": "error"}
 ```
 
-- **Purpose:** **failure isolation**. One bad file must not stop the whole scan. The docstring records the bug this fixed: an `IntegrityError` used to abort the scan, so the change-feed bookmark never moved and *no farmer's photo was ever registered again*.
-- `str(e).splitlines()[0][:300]` keeps only the first line of a long SQLAlchemy error, at most 300 characters.
-- A second, nested `try` covers the case where the database itself is down.
-- **Trade-off:** `scan_changes` saves the new change-feed bookmark even when a file returns `"error"`, so the change feed will not show that file again. What recovers it is the **10-minute safety-net scan**: `scan_once` keeps its *own* bookmark (`last_created_time`, only moved by `scan_once`), so its next run lists the file again and calls `register_drive_file` again. After a *temporary* error (database briefly down), the file is then registered normally, up to 10 minutes late. After a *permanent* error (for example the `IntegrityError` above), it fails again every 10 minutes. The `RejectedEvent` check makes sure it is still logged only once.
+- **`publish_drive_file`:**
+  - Lines 135–136: already published by this process → `"already_published"`.
+  - Lines 137–140: MANUAL mode → nothing is sent (`"held"`). The photo stays in Drive; the dashboard's Pending Review page lists it (I.7.11).
+  - Lines 141–142: AUTOMATIC → build the event and `backend.send(event)`.
+  - Lines 143–145: remember the file id; drop the oldest beyond 20,000.
+  - Lines 146–148: one console line and `"published"`.
+- **`_publish_safely`:** the same call, but it never raises. One file that can't be sent (Kafka down with the file fallback turned off) must not stop the scan — otherwise the change-feed bookmark would never move. The failed file is not added to `_PUBLISHED`, so the 10-minute scan sends it again; `requeue_stuck --from-drive` also finds it.
+- **What is not here any more:** the account, folder, name, type and size checks, the `images` row, the `rejected_events` rows and the FAILED result for a refused upload. All of that moved to Spark (III.1.9).
+- **Academic explanation:** "Per-file error isolation keeps the cursor moving; at-least-once detection plus an idempotent consumer makes repeats harmless."
 
-### I.7.8 Bookmark state — lines 260–269
+### I.7.6 Bookmark state — lines 165–174
 
 ```python
 def _load_state() -> dict:
@@ -1360,12 +1243,16 @@ def _save_state(state: dict) -> None:
     STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     STATE_FILE.write_text(json.dumps(state))
 ```
-A missing or corrupt file means "no bookmark" (`{}`). `write_text` is **not atomic**: a crash mid-write leaves invalid JSON, which the next `_load_state` reads as `{}`. That triggers a fresh bookmark and a full scan. Already-registered files are skipped, so the result is safe, only slower.
 
-### I.7.9 `scan_once` — the safety-net folder scan (lines 272–298)
+A missing or corrupt file means "no bookmark" (`{}`). `write_text` is **not atomic**: a crash mid-write leaves invalid JSON, which the next `_load_state` reads as `{}`. That triggers a fresh bookmark and a full scan. Photos already registered are skipped by Spark, so the result is safe, only slower.
+
+### I.7.7 `scan_once` — the safety-net folder scan (lines 177–203)
 
 ```python
 def scan_once(backend=None) -> list:
+    """Lists every farmer's /images/<email>/ folder for files created since
+    the last scan (minus a small overlap) and publishes each new one.
+    Returns the per-file outcomes."""
     state = _load_state()
     created_after = None
     last = _parse_time(state.get("last_created_time"))
@@ -1382,7 +1269,7 @@ def scan_once(backend=None) -> list:
     outcomes = []
     for meta in files:
         parent = next((p for p in meta.get("parents") or [] if p in user_folders), None)
-        outcomes.append(_register_safely(meta, backend, user_folders.get(parent)))
+        outcomes.append(_publish_safely(meta, backend, user_folders.get(parent)))
 
     newest = max((f.get("createdTime") for f in files if f.get("createdTime")), default=None)
     if newest and (last is None or _parse_time(newest) > last):
@@ -1391,22 +1278,27 @@ def scan_once(backend=None) -> list:
     return outcomes
 ```
 
-- **Line by line:**
-  - `created_after` is the last `createdTime` minus 2 minutes, formatted for the Drive query. With no state, `created_after = None`, which means "every file ever".
-  - The dict comprehension `{folder_id: email}` maps every farmer folder.
-  - `next((p for p in parents if p in user_folders), None)` uses a generator expression to find which farmer folder the file is in. That folder's email is passed as `folder_email` for the ownership check.
-  - `max(..., default=None)` finds the newest `createdTime` seen. The bookmark only ever moves **forward**.
-- **When it runs:** (a) inside `start_change_feed` at start-up, to catch up on anything uploaded while the watcher was off; (b) every `FULL_SCAN_SECONDS` (600 s) as a safety net; (c) `--once`.
-- **Academic explanation:** "A low-frequency reconciliation scan backs up the event-driven change feed. Overlapping time windows plus idempotent registration give at-least-once *detection* with no duplicate *registration*."
+- `created_after` is the last `createdTime` minus 2 minutes, formatted for the Drive query. With no state, `created_after = None`, which means "every file ever".
+- The dict comprehension `{folder_id: email}` maps every farmer folder.
+- `next((p for p in parents if p in user_folders), None)` finds which farmer folder the file is in; that folder's email becomes the event's `folder_email`.
+- `max(..., default=None)` finds the newest `createdTime` seen. The bookmark only ever moves **forward**.
+- **When it runs:** inside `start_change_feed` at start-up, every 600 s as a safety net, and with `--once`.
 
-### I.7.10 `NoBookmark`, `scan_changes`, `start_change_feed` — lines 301–348
+### I.7.8 `NoBookmark`, `scan_changes`, `start_change_feed` — lines 206–253
 
 ```python
 class NoBookmark(RuntimeError):
-    """The state file has no change-feed bookmark ..."""
+    """The state file has no change-feed bookmark: first start, or a factory
+    reset deleted it (storage/reset.py) so every photo in Drive is processed
+    again."""
 
 
 def scan_changes(user_folders: dict, backend=None) -> list:
+    """Publishes the new photos in Drive's change feed since the saved
+    bookmark: ONE request (up to 1000 changes) however many farmers there
+    are, and no search-index delay, unlike scan_once(). `user_folders`
+    ({folder id: email} of /images/<email>/) is updated in place when the
+    feed shows a new farmer folder. Returns the per-file outcomes."""
     state = _load_state()
     token = state.get("changes_page_token")
     if not token:
@@ -1426,13 +1318,17 @@ def scan_changes(user_folders: dict, backend=None) -> list:
         parent = next((p for p in parents if p in user_folders), None)
         if parent is None:                                   # our own results, other files
             continue
-        outcomes.append(_register_safely(meta, backend, user_folders[parent]))
+        outcomes.append(_publish_safely(meta, backend, user_folders[parent]))
     state["changes_page_token"] = new_token
     _save_state(state)
     return outcomes
 
 
 def start_change_feed(backend=None) -> dict:
+    """Bookmarks "now" in the change feed if there's no bookmark yet, THEN
+    runs one full scan_once() to catch up on anything uploaded while the
+    watcher was off (bookmark first, so nothing slips through between the
+    two). Returns the {folder id: email} map of farmer folders."""
     state = _load_state()
     if not state.get("changes_page_token"):
         state["changes_page_token"] = drive_client.get_start_page_token()
@@ -1441,20 +1337,24 @@ def start_change_feed(backend=None) -> dict:
     return {f["id"]: f["name"] for f in drive_client.list_subfolders(drive_client.images_folder_id())}
 ```
 
-- **`scan_changes`, line by line:**
-  - No token raises `NoBookmark`. `main()` treats this as a signal to start again (for example after a factory reset deleted the state file).
-  - `list_changes(token)` is **one** request for up to 1,000 changes across *all* farmers.
-  - Removed, empty or trashed entries are skipped.
-  - **A new folder under `images/`** is a newly registered farmer. It is added to `user_folders` **in place**, because dicts are mutable and the caller's dict changes too. Their photos are then recognised from the next change onwards, without restarting.
-  - **Files outside any farmer images folder** are skipped. This filters out Spark's own result uploads (`results/…/…json`), which also appear in the central account's change feed.
-  - The new token is saved **after** the loop. If `list_changes` raises, the old token is kept and the same changes are fetched again. If a crash happens after some registrations but before `_save_state`, those changes are fetched again too, and they come back as `already_registered`: **at-least-once processing, made safe by idempotence**.
-- **`start_change_feed`:** the order matters. **Bookmark first, then full scan.** If it scanned first and bookmarked afterwards, a photo uploaded between the two would be missed by both. In this order such a photo is at worst seen twice, which is safe.
-- **Concept, at-least-once vs exactly-once:** at-least-once means "never lost, maybe repeated". Repetition is handled by making the receiver *idempotent* (doing it twice has the same effect as doing it once).
+- `NoBookmark(RuntimeError)`: the state file has no change-feed token — first start, or a factory reset deleted it (I.9).
+- **`scan_changes`:**
+  - Line 222: `list_changes(token)` — **one** request returns up to 1,000 changes, however many farmers there are.
+  - Lines 227–228: removed or trashed files are skipped.
+  - Lines 230–233: a new folder under `images/` is a newly registered farmer; it is added to `user_folders` at once (no restart needed).
+  - Lines 234–236: a file outside every farmer folder (our own results, say) is skipped.
+  - Line 237: a farmer's photo → `_publish_safely`.
+  - Lines 238–239: the new token is saved **after** the pass.
+- **`start_change_feed`:** bookmark "now" **first**, then a full `scan_once`, so nothing uploaded between the two slips through. Returns the folder map.
+- **Academic explanation:** "Change data capture with a persisted cursor, plus a periodic reconciliation scan."
 
-### I.7.11 `next_interval` and `main` — the watcher loop (lines 351–415)
+### I.7.9 `next_interval` and `main` — the watcher loop (lines 256–320)
 
 ```python
 def next_interval(current: float, found_new: bool) -> float:
+    """Check every POLL_SECONDS (fast) while photos are arriving; when it's
+    quiet, slow down step by step to IDLE_POLL_SECONDS so an idle night
+    costs few Drive requests."""
     if found_new:
         return POLL_SECONDS
     return min(IDLE_POLL_SECONDS, current * 1.5)
@@ -1465,7 +1365,6 @@ def main() -> int:
     p.add_argument("--once", action="store_true", help="scan once and exit")
     args = p.parse_args()
 
-    init_db()
     from kafka.producer import get_backend
     backend = get_backend(KAFKA_TOPIC)
     if args.once:
@@ -1475,11 +1374,16 @@ def main() -> int:
         except drive_client.DriveNotConfigured as e:
             print(f"[drive_watcher] {e}")
             return 1
-    ...
+
+    print(f"[drive_watcher] Following Google Drive's change feed for new photos in every farmer's "
+          f"/images/<email>/ folder (every {POLL_SECONDS}s while uploads arrive, up to "
+          f"{IDLE_POLL_SECONDS}s when quiet) -> Kafka '{KAFKA_TOPIC}'")
     user_folders, interval, last_full_scan = None, POLL_SECONDS, time.monotonic()
     while True:
         found_new = False
         try:
+            # Forward anything that landed in the local file queue while
+            # Kafka was down, even if no new photos arrive this round.
             if hasattr(backend, "drain"):
                 backend.drain()
             if user_folders is None:
@@ -1487,47 +1391,263 @@ def main() -> int:
                 last_full_scan = time.monotonic()
             outcomes = scan_changes(user_folders, backend=backend)
             if time.monotonic() - last_full_scan >= FULL_SCAN_SECONDS:
+                # Safety net: the old folder search, rarely. Catches anything
+                # the change feed ever missed; already-published files are skipped.
                 outcomes += scan_once(backend=backend)
                 last_full_scan = time.monotonic()
-            new = [o for o in outcomes if o["status"] != "already_registered"]
+            new = [o for o in outcomes if o["status"] == "published"]
             found_new = bool(new)
             if new:
-                print(f"[drive_watcher] {len(new)} new file(s): {new}")
+                print(f"[drive_watcher] {len(new)} new file(s) published")
         except drive_client.DriveNotConfigured as e:
             print(f"[drive_watcher] {e}")
             return 1
         except NoBookmark:
-            print("[drive_watcher] Bookmark gone (factory reset?) — registering every photo in Drive again")
+            # A factory reset removed the bookmark while we were running:
+            # start over (new bookmark + full scan of every farmer's folder).
+            print("[drive_watcher] Bookmark gone (factory reset?) — publishing every photo in Drive again")
+            _PUBLISHED.clear()
             user_folders, found_new = None, True
         except Exception as e:  # network hiccup etc. — keep watching
             print(f"[drive_watcher] scan failed, retrying: {e}")
         interval = next_interval(interval, found_new)
         time.sleep(interval)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
 ```
 
-- **`next_interval`:** **adaptive polling**. After any new file it returns to 1 s. When quiet it grows by ×1.5 (1, 1.5, 2.25, then 3) and stays at the 3 s cap. This keeps latency low during a burst and costs about 20 requests per minute at night. One change-feed request costs about 100 quota units of Google's 325,000 units per minute.
+- **`next_interval`:** adaptive polling. After any new file it returns to 1 s; when quiet it grows ×1.5 (1, 1.5, 2.25, then 3) and stays at the 3 s cap.
 - **`main`, section by section:**
-  1. `argparse` handles the `--once` flag.
-  2. `init_db()` makes sure the tables and columns exist.
-  3. `get_backend(KAFKA_TOPIC)` creates **one** producer back-end for the whole life of the process. With `KAFKA_USE_LOCAL_FALLBACK=true` (the default) this is a `ResilientBackend`. The import is inside the function so `--help` works without `confluent_kafka` installed.
-  4. In the loop, `backend.drain()` runs on every pass: events that fell into the local file queue while Kafka was down are forwarded as soon as the broker returns, *even if no new photo arrives*. `hasattr` keeps it compatible with a plain `KafkaBackend`, which has no `drain`.
-  5. `user_folders is None` on the first pass, or after `NoBookmark`, so it calls `start_change_feed`.
-  6. `scan_changes` is called every pass, and `scan_once` every 10 minutes.
-  7. `new` counts only real events, so the interval adapts to genuine activity.
-  8. **Exception policy:**
-     - `DriveNotConfigured`: **exit** (code 1). Retrying cannot fix it.
-     - `NoBookmark`: **reset** (`user_folders=None`). The next pass re-bookmarks and does a full scan.
-     - Anything else (network, Google 5xx after backoff, a database blip): **log and keep looping**. The bookmark was not saved, so nothing is lost.
-  9. `time.sleep(interval)` blocks the single thread. The watcher is entirely synchronous and single-threaded.
-- **Academic explanation:** "The watcher is a single-threaded polling producer with adaptive back-off. It separates fatal errors, which stop it, from transient ones, which it retries, and it moves its Drive cursor forward only after a successful pass. So on restart or error it re-reads rather than loses changes, and duplicates are absorbed by idempotent registration."
+  1. `argparse` handles `--once`.
+  2. `get_backend(KAFKA_TOPIC)` creates **one** producer back-end for the life of the process (a `ResilientBackend` by default). There is **no `init_db()`**: the watcher never opens the database.
+  3. `backend.drain()` runs on every pass, so events that fell into the local file queue while Kafka was down are forwarded as soon as the broker returns, even if no new photo arrives.
+  4. First pass (or after `NoBookmark`): `start_change_feed`. Every pass: `scan_changes`. Every 10 minutes: `scan_once`.
+  5. `found_new` counts only `"published"` outcomes, so the interval adapts to real activity (in MANUAL mode every new file is `"held"`, and the loop slows to 3 s).
+  6. **Exception policy:** `DriveNotConfigured` → exit with code 1; `NoBookmark` → clear `_PUBLISHED` and start over, so every photo still in Drive is published again; anything else → log and keep looping (the bookmark was not saved, so nothing is lost).
+- **Academic explanation:** "A single-threaded polling producer with adaptive back-off. Fatal errors stop it, transient ones are retried, and the cursor moves only after a successful pass."
+
+### I.7.10 The processing mode — `storage/processing_mode.py` (lines 1–48)
+
+```python
+"""
+The image-processing mode (AUTOMATIC / MANUAL), kept in a small JSON file
+so the Drive watcher can read it without a database connection.
+
+    AUTOMATIC  the Drive watcher publishes every new upload to Kafka at once
+    MANUAL     the watcher publishes nothing; the dashboard's Pending Review
+               page lists the Drive photos that have no database row yet and
+               the administrator sends them with "Process"
+
+The dashboard writes the file, the watcher reads it on every check.
+"""
+
+import enum
+import json
+import os
+from pathlib import Path
+
+from config.settings import BASE_DIR
+
+MODE_FILE = Path(os.getenv("PROCESSING_MODE_FILE", str(BASE_DIR / "storage" / "processing_mode.json")))
+
+
+class ProcessingMode(str, enum.Enum):
+    # AUTOMATIC: an upload is published to Kafka the moment the watcher sees
+    # it and Spark processes it immediately.
+    AUTOMATIC = "AUTOMATIC"
+    # MANUAL: nothing is published until an admin clicks "Process".
+    MANUAL = "MANUAL"
+
+
+def get_processing_mode() -> ProcessingMode:
+    """Current mode. A missing or unreadable file means AUTOMATIC."""
+    try:
+        return ProcessingMode(json.loads(MODE_FILE.read_text(encoding="utf-8"))["mode"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return ProcessingMode.AUTOMATIC
+
+
+def set_processing_mode(mode) -> ProcessingMode:
+    """Persist the mode (a ProcessingMode or its string value; ValueError for
+    anything else). Written to a temp file and renamed, so a reader never
+    sees half a file."""
+    mode = ProcessingMode(mode)
+    MODE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = MODE_FILE.with_name(MODE_FILE.name + ".tmp")
+    tmp.write_text(json.dumps({"mode": mode.value}), encoding="utf-8")
+    tmp.replace(MODE_FILE)
+    return mode
+```
+
+- **Purpose:** AUTOMATIC / MANUAL lives in a small JSON file, `storage/processing_mode.json`, so the watcher can read it without a database. It used to be a row in the `system_settings` table; `init_db` drops that table since 2026-10-24.
+- `ProcessingMode(str, enum.Enum)`: members are strings too, so `get_processing_mode() == "MANUAL"` works and the value goes straight into JSON.
+- `get_processing_mode`: a missing or unreadable file means AUTOMATIC (the deep test checked a missing file and a corrupt one).
+- `set_processing_mode`: `ProcessingMode(mode)` raises `ValueError` for anything else; the file is written to `.tmp` and renamed, so the watcher never reads half a file.
+- **Who reads and writes it:** the dashboard's mode switch writes it; the watcher reads it on every file (`publish_drive_file`).
+
+### I.7.11 What is waiting in Drive — `storage/drive_inventory.py` (lines 1–72)
+
+```python
+"""
+Which farmer photos in Google Drive have not been sent for processing yet.
+
+The database only holds photos Spark has registered (spark/ingestion.py), so
+"pending" is simply: every photo in a farmer's images/<email>/ folder whose
+image_id has no `images` row. Used by
+
+    dashboard Pending Review   MANUAL mode: what the administrator can send
+    switch to AUTOMATIC        sends everything still pending
+    requeue_stuck --from-drive a photo whose Kafka event never reached Spark
+
+Files without the app's image_id tag are left out: they were not uploaded by
+the app and would never get a row.
+"""
+
+from kafka.drive_watcher import _UUID_RE, build_drive_event
+from storage import drive_client
+from storage.database import Image
+
+_CHUNK = 500
+
+
+def farmer_photos() -> list:
+    """(Drive metadata, folder email) for every file in every farmer's
+    images/<email>/ folder, oldest upload first."""
+    folders = {f["id"]: f["name"] for f in drive_client.list_subfolders(drive_client.images_folder_id())}
+    if not folders:
+        return []
+    out = []
+    for meta in drive_client.list_files_in_folders(list(folders)):
+        parent = next((p for p in meta.get("parents") or [] if p in folders), None)
+        out.append((meta, folders.get(parent)))
+    return out
+
+
+def uploaded_at(meta: dict):
+    """Drive's createdTime of a file as an aware datetime, or None."""
+    from datetime import datetime
+    try:
+        return datetime.fromisoformat(str(meta.get("createdTime")).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _image_id(meta: dict) -> str:
+    return (meta.get("appProperties") or {}).get("image_id") or ""
+
+
+def unprocessed_photos(session) -> list:
+    """(Drive metadata, folder email) of the app's photos that have no
+    `images` row yet — not registered by Spark."""
+    photos = [(m, f) for m, f in farmer_photos() if _UUID_RE.match(_image_id(m))]
+    ids = [_image_id(m) for m, _ in photos]
+    known = set()
+    for i in range(0, len(ids), _CHUNK):
+        chunk = ids[i:i + _CHUNK]
+        known.update(r[0] for r in session.query(Image.image_id).filter(Image.image_id.in_(chunk)))
+    return [(m, f) for m, f in photos if _image_id(m) not in known]
+
+
+def send_for_processing(photos: list, backend) -> tuple:
+    """Publishes a drive_upload event (the Drive watcher's) for each
+    (metadata, folder email). Returns (sent, failed)."""
+    sent = failed = 0
+    for meta, folder_email in photos:
+        try:
+            backend.send(build_drive_event(meta, folder_email))
+            sent += 1
+        except Exception as e:  # noqa: BLE001 - keep sending the rest
+            print(f"[drive_inventory] could not send {_image_id(meta)}: {e}")
+            failed += 1
+    return sent, failed
+```
+
+- **Purpose:** the database only has rows for photos Spark registered, so "pending" is simply **Drive minus database**: every photo in a farmer's `images/<email>/` folder whose `image_id` has no `images` row (lines 4–6).
+- **Used by** the dashboard's Pending Review page (MANUAL mode), the switch to AUTOMATIC (it sends everything still pending) and `requeue_stuck --from-drive` (a photo whose Kafka event never reached Spark).
+- `farmer_photos`: lists every farmer folder and its files. This is the slow part — about 7 s for 650 photos — so the dashboard caches it for 60 s.
+- `unprocessed_photos`: keeps the app's photos (`_UUID_RE`), then asks the database which `image_id`s exist, 500 at a time (`IN (…)` with a bounded parameter list), and returns the rest.
+- `send_for_processing`: one `build_drive_event` per photo, the watcher's own event; one failure does not stop the rest. Returns `(sent, failed)`.
+- **Duplicates:** this filter is by `image_id` only. The same picture uploaded again gets a new `image_id`, so it shows as pending; Spark's SHA-256 check (III.2.6) marks the copy "Duplicate photo". The live test of 2026-10-24 confirmed this: four repeat uploads in MANUAL mode, sent with Process, all ended FAILED "Duplicate photo".
+
+### I.7.12 Drive thumbnails for the Pending Review page — `storage/drive_client.py` lines 228–239
+
+```python
+def download_thumbnail(file_id: str, size_px: int = 220) -> Optional[bytes]:
+    """Google's own small preview of a file (a few KB instead of the whole
+    photo), or None when Drive hasn't made one."""
+    _require_valid_id(file_id)
+    resp = _get_with_retry(f"{DRIVE_API}/files/{file_id}", {"fields": "thumbnailLink"})
+    _check(resp, f"get thumbnail link for {file_id}")
+    link = resp.json().get("thumbnailLink")
+    if not link:
+        return None
+    # thumbnailLink ends in "=s220"; ask for the size the page needs
+    resp = _get_with_retry(re.sub(r"=s\d+$", f"=s{int(size_px)}", link), {})
+    return resp.content if resp.status_code < 400 else None
+```
+
+Pending Review shows each waiting photo straight from Drive. Downloading every full photo (2–12 MB each) made the page time out, so it asks Drive for the `thumbnailLink` Google already made, rewrites its `=s220` size suffix to the size the page needs, and downloads a few kilobytes. `None` when Google has no thumbnail yet; the page then shows text only.
+
+### I.7.13 Farmer accounts from Drive identities — `storage/farmers.py` (lines 1–42)
+
+```python
+"""
+Farmer accounts made from Google Drive identities. A farmer never registers
+with a password: the Google account that owns an upload (Drive's `owners`
+field) is the identity. Used by Spark's ingestion step
+(spark/ingestion.register_upload) and the dashboard's "Register farmer"
+button, so both create the account the same way.
+"""
+
+import secrets
+
+from sqlalchemy.exc import IntegrityError
+
+from storage.auth import hash_password, normalize_email
+from storage.database import User, Role, UserStatus
+
+
+def get_or_create_farmer(session, email: str, display_name: str):
+    email = normalize_email(email)
+    user = session.query(User).filter(User.email == email).first()
+    if user is not None:
+        return user
+    user = User(
+        username=email,
+        full_name=display_name or email,
+        email=email,
+        # Drive users sign in with Google on the phone; this random password
+        # is never shown to anyone, so the account can't log in anywhere else.
+        password_hash=hash_password(secrets.token_urlsafe(32)),
+        role=Role.USER,
+        status=UserStatus.ACTIVE,
+        email_verified=True,  # verified by Google sign-in
+    )
+    session.add(user)
+    try:
+        session.commit()
+    except IntegrityError:
+        # A new farmer's first photos arrive together and Spark registers them
+        # in parallel: another photo created this account a moment ago.
+        session.rollback()
+        return session.query(User).filter(User.email == email).one()
+    print(f"[farmers] New user from Google Drive: {email}")
+    return user
+```
+
+- A farmer never registers with a password: the Google account that owns an upload is the identity. Spark's ingestion step and the dashboard's "Register farmer" button share this function.
+- A new account gets a random password no one knows (it can't log in anywhere else), `Role.USER`, `ACTIVE` and `email_verified=True`.
+- **Lines 33–40 (fixed 2026-10-24):** a new farmer's first photos arrive together and Spark registers them in parallel threads, so two threads could both try to create the account. The second insert failed `UNIQUE constraint users.username`, the exception killed the whole Spark batch and the streaming query stopped. Now the loser rolls back and reads the account the winner created. Found by the end-to-end deep test (a scratch topic with three photos from a farmer new to the scratch database).
 
 ---
 
-## I.8 Result delivery to Google Drive — `spark/preprocessing.py` lines 752–943
+## I.8 Result delivery to Google Drive — `spark/preprocessing.py` lines 746–937
 
 These functions run **inside the Spark job** (in the `drive-upload` thread pool, III.1.6), but they are Drive code, so they are explained here.
 
-### I.8.1 `_prediction_to_dict` — lines 755–768
+### I.8.1 `_prediction_to_dict` — lines 749–762
 
 ```python
 def _prediction_to_dict(p: Prediction) -> dict:
@@ -1544,9 +1664,9 @@ def _prediction_to_dict(p: Prediction) -> dict:
 ```
 This turns an ORM row into plain JSON types. `risk_level` is a Python `Enum`, so `.value` gives `"HIGH"`. Datetimes become ISO-8601 strings. The keys are exactly what the Android `DriveRest.kt` parser expects: this is the **contract** between laptop and phone.
 
-### I.8.2 `publish_result_to_drive` — lines 771–868
+### I.8.2 `publish_result_to_drive` — lines 765–862
 
-#### Section A — read the stored result from the database (lines 783–832)
+#### Section A — read the stored result from the database (lines 777–826)
 
 ```python
     image_id = event.get("image_id")
@@ -1589,7 +1709,7 @@ This turns an ORM row into plain JSON types. `risk_level` is a Python `Enum`, so
 - `prediction` is included only when status is COMPLETED. For a FAILED photo the app shows `error_message`.
 - The session is closed **before** the Drive network calls, so no database connection is held during uploads.
 
-#### Section B — choose the folder and upload the processed image (lines 834–843)
+#### Section B — choose the folder and upload the processed image (lines 828–837)
 
 ```python
     folder = test_folder or drive_client.user_folder_id(
@@ -1607,7 +1727,7 @@ This turns an ORM row into plain JSON types. `risk_level` is a Python `Enum`, so
 - The marked-up JPEG (`ml/render.render_processed_image`, with the CNN heat-map) is uploaded **first**, so its file id can go inside the JSON (`processed_file_id`) and the app can download it directly.
 - `existing_id=_RESULT_FILES.existing(folder, name)`: if the file is already in Drive it is updated (PATCH), otherwise it is created (POST). `may_exist=False` because the index already answered the question.
 
-#### Section C — the summary in `appProperties`, and the JSON upload (lines 844–868)
+#### Section C — the summary in `appProperties`, and the JSON upload (lines 838–862)
 
 ```python
     pred = payload["prediction"] or {}
@@ -1633,7 +1753,7 @@ This turns an ORM row into plain JSON types. `risk_level` is a Python `Enum`, so
 - The upload is done last. Only after it succeeds does `_mark_result_published` set `images.result_published_at = now()`. This column is the "delivered" flag that `replay_state` and `requeue_stuck` check.
 - **Order matters:** if the JSON upload raises, `result_published_at` stays NULL, so the photo counts as "result not delivered" and recovery re-sends it.
 
-### I.8.3 `_ResultFolderIndex` — lines 871–919
+### I.8.3 `_ResultFolderIndex` — lines 865–913
 
 ```python
 class _ResultFolderIndex:
@@ -1684,7 +1804,7 @@ _RESULT_FILES = _ResultFolderIndex()
   - `remember` records ids after a create, so a later update finds them.
 - **Validity assumption (from the docstring):** only Spark writes into these folders, and the factory reset (which trashes them) runs while Spark is stopped, so the cache cannot go stale behind Spark's back. The reset markers are written by `storage/reset.py`, but they use a different name, `_reset_marker.json`.
 
-### I.8.4 `_mark_result_published` and `publish_result_to_drive_safely` — lines 922–943
+### I.8.4 `_mark_result_published` and `publish_result_to_drive_safely` — lines 916–937
 
 ```python
 def _mark_result_published(image_id: str) -> None:
@@ -1735,7 +1855,8 @@ Kafka is the **durable buffer** between ingestion (the Drive watcher, the dashbo
     container_name: crop-disease-ews-kafka
     restart: unless-stopped
     ports:
-      - "9092:9092"
+      - "127.0.0.1:9092:9092"
+      - "[::1]:9092:9092"
     environment:
       # Single-node KRaft mode (no separate Zookeeper container needed).
       KAFKA_NODE_ID: 1
@@ -1754,11 +1875,12 @@ Kafka is the **durable buffer** between ingestion (the Drive watcher, the dashbo
 ```
 
 ### Purpose
-Runs one real Apache Kafka 3.7 broker on the laptop, reachable at `localhost:9092`.
+Runs one real Apache Kafka 3.7 broker on the laptop, reachable at `localhost:9092` from this laptop only.
 
 ### Line by line
 - `image: apache/kafka:3.7.0`: the official Apache image, pinned to a version.
 - `restart: unless-stopped`: Docker restarts the broker after a crash or a reboot.
+- `ports`: the broker is published on the laptop's **loopback addresses only**, IPv4 `127.0.0.1` and IPv6 `::1` (`docker-compose.yml` lines 23–31). Spark registers a new photo under the Google account its Kafka event names, so nobody else on the same network may publish to the topic. Both addresses are needed: on Windows `localhost` resolves to `::1` first, and with IPv4 alone every client lost about 2 s per connection and often failed its 3 s metadata check (the deep test of 2026-10-24 measured 8 of 15 connections succeeding before, 15 of 15 in about 0.08 s after).
 - `KAFKA_PROCESS_ROLES: broker,controller`: **KRaft** mode. One process is both the data broker and the metadata controller, so there is no ZooKeeper.
 - Three **listeners**:
   - `PLAINTEXT://:29092` for clients *inside* the Docker network.
@@ -2180,13 +2302,69 @@ A factory function. With the fallback disabled, a plain `KafkaBackend` is return
 
 ---
 
-## II.5 Event creation and publishing — `storage/pipeline_submit.py`
+## II.5 Event creation and publishing — two kinds of event
 
-### II.5.1 `build_upload_event` — the event structure (lines 22–37)
+Since commit `3577409` the topic carries two kinds of event, told apart by the `kind` field:
+
+| `kind` | Means | Built by | Published by | Spark's first step |
+|---|---|---|---|---|
+| `drive_upload` | a **new** photo; no database row exists yet | `kafka/drive_watcher.build_drive_event` (I.7.4), from the Drive file's metadata | the Drive watcher (AUTOMATIC), the dashboard's Pending Review *Process* / *Process all* and the switch to AUTOMATIC (MANUAL), `requeue_stuck --from-drive` | `register_upload` creates the row (III.1.9) |
+| `submit` | a photo **already in the database**, sent again | `storage/pipeline_submit.build_upload_event` (II.5.2), from the row | the dashboard's *Reprocess*, Image Management's *Retry*, `requeue_stuck` | straight to processing |
+
+**The `drive_upload` event (the message value, JSON, UTF-8):**
+
+| Field | Example | Source | Used by Spark for |
+|---|---|---|---|
+| `kind` | `drive_upload` | fixed | choosing the ingestion step; `parse_events` requires `owner_email` |
+| `image_id` | `3f2a9c1e-…` | phone (`appProperties`) | the primary key of everything |
+| `user_id` | `null` | — | resolved by Spark from `owner_email` |
+| `owner_email`, `owner_name` | `maria.soares@gmail.com`, `Maria` | Google (`owners[0]`) | the farmer's account; the folder check |
+| `folder_email` | `maria.soares@gmail.com` | the `images/<email>/` folder the file is in | the folder check |
+| `image_path`, `drive_file_id` | `gdrive:1AbC…`, `1AbC…` | Drive file id | where to read the photo |
+| `file_name`, `mime_type`, `size_bytes` | `3f2a9c1e-….jpg`, `image/jpeg`, `"2417733"` | Drive | name, type and size checks |
+| `uploaded_at` | `2026-10-24T01:12:30.512Z` | Google `createdTime` | required field |
+| `captured_at` | `2026-10-24T10:11:58+09:00` or null | phone | validation (not in the future) |
+| `location` | `" viqueque "` | phone, raw | cleaned by `parse_events` |
+| `original_filename`, `content_hash` | `IMG_0412.jpg`, `9b1c…` | phone / Drive `sha256Checksum` | stored on the row; duplicate check |
+| `device_gps_lat`, `device_gps_lon` | `"-8.86"`, `"126.36"` | phone, range-checked | GPS when the photo has no EXIF GPS |
+
+### II.5.1 Module docstring and imports — `storage/pipeline_submit.py` lines 1–15
+
+```python
+"""
+Sending a photo that is ALREADY in the database into the streaming pipeline
+again: the dashboard's Reprocess / Retry of a FAILED photo and
+storage/requeue_stuck. It publishes a "submit" event to Kafka and marks the
+row INGESTED.
+
+New photos don't come through here: the Drive watcher (and the dashboard's
+Pending Review in MANUAL mode) publish a "drive_upload" event built from
+the file's Drive metadata, and Spark creates the row (spark/ingestion.py).
+"""
+
+from storage.database import ProcessingStatus, now_utc
+from storage.image_storage import is_drive_path, drive_file_id_from_path
+from kafka.config import KAFKA_TOPIC
+from kafka.producer import get_backend
+```
+
+The file now only handles photos **already in the database** (lines 2–5). New photos come from Drive as `drive_upload` events and Spark creates their row (lines 7–9).
+
+### II.5.2 `build_upload_event` — the `submit` event (lines 18–37)
 
 ```python
 def build_upload_event(image) -> dict:
+    """The upload event published to Kafka, built from a stored Image row (storage/requeue_stuck.py re-publishes with it too).
+
+    For a Google Drive upload, image_path is "gdrive:<file id>" and
+    drive_file_id carries the same id explicitly: Kafka transports only
+    this reference + metadata, never the image bytes. drive_file_id is None
+    for legacy local-disk images."""
     return {
+        # A photo already in the database, sent again (Process of a FAILED
+        # row's Reprocess/Retry, requeue_stuck). New photos come from Drive as
+        # "drive_upload" events (kafka/drive_watcher.build_drive_event).
+        "kind": "submit",
         "image_id": image.image_id,
         "user_id": image.user_id,
         "location": image.location,
@@ -2197,55 +2375,63 @@ def build_upload_event(image) -> dict:
     }
 ```
 
-**The event schema (the message value, JSON, UTF-8):**
+- `"kind": "submit"` (line 29): Spark skips the ingestion step and `parse_events` requires `user_id`.
+- **Rebuilt from the database row**, so Reprocess, Retry and `requeue_stuck` publish **identical** events (they all call this one function, II.8).
+- `.isoformat()` makes the timestamps text that Spark's `to_timestamp` and Python's `fromisoformat` can both read.
+- **No image bytes** (the claim-check pattern) in either kind of event.
 
-| Field | Type | Example | Source | Used by Spark for |
-|---|---|---|---|---|
-| `image_id` | UUID string | `3f2a9c1e-…` | phone (`appProperties`) | the primary key of everything; dedupe |
-| `user_id` | UUID string | `7c1e…` | database user found from the Google owner | owner check, duplicate check, folder |
-| `location` | string or null | `Viqueque` | phone, normalised | analytics |
-| `image_path` | string | `gdrive:1AbC…` | watcher | where to read the photo |
-| `drive_file_id` | string or null | `1AbC…` | derived | cross-check with `image_path` |
-| `captured_at` | ISO-8601 or null | `2026-10-24T01:12:09+00:00` | phone | validation (not in the future) |
-| `uploaded_at` | ISO-8601 | `2026-10-24T01:12:30.512000+00:00` | Google `createdTime` | required field |
-
-An example message (about 330 bytes):
+An example `submit` message (about 350 bytes):
 ```json
-{"image_id": "3f2a9c1e-5b7d-4e2a-9f10-8c6d2b4a1e77", "user_id": "7c1e0b3a-...", "location": " viqueque ",
+{"kind": "submit", "image_id": "3f2a9c1e-5b7d-4e2a-9f10-8c6d2b4a1e77", "user_id": "7c1e0b3a-...", "location": "Viqueque",
  "image_path": "gdrive:1AbCdEfGhIjKlMnOpQrStUvWxYz012345", "drive_file_id": "1AbCdEfGhIjKlMnOpQrStUvWxYz012345",
  "captured_at": null, "uploaded_at": "2026-10-24T01:12:30.512000+00:00"}
 ```
 
-- **Rebuilt from the database row**, not passed through from Drive, so the dashboard's Process button, `requeue_stuck` and the watcher all publish **identical** events: they all call this one function (II.8).
-- `location` is still the raw text the phone sent (`" viqueque "`): the watcher stores it as it came, and Spark cleans it (III.1.4).
-- `.isoformat()` makes the timestamps text that Spark's `to_timestamp` and Python's `fromisoformat` can both read.
-- **No image bytes** (the claim-check pattern): the event carries a *reference* to the data, not the data.
-
-### II.5.2 Door-rejection guard — lines 40–52
+### II.5.3 The refused-upload guard — lines 40–53
 
 ```python
+# error_message prefix Spark's ingestion step (spark/ingestion.register_upload)
+# gives an upload it refused (inactive account, not the farmer's own folder,
+# wrong name/type/size).
 UPLOAD_REJECTED_PREFIX = "Upload rejected: "
 
 
 class NotResubmittable(ValueError):
-    """The image was refused at upload time; ..."""
+    """The image was refused at upload time; sending it to the pipeline
+    would analyse a photo the system decided not to accept."""
 
 
 def is_upload_rejected(image) -> bool:
     return (image.status == ProcessingStatus.FAILED
             and (image.error_message or "").startswith(UPLOAD_REJECTED_PREFIX))
 ```
-A FAILED image whose message starts with "Upload rejected: " was refused by the watcher's security checks (I.7.5 F). It can never be published. `NotResubmittable` subclasses `ValueError`, so generic handlers still catch it.
 
-### II.5.3 `submit_image_for_processing` — lines 55–87
+A FAILED image whose message starts with "Upload rejected: " was refused by Spark's ingestion step (III.1.9: inactive account, someone else's folder, wrong name, type or size). It can never be published again. `NotResubmittable` subclasses `ValueError`, so generic handlers still catch it.
+
+### II.5.4 `submit_image_for_processing` — lines 56–87
 
 ```python
 def submit_image_for_processing(session, image, backend=None) -> None:
+    """Publish `image`'s upload event and mark it INGESTED, committing on
+    `session`. On a publish failure the row is marked FAILED and the
+    exception is re-raised for the caller to report.
+
+    `backend` defaults to kafka.producer.get_backend(KAFKA_TOPIC); callers
+    that already hold a backend (e.g. the Drive watcher's) should pass it.
+
+    Raises NotResubmittable (nothing changed) for an upload the Drive watcher
+    rejected: the dashboard's Reprocess / Retry used to send those through
+    anyway, bypassing the watcher's account and folder checks.
+    """
     if is_upload_rejected(image):
         raise NotResubmittable(f"{image.error_message} — this upload can't be processed")
     backend = backend or get_backend(KAFKA_TOPIC)
-    if image.status in (ProcessingStatus.UPLOADED, ProcessingStatus.PENDING_REVIEW,
-                        ProcessingStatus.FAILED):
+    # Mark INGESTED and commit BEFORE publishing: Spark can then never
+    # finish the image before this commit lands and have its COMPLETED/
+    # FAILED stomped back to INGESTED. A FAILED image is reset too — that is
+    # the dashboard's "Reprocess"; before, it stayed FAILED with the old
+    # error while the new event was in flight.
+    if image.status == ProcessingStatus.FAILED:
         image.status = ProcessingStatus.INGESTED
         image.error_message = None
     image.ingested_at = now_utc()
@@ -2259,26 +2445,23 @@ def submit_image_for_processing(session, image, backend=None) -> None:
         raise
 ```
 
-**Purpose:** the **one** function that puts an image into the pipeline. It is called by the Drive watcher (AUTOMATIC mode), the dashboard's *Process*, *Process all*, *Reprocess* and mode switch, and Image Management's *Retry*.
+**Purpose:** send one photo that already has a row into the pipeline again. Called by the dashboard's *Reprocess* and Image Management's *Retry*.
 
 **Line by line:**
-1. A door-rejected image raises `NotResubmittable`, and nothing changes.
-2. `backend or get_backend(...)`: the watcher passes its long-lived backend. The dashboard creates one per call (a new `ResilientBackend`, which does a 3 s connect attempt).
-3. **Status transition before publishing:** UPLOADED, PENDING_REVIEW or FAILED become **INGESTED**, and `error_message` is cleared. A COMPLETED image keeps COMPLETED here (no current caller publishes one, since the Reprocess button is only shown for FAILED or PENDING_REVIEW).
-4. `ingested_at = now_utc()`: the start of the latency measurement (`persist_result` later computes predicted_at minus ingested_at).
-5. `session.commit()` happens **before** `send`. This ordering is deliberate. If the commit came after the send, Spark could finish the photo (COMPLETED) *before* this commit landed, and the commit would then **overwrite COMPLETED with INGESTED**, a race that leaves a finished photo looking stuck forever.
-6. `backend.send(event)` is synchronous and confirmed (II.4.3), or falls back to the file (II.4.6).
-7. On an exception the image becomes FAILED "Kafka publish failed: …", the change is committed, and the exception is **re-raised** so the caller can show it (dashboard `st.error`, watcher log).
+1. Lines 68–69: a refused upload raises `NotResubmittable`, and nothing changes.
+2. Line 70: `backend or get_backend(...)`: the dashboard creates one per call (a new `ResilientBackend`, which does a quick connect attempt).
+3. Lines 76–78: a **FAILED** row becomes **INGESTED** and its `error_message` is cleared. That is "Reprocess". Other states are left as they are.
+4. Line 79: `ingested_at = now_utc()`: the start of the latency measurement.
+5. Line 80: `session.commit()` happens **before** `send`. If the commit came after the send, Spark could finish the photo (COMPLETED) *before* this commit landed, and the commit would then **overwrite COMPLETED with INGESTED**.
+6. Lines 81–82: `backend.send(event)` is synchronous and confirmed (II.4.3), or falls back to the file (II.4.6).
+7. Lines 83–87: on an exception the image becomes FAILED "Kafka publish failed: …", the change is committed, and the exception is **re-raised** so the dashboard can show it.
 
-**State diagram:**
+**State diagram (`images.status`):**
 ```mermaid
 stateDiagram-v2
-    [*] --> UPLOADED: register_drive_file (row created)
-    UPLOADED --> FAILED: door problems (Upload rejected)
-    UPLOADED --> PENDING_REVIEW: MANUAL mode
-    UPLOADED --> INGESTED: submit_image_for_processing
-    PENDING_REVIEW --> INGESTED: admin Process
-    FAILED --> INGESTED: Reprocess / Retry (not door-rejected)
+    [*] --> INGESTED: register_upload (Spark creates the row)
+    [*] --> FAILED: register_upload refuses it (row with the reason)
+    FAILED --> INGESTED: Reprocess / Retry (not a refused upload)
     INGESTED --> FAILED: Kafka publish failed
     INGESTED --> PROCESSING: Spark mark_processing
     PROCESSING --> COMPLETED: persist_result(COMPLETED)
@@ -2286,17 +2469,19 @@ stateDiagram-v2
     COMPLETED --> [*]
 ```
 
+A photo waiting in MANUAL mode has **no status**: it has no row; it is only a file in Drive (I.7.11). The PostgreSQL enum type still lists the old `UPLOADED` and `PENDING_REVIEW` labels, but no row uses them.
+
 **Failure behaviour:**
 
 | Situation | Result |
 |---|---|
-| Broker down, fallback on | event goes to the file and the image **stays INGESTED** until drain forwards it |
-| Broker down, fallback off | `KafkaBackend()` raises in `get_backend` *before* the status change; with the watcher's backend, `send` raises and the image becomes FAILED "Kafka publish failed" |
+| Broker down, fallback on | the event goes to the file and the image **stays INGESTED** until drain forwards it |
+| Broker down, fallback off | `send` raises and the image becomes FAILED "Kafka publish failed" |
 | Database down at the first commit | raises; nothing published |
-| Database down at the FAILED commit | the original Kafka error is lost behind a database error; the image stays INGESTED (found later by `requeue_stuck`) |
+| A `drive_upload` that can't be sent from the watcher | `_publish_safely` logs it; the 10-minute scan or `requeue_stuck --from-drive` sends it later (no row exists, so nothing is stuck in the database) |
 
 **Academic explanation:**
-> "Writing to the database and publishing to Kafka can't be one atomic transaction (that would need a two-phase commit or a transactional outbox). I order the two writes so that every failure leaves a state that can be detected and recovered: commit INGESTED first, then publish. A publish failure is recorded as FAILED, and an event that never arrives leaves an INGESTED row that `requeue_stuck` finds."
+> "Writing to the database and publishing to Kafka can't be one atomic transaction. For a re-sent photo I commit INGESTED first, then publish, so every failure leaves a state that can be detected and recovered. For a new photo the problem disappears: nothing is written before the event, Spark writes the row when it consumes it, and a lost event leaves the photo in Drive where `--from-drive` finds it."
 
 ---
 
@@ -2321,7 +2506,7 @@ stateDiagram-v2
 
 ## II.7 The read-only monitor — `kafka/monitor.py`
 
-### II.7.1 `consumer_config` — lines 155–165
+### II.7.1 `consumer_config` — lines 159–169
 ```python
 def consumer_config(from_start: bool) -> dict:
     return {
@@ -2336,7 +2521,7 @@ def consumer_config(from_start: bool) -> dict:
 - `auto.offset.reset`: where to start when there is no stored offset, `latest` by default ("new events from now on").
 - `topic.metadata.refresh.interval.ms = 5000` notices a topic created after start-up (the test topic) within 5 s instead of the default 5 minutes.
 
-### II.7.2 `Assigner.refresh` — lines 116–152
+### II.7.2 `Assigner.refresh` — lines 120–156
 ```python
     def refresh(self) -> list:
         from confluent_kafka import TopicPartition, OFFSET_BEGINNING, OFFSET_END
@@ -2363,7 +2548,7 @@ def consumer_config(from_start: bool) -> dict:
 - `OFFSET_END` (only new events) for topics that exist at start-up. `OFFSET_BEGINNING` for a topic that appears later, because "all of it is new".
 - `info.error is not None` means the topic is unknown, so it is skipped and retried later.
 
-### II.7.3 `describe` and the poll loop — lines 41–57, 168–221
+### II.7.3 `describe` and the poll loop — lines 41–61, 172–225
 ```python
 def describe(value: bytes, partition: int, offset: int) -> str:
     try:
@@ -2371,8 +2556,12 @@ def describe(value: bytes, partition: int, offset: int) -> str:
     except (TypeError, ValueError):
         return f"p{partition} offset {offset}: unreadable message ({len(value or b'')} bytes)"
     ...
-    return (f"p{partition} offset {offset}: photo {(event.get('image_id') or '?')[:8]} "
-            f"from {farmer_label(event.get('user_id'))} ({event.get('location') or 'no location'}), "
+    # A new upload names its farmer by Google account (Spark resolves the
+    # user_id); a re-sent photo already has its user_id.
+    farmer = event.get("owner_email") or farmer_label(event.get("user_id"))
+    kind = "new photo" if event.get("kind") == "drive_upload" else "photo sent again"
+    return (f"p{partition} offset {offset}: {kind} {(event.get('image_id') or '?')[:8]} "
+            f"from {farmer} ({event.get('location') or 'no location'}), "
             f"uploaded {uploaded}, {source} -> waiting for Spark")
 ```
 ```python
@@ -2401,9 +2590,10 @@ def describe(value: bytes, partition: int, offset: int) -> str:
         consumer.close()
 ```
 - **Deserialisation:** `json.loads(bytes)`. A message that isn't JSON prints "unreadable message" and does not crash the monitor. This is how a *poison message* would show up.
+- **The two kinds of event:** a `drive_upload` names the farmer by `owner_email` (it has no `user_id` yet) and is shown as "new photo"; a `submit` event is shown as "photo sent again", with the name looked up from its `user_id`.
 - `consumer.poll(0.25)` waits up to 250 ms for one record. `None` means nothing arrived (a quiet-minute line is printed every 60 s).
 - `_PARTITION_EOF` ("reached the end") and `UNKNOWN_TOPIC_OR_PART` are normal states and are ignored.
-- **Example console line:** `[kafka 10:12:31] p0 offset 1532: photo 3f2a9c1e from maria.soares@gmail.com (Viqueque), uploaded 24/10/2026 10:12, Drive file -> waiting for Spark`
+- **Example console line:** `[kafka 10:12:31] p0 offset 1532: new photo 3f2a9c1e from maria.soares@gmail.com ( viqueque ), uploaded 24/10/2026 10:12, Drive file -> waiting for Spark` (the location is still raw here; Spark cleans it).
 - `finally: consumer.close()` leaves the group cleanly.
 - **Academic explanation:** "Observability without interference: the monitor is a consumer that never joins a group and never commits, so it can't steal partitions from or change the position of the real consumer."
 
@@ -2411,12 +2601,14 @@ def describe(value: bytes, partition: int, offset: int) -> str:
 
 ## II.8 Re-publishing stranded events — `storage/requeue_stuck.py`
 
-### II.8.1 The event — `build_upload_event` (line 55, the import)
-`requeue_stuck` imports `pipeline_submit.build_upload_event` (II.5.1) and builds every re-published event with it, so a re-published event is identical to the original. (It used to keep its own copy, `_event_from_image`; the 2026-10-24 clean-up removed it.)
+### II.8.1 The events — `build_upload_event` (line 61, the import) and `build_drive_event`
+`requeue_stuck` imports `pipeline_submit.build_upload_event` (II.5.2) and builds every re-published row-based event with it, so it is identical to what Reprocess sends. For photos that have **no row** (`--from-drive`, II.8.4) it sends the watcher's own `drive_upload` event (`build_drive_event`, I.7.4) through `storage/drive_inventory.send_for_processing`.
 
-### II.8.2 `find_stuck` — lines 60–109
+The module docstring (lines 45–48) states the limit of the row-based modes: the database only has a row for a photo Spark registered, so a photo whose `drive_upload` event never reached Spark is found by `--from-drive` (Drive minus database), not by them.
+
+### II.8.2 `find_stuck` — lines 63–115
 ```python
-STUCK_STATUSES = {ProcessingStatus.INGESTED, ProcessingStatus.UPLOADED, ProcessingStatus.PROCESSING}
+STUCK_STATUSES = {ProcessingStatus.INGESTED, ProcessingStatus.PROCESSING}
 
 _RETRYABLE_FAILURE_MARKERS = (
     "Kafka publish failed",
@@ -2449,9 +2641,9 @@ def find_stuck(session, older_than_seconds: int, include_failed: bool, ignore_ag
 - The SQL is built with SQLAlchemy: `or_(*eligible)` is `WHERE (status IN (...) OR (...))`, and `like(m + "%")` is a prefix match.
 - **Age filter:** by default only rows older than 120 s, so photos that are simply still in flight are not re-sent. For COMPLETED rows the clock is `processed_at`, because their Drive upload may still be running.
 - `stamp.replace(tzinfo=...)`: SQLite returns timezone-naive datetimes; this makes the comparison valid.
-- `count_owed` (lines 112–118) uses the same query for the dashboard's System Status counters.
+- `count_owed` (lines 118–124) uses the same query for the dashboard's System Status counters.
 
-### II.8.3 `republish` — lines 154–181
+### II.8.3 `republish` — lines 160–187
 ```python
     backend = get_backend(KAFKA_TOPIC)
     done = 0
@@ -2469,8 +2661,42 @@ def find_stuck(session, older_than_seconds: int, include_failed: bool, ignore_ag
         done += 1
 ```
 - For local images, a missing file means FAILED instead of re-publishing a doomed event. Drive files are checked by Spark.
-- `backend.send` publishes **directly**. Unlike `submit_image_for_processing`, it does **not** reset the status, so a FAILED row re-published with `--include-failed` stays FAILED in the database until Spark's `mark_processing` sets PROCESSING. That is harmless, because `replay_state` only skips COMPLETED and PENDING_REVIEW.
+- `backend.send` publishes **directly**. Unlike `submit_image_for_processing`, it does **not** reset the status, so a FAILED row re-published with `--include-failed` stays FAILED in the database until Spark's `mark_processing` sets PROCESSING. That is harmless, because `replay_state` only skips COMPLETED.
 - **Re-sending is safe:** `persist_result` replaces the prediction (delete-then-insert), and the Drive upload overwrites the same files.
+
+### II.8.4 `republish_from_drive` — photos Spark never registered (lines 229–250)
+
+```python
+def republish_from_drive(dry_run: bool) -> int:
+    """Photos in a farmer's Drive images/<email>/ folder that Spark never
+    registered (no `images` row): their Kafka event was lost, or they were
+    uploaded in MANUAL mode and not sent. Re-publishes the Drive watcher's
+    drive_upload event for each. Returns how many were sent."""
+    from kafka.config import KAFKA_TOPIC
+    from kafka.producer import get_backend
+    from storage import drive_inventory
+    with SessionLocal() as session:
+        photos = drive_inventory.unprocessed_photos(session)
+    if not photos:
+        print("Every photo in the farmers' Drive folders is registered. Nothing to do.")
+        return 0
+    print(f"Found {len(photos)} photo(s) in Google Drive with no database row:")
+    for meta, folder_email in photos:
+        print(f"  {(meta.get('appProperties') or {}).get('image_id')}  ({folder_email})")
+    if dry_run:
+        return 0
+    sent, failed = drive_inventory.send_for_processing(photos, get_backend(KAFKA_TOPIC))
+    print(f"\nPublished {sent} drive_upload event(s) to Kafka topic '{KAFKA_TOPIC}'"
+          + (f", {failed} failed." if failed else "."))
+    return sent
+```
+
+- **Purpose:** recover a photo whose `drive_upload` event was lost before Spark registered it (for example Kafka was down with the file fallback off, and the safety-net scan had not run yet), or one uploaded in MANUAL mode and never sent.
+- `drive_inventory.unprocessed_photos(session)` lists the photos in the farmers' `images/<email>/` folders that have no `images` row (I.7.11).
+- `--dry-run` only lists them; otherwise `send_for_processing` publishes one `drive_upload` event each and prints how many were sent and how many failed.
+- `main` (lines 268–275) runs this mode alone and returns: `python -m storage.requeue_stuck --from-drive`.
+- **Example (live, 2026-10-24, after the clean-up):** "Every photo in the farmers' Drive folders is registered. Nothing to do."
+- **Academic explanation:** "Because the photo itself is durable in Drive, a lost event is not lost data. Reconciliation is a set difference: files in Drive minus rows in the database."
 
 The `--inline` mode, which processes the image **without Kafka or Spark**, is covered in III.4.
 
@@ -2511,7 +2737,7 @@ A second, separate **batch** Spark job (`spark/batch_analytics.py`) aggregates t
 
 ## III.1 `spark/streaming_job.py`
 
-### III.1.1 Windows Hadoop shim and imports — lines 45–78
+### III.1.1 Windows Hadoop shim and imports — lines 47–81
 
 ```python
 import os
@@ -2520,6 +2746,10 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Windows-only workaround (winutils.exe location for Hadoop's local
+# filesystem shim) — only set if not already configured, and never on a
+# non-Windows deployment box, where C:\hadoop doesn't exist and shouldn't be
+# assumed.
 if os.name == "nt" and "HADOOP_HOME" not in os.environ:
     os.environ["HADOOP_HOME"] = r"C:\hadoop"
     _hadoop_bin = r"C:\hadoop\bin"
@@ -2528,7 +2758,7 @@ if os.name == "nt" and "HADOOP_HOME" not in os.environ:
 
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import (
-    col, concat, current_timestamp, from_json, initcap, lit, regexp_replace, to_timestamp, trim, when,
+    coalesce, col, concat, current_timestamp, from_json, initcap, lit, regexp_replace, to_timestamp, trim, when,
 )
 from pyspark.sql.types import StructType, StructField, StringType
 
@@ -2544,6 +2774,7 @@ from spark.preprocessing import (
 from storage.database import ProcessingStatus, init_db
 from storage.image_storage import is_drive_path
 from spark import live_log
+from spark.ingestion import register_upload
 ```
 
 **Purpose.** This block prepares the environment before any Spark object exists.
@@ -2552,27 +2783,46 @@ from spark import live_log
 - `os.name == "nt"` is true only on Windows. Spark's local file system goes through Hadoop's `RawLocalFileSystem`, and on Windows that needs `winutils.exe` from `%HADOOP_HOME%\bin`. Writing the checkpoint fails without it. The shim is applied only when `HADOOP_HOME` is not already set, so a real configuration is never overridden.
 - `os.pathsep` is `;` on Windows.
 - These environment variables must be set **before** `from pyspark.sql import SparkSession`, because the JVM that pyspark launches inherits the environment of the Python process.
-- `from_json`, `initcap`, `trim`, `to_timestamp` and `current_timestamp` are Spark SQL column functions. They run inside the JVM, not in Python.
+- `from_json`, `initcap`, `trim`, `to_timestamp`, `current_timestamp` and `coalesce` are Spark SQL column functions. They run inside the JVM, not in Python.
+- Line 81: `register_upload` from `spark/ingestion.py` — Spark's ingestion step for a new photo (III.1.9).
 
 **Dependencies.** The heavy lifting is imported from `spark/preprocessing.py`. Importing it also imports `ml.inference` (PyTorch) and `storage.database` (SQLAlchemy).
 
-### III.1.2 Checkpoint location and event schema — lines 80–93
+### III.1.2 Checkpoint location and event schema — lines 83–114
 
 ```python
 CHECKPOINT_DIR = str(SPARK_CHECKPOINT_ROOT / KAFKA_TOPIC)
 
 EVENT_SCHEMA = StructType([
+    # "drive_upload": a new photo, from its Drive metadata (kafka/drive_watcher.
+    # build_drive_event) — spark/ingestion registers it. "submit" (or no kind,
+    # older events): a photo already in the database is sent again
+    # (storage/pipeline_submit.build_upload_event).
+    StructField("kind", StringType()),
     StructField("image_id", StringType()),
-    StructField("user_id", StringType()),
+    StructField("user_id", StringType()),         # submit only; ingestion resolves it for drive_upload
     StructField("location", StringType()),
     StructField("image_path", StringType()),
     StructField("drive_file_id", StringType()),   # Google Drive file id (None for legacy local images)
     StructField("captured_at", StringType()),
     StructField("uploaded_at", StringType()),
+    # drive_upload only: what the Drive watcher read from the file's metadata
+    StructField("file_name", StringType()),
+    StructField("mime_type", StringType()),
+    StructField("size_bytes", StringType()),
+    StructField("owner_email", StringType()),
+    StructField("owner_name", StringType()),
+    StructField("folder_email", StringType()),
+    StructField("original_filename", StringType()),
+    StructField("content_hash", StringType()),
+    StructField("device_gps_lat", StringType()),
+    StructField("device_gps_lon", StringType()),
     # Only on scalability-test events published here before the test got its
     # own topic (2026-10-10); _process_one skips them. Null for every upload.
     StructField("run_id", StringType()),
 ])
+
+DRIVE_UPLOAD = "drive_upload"
 ```
 
 - The checkpoint path is `storage/spark_checkpoints/maize-disease-images`. Spark stores the following there:
@@ -2580,12 +2830,17 @@ EVENT_SCHEMA = StructType([
   - `commits/<batchId>`: written **after** a batch has finished successfully.
   - `metadata`: the query id.
   - `sources/0/0`: the starting offsets.
-- `EVENT_SCHEMA` is the **explicit schema** for the JSON in the Kafka value. Every field is a `StringType`, and timestamps are parsed later with `to_timestamp`. Fields that are missing from the JSON become `null`, and unknown fields are ignored. That makes the job tolerant of older and newer event versions.
+- `EVENT_SCHEMA` is the **explicit schema** for the JSON in the Kafka value: 19 fields, all `StringType`.
+  - `kind` (lines 86–90): `"drive_upload"` for a new photo, built from its Drive metadata, or `"submit"` for a photo already in the database (II.5). An older event without `kind` counts as `submit`.
+  - Lines 91–97: the fields both kinds share. `user_id` is only on a `submit`; for a `drive_upload` the ingestion step resolves it from `owner_email`.
+  - Lines 98–108: the Drive metadata only a `drive_upload` carries (name, type, size, owner, folder, original filename, hash, phone GPS).
+  - Fields missing from the JSON become `null`, and unknown fields are ignored, so the job tolerates both kinds and older events.
 - `run_id` is kept only so that old scalability-test events left in this topic can be recognised and skipped.
+- `DRIVE_UPLOAD = "drive_upload"` (line 114) is the one constant both `parse_events` and `_process_one` compare against.
 
 **Concept: schema-on-read.** Kafka stores raw bytes. The consumer applies a schema while it reads. Spark cannot infer a schema from a stream, so it has to be given one.
 
-### III.1.3 `build_spark` — lines 96–111
+### III.1.3 `build_spark` — lines 117–132
 
 ```python
 def build_spark():
@@ -2610,10 +2865,42 @@ def build_spark():
 - No internet on the first run: the package cannot be resolved and start-up fails.
 - No Java installed: pyspark raises "Java gateway process exited".
 
-### III.1.4 `parse_events` — distributed parsing and cleaning (lines 114–168)
+### III.1.4 `parse_events` — distributed parsing and cleaning (lines 135–196)
 
 ```python
 def parse_events(raw):
+    """Kafka record value (JSON bytes) -> one typed row per upload event,
+    then a genuine distributed-DataFrame cleaning stage (DIT manual 5.4):
+    check the required fields (owner_email for a drive_upload, user_id for
+    a submit event), validate captured_at as a real timestamp
+    that is not in the future, and normalize location casing/whitespace.
+    This runs as real Spark SQL transformations on the streaming DataFrame
+    — NOT per-row Python — before foreachBatch's per-row CNN inference /
+    persistence work (which can't be expressed as a DataFrame
+    transformation) ever sees a row.
+
+    An event that fails a check is NOT filtered out: it keeps flowing with
+    `rejected_reason` set (EIP Invalid Message Channel). Filtering it used
+    to drop it silently, so a photo whose phone clock ran ahead (a future
+    captured_at) sat at INGESTED for ever, and storage.requeue_stuck only
+    re-sent it to be dropped again. _process_one records a rejected event
+    as FAILED with its reason, and the farmer gets that result in Drive;
+    one too broken to name an image lands in rejected_events with its raw
+    Kafka value (the dead-letter table).
+
+    spark/preprocessing.clean_event() enforces the same rules again,
+    per-row, so a direct process_event() call (unit tests, or
+    storage.requeue_stuck --inline, which doesn't go through this
+    DataFrame) can't skip validation.
+
+    Duplicate image_ids are NOT dropped here any more: a streaming
+    dropDuplicates without a watermark keeps every image_id in state
+    forever, and silently dropped a Reprocess of an image Kafka had seen
+    before (the image then stayed INGESTED for good). foreach_batch_sink
+    dedupes each micro-batch and skips images that are already COMPLETED.
+
+    Extracted from run() so the exact projection the streaming query uses
+    can be exercised without a Kafka broker."""
     parsed = raw.select(
         from_json(col("value").cast("string"), EVENT_SCHEMA).alias("data"),
         col("value").cast("string").alias("raw_value"),
@@ -2622,9 +2909,15 @@ def parse_events(raw):
     def missing(field):
         return col(field).isNull() | (col(field) == "")
 
+    # A drive_upload names its uploader by Google account (ingestion resolves
+    # the user_id); a submit event already carries the user_id.
+    is_upload = coalesce(col("kind"), lit("")) == DRIVE_UPLOAD
     rejected_reason = when(lit(False), lit(None))
-    for field in ("image_id", "user_id", "image_path", "uploaded_at"):
+    for field in ("image_id", "image_path", "uploaded_at"):
         rejected_reason = rejected_reason.when(missing(field), lit(f"Missing required field: {field}"))
+    rejected_reason = (rejected_reason
+                       .when(is_upload & missing("owner_email"), lit("Missing required field: owner_email"))
+                       .when(~is_upload & missing("user_id"), lit("Missing required field: user_id")))
     rejected_reason = rejected_reason.when(
         to_timestamp(col("captured_at")) > current_timestamp(),
         concat(lit("captured_at is in the future: "), col("captured_at")),
@@ -2646,17 +2939,17 @@ def parse_events(raw):
 **Section A, deserialisation:**
 - `col("value").cast("string")` turns the UTF-8 bytes into a string.
 - `from_json(..., EVENT_SCHEMA)` parses that string into a struct. **Malformed JSON gives a `null` struct.** In Spark 3.x the default mode is `PERMISSIVE`, so the query does not crash.
-- `.alias("data")` followed by `.select("data.*", "raw_value")` flattens the struct into eight top-level columns and keeps the record's text as `raw_value`.
+- `.alias("data")` followed by `.select("data.*", "raw_value")` flattens the struct into 19 top-level columns and keeps the record's text as `raw_value`.
 
 **Section B, the checks as one `CASE WHEN` expression:**
 - `when(lit(False), lit(None))` is an empty start: a `CASE` whose first branch never matches. Each `.when(...)` adds one `WHEN … THEN …` branch.
-- A missing or empty `image_id`, `user_id`, `image_path` or `uploaded_at` gives `"Missing required field: <name>"`. A malformed message ends up with every column null, so it gets `"Missing required field: image_id"`.
+- A missing or empty `image_id`, `image_path` or `uploaded_at` gives `"Missing required field: <name>"`. The fourth required field depends on the kind (lines 176–184): a `drive_upload` must name its uploader (`owner_email`), a `submit` its `user_id`. `coalesce(kind, "")` makes an older event without `kind` count as a `submit`. A malformed message ends up with every column null, so it gets `"Missing required field: image_id"`.
 - `to_timestamp(captured_at) > current_timestamp()` gives `"captured_at is in the future: <value>"`. An unparseable value becomes `null`, and `null > now` is not true, so it passes here; Python's `clean_event` rejects it later (III.2.7). `current_timestamp()` is fixed **once per micro-batch**.
 - The first matching branch wins, so an event gets **one** reason; a valid event gets `null`.
 
 **Section C, normalisation:**
 - `trim` strips the outer spaces, `regexp_replace(..., r"\s+", " ")` collapses inner runs of whitespace, and `initcap` capitalises each word: `" viqueque  town "` becomes `"Viqueque Town"`.
-- This is the system's location rule. The watcher stores the location as the phone sent it, `clean_event` applies the same rule in Python (III.2.3), and `persist_result` writes the cleaned value to `images.location` (III.2.17 Section B).
+- This is the system's location rule. The watcher sends the location as the phone sent it, `register_upload` stores this cleaned value, `clean_event` applies the same rule in Python (III.2.3), and `persist_result` writes the cleaned value to `images.location` (III.2.17 Section B).
 
 **Section D, the Invalid Message Channel (EIP):**
 - An event that fails a check is **not filtered out**. It flows on with `rejected_reason` set, and `_process_one` records it as FAILED with that reason (III.1.7). The farmer gets the FAILED result in Drive.
@@ -2676,7 +2969,7 @@ def parse_events(raw):
 **Academic explanation.**
 > "Validation that can be expressed declaratively is pushed into Spark SQL, so it runs in the JVM in a distributed and optimised way, before any per-row Python code. Rules that need I/O, such as database or Drive look-ups, run per row in the sink."
 
-### III.1.5 `foreach_batch_sink` — lines 171–203
+### III.1.5 `foreach_batch_sink` — lines 199–231
 
 ```python
 def foreach_batch_sink(batch_df, batch_id):
@@ -2743,7 +3036,7 @@ sequenceDiagram
 **Academic explanation.**
 > "`foreachBatch` is the documented way to apply arbitrary side effects, here ML inference and database writes, to a stream. I collect each small batch to the driver, process its photos concurrently with threads because the work is I/O-bound, and block until every side effect has finished. Spark's batch commit therefore only happens after the work is durable, and a crash causes a replay, not a loss."
 
-### III.1.6 Background Drive uploads: `_UPLOADS` and `_upload_result` — lines 206–217
+### III.1.6 Background Drive uploads: `_UPLOADS` and `_upload_result` — lines 234–245
 
 ```python
 _UPLOADS = ThreadPoolExecutor(max_workers=max(1, SPARK_DRIVE_UPLOAD_WORKERS), thread_name_prefix="drive-upload")
@@ -2762,18 +3055,24 @@ def _upload_result(event, status, error, processed_image):
 - `_upload_result` never raises, because the "safely" wrapper catches everything (I.8.4). It returns `status`, so the batch line can count COMPLETED and FAILED.
 - `live_log.result_delivered` prints either "result + processed image delivered to …'s Drive (1.42s)" or "result NOT delivered — python -m storage.requeue_stuck re-sends it".
 
-### III.1.7 `_process_one` — one photo end to end (lines 220–291)
+### III.1.7 `_process_one` — one photo end to end (lines 248–333)
 
-#### Section A — scalability-test guard (lines 226–232)
+#### Section A — scalability-test guard (lines 254–260)
+
 ```python
     if event.get("run_id"):
+        # A scalability-test event. The test has its own topic and worker
+        # (scalability/worker.py); one still in this topic is from before
+        # that, and is never processed as a farmer photo.
         print(f"[streaming_job] {event.get('image_id')} is a scalability-test event "
               f"(run {event.get('run_id')}), skipping")
         return None
 ```
+
 Old test events that may still be in the production topic are never treated as farmer photos.
 
-#### Section A2 — the rejected reason from `parse_events` (lines 233–237)
+#### Section A2 — the rejected reason from `parse_events` (lines 261–265)
+
 ```python
     # Set by parse_events' cleaning stage; the raw record only for a rejected event.
     rejected_reason = event.pop("rejected_reason", None)
@@ -2781,28 +3080,65 @@ Old test events that may still be in the production topic are never treated as f
     if rejected_reason and not event.get("image_id"):
         event["raw_value"] = raw_value       # rejected_events.raw_event keeps what Kafka carried
 ```
+
 - `event.pop` removes the two helper columns, so the event passed on has only the upload fields.
 - A rejected event that names no image keeps its raw Kafka text as `raw_value`, which `persist_result` stores in `rejected_events.raw_event` (III.2.17 Section A).
 
-#### Section B — replay and duplicate check against the database (lines 238–250)
+#### Section A3 — ingestion of a new photo (lines 266–284)
+
+```python
+    if (event.get("kind") == DRIVE_UPLOAD
+            and all(event.get(f) for f in ("image_id", "image_path", "owner_email"))):
+        # A new photo from Drive: farmer, upload checks, duplicate skip and its
+        # first database row (spark/ingestion.py). A refused upload gets its
+        # row and fails below with the reason, like any invalid event — also
+        # one parse_events refused for its content (captured_at in the
+        # future): without a row it would stay in Pending Review and
+        # requeue_stuck --from-drive forever. Only an event missing what
+        # registration needs ends in rejected_events alone.
+        try:
+            outcome = register_upload(event)
+        except InvalidEvent as e:
+            outcome, rejected_reason = "new", str(e)
+        if outcome != "new":
+            why = ("already registered" if outcome == "duplicate"
+                   else "its image_id belongs to another Drive file (see rejected_events)")
+            print(f"[streaming_job] {event.get('image_id')}: Drive file {event.get('drive_file_id')} "
+                  f"{why}, skipping")
+            return None
+```
+
+- **Which events:** a `drive_upload` that has the three fields registration needs — `image_id`, `image_path` and `owner_email`. `register_upload` (III.1.9) resolves the farmer, checks the upload, skips duplicates and inserts the `images` row as INGESTED.
+- **Outcomes:** `"new"` goes on to processing. `"duplicate"` (this Drive file is already registered: the change feed and the safety-net scan can both report it) and `"conflict"` (the `image_id` belongs to another Drive file; recorded in `rejected_events`) are skipped with a console line.
+- **A refused upload still gets its row:** `InvalidEvent` (including `UploadRejected`) is turned into `outcome = "new"` with `rejected_reason` = the reason, so Section D records the row as FAILED and the farmer gets that result.
+- **Content rejections too (fixed 2026-10-24):** the condition used to be "no `rejected_reason`", so an event `parse_events` refused for its *content* (a future `captured_at`) never got a row. The photo then stayed on the Pending Review page and in `requeue_stuck --from-drive` forever, because both list "Drive photos with no row". Now any event complete enough to register is registered first; only an event missing those fields ends in `rejected_events` alone. Found by the end-to-end deep test.
+- **Not caught here:** a database error inside `register_upload` (PostgreSQL down) propagates, the batch fails and Spark replays it from the checkpoint on restart, so the photo is not lost.
+
+#### Section B — replay and duplicate check against the database (lines 285–292)
+
 ```python
     state = replay_state(event.get("image_id"))      # one lookup instead of three
-    if state == "held":
-        print(f"[streaming_job] {event.get('image_id')} is held for manual review, skipping old event")
-        return None
     if state == "completed":
         print(f"[streaming_job] {event.get('image_id')} already COMPLETED, skipping replayed event")
         return None
     if state == "result_missing":
+        # Saved, but its result never reached Drive (Spark stopped mid-upload):
+        # do it again — saving the prediction again is idempotent.
         print(f"[streaming_job] {event.get('image_id')} COMPLETED but not in Drive yet, processing again")
 ```
+
 - `replay_state` (III.2.15) makes **one** primary-key lookup.
-- `"held"`: the image is PENDING_REVIEW, so this is an *old* event, for example from a topic replay. An admin's *Process* always sets INGESTED before publishing. Processing it now would bypass MANUAL mode, so it is skipped.
 - `"completed"`: **this is duplicate-event handling.** A replayed or duplicated event for a finished image does nothing. Because the check reads the database, a genuine *Reprocess* still passes: `submit_image_for_processing` set its status to INGESTED.
 - `"result_missing"`: the image is COMPLETED but `result_published_at` is NULL, so it is processed again to deliver the result. That is safe, because saving the prediction is idempotent.
+- The old `"held"` case (a PENDING_REVIEW row) is gone: MANUAL mode no longer stores rows.
 
-#### Section C — Spark-side timestamps and the PROCESSING flag (lines 255–261)
+#### Section C — Spark-side timestamps and the PROCESSING flag (lines 293–303)
+
 ```python
+    # Genuinely Spark-side timestamps, captured here (not at persist
+    # time, after inference already ran) — kafka_received_at is when
+    # this row actually reached the foreachBatch sink; spark_started_at
+    # is right before per-row processing begins.
     kafka_received_at = datetime.now(timezone.utc)
     photo_started = time.monotonic()
     image_id = event.get("image_id")
@@ -2811,12 +3147,14 @@ Old test events that may still be in the production topic are never treated as f
     spark_started_at = datetime.now(timezone.utc)
     result, status, error = None, ProcessingStatus.FAILED, None
 ```
+
 - `kafka_received_at` is the moment this photo's thread starts in the sink. It is not the broker's own record timestamp (Kafka's `timestamp` column is available but not used). It is a close approximation, and it is honestly described in the comment.
 - `mark_processing` sets the status to **PROCESSING**, so the dashboard shows the photo as in flight.
 - The defaults (`status = FAILED`) mean the photo counts as failed unless it is explicitly marked a success.
-- *Failure note:* `replay_state` and `mark_processing` sit **outside** the `try` below. If PostgreSQL is down, they raise, the batch fails and the query stops. On restart the batch is replayed. This "fail the batch" behaviour is arguably right, since nothing could be recorded anyway, but it contradicts the "Never raises" docstring.
+- *Failure note:* `register_upload`, `replay_state` and `mark_processing` sit **outside** the `try` below. If PostgreSQL is down, they raise, the batch fails and the query stops. On restart the batch is replayed. This "fail the batch" behaviour is arguably right, since nothing could be recorded anyway, but it contradicts the "Never raises" docstring.
 
-#### Section D — processing and the outcome handlers (lines 262–287)
+#### Section D — processing and the outcome handlers (lines 304–329)
+
 ```python
     try:
         if rejected_reason:
@@ -2845,24 +3183,27 @@ Old test events that may still be in the production topic are never treated as f
         except Exception as db_error:  # noqa: BLE001 - don't take the other photos down with it
             print(f"[streaming_job] Could not record the failure for {image_id}: {db_error}")
 ```
-- **Success path:** `process_event` (III.2.13) produces the result dict, and `persist_result` (III.2.16) writes the prediction and processing event and sets COMPLETED.
-- `if rejected_reason: raise InvalidEvent(rejected_reason)`: an event `parse_events` rejected goes straight to the `InvalidEvent` branch, the same handling as a check that fails in Python.
-- **`InvalidEvent`** (including `DuplicateImage`): a *data* problem, such as a missing field, a future `captured_at`, an unknown user, a Drive file not found or trashed, or a duplicate photo. The image is recorded as FAILED with the reason; an event that names no image becomes a `rejected_events` row.
+
+- **Success path:** `process_event` (III.2.13) produces the result dict, and `persist_result` (III.2.17) writes the prediction and processing event and sets COMPLETED.
+- `if rejected_reason: raise InvalidEvent(rejected_reason)`: an event `parse_events` or `register_upload` rejected goes straight to the `InvalidEvent` branch, the same handling as a check that fails in Python.
+- **`InvalidEvent`** (including `DuplicateImage` and `UploadRejected`): a *data* problem, such as a missing field, a future `captured_at`, a refused upload, a Drive file not found or trashed, or a duplicate photo. The image is recorded as FAILED with the reason; an event that names no image becomes a `rejected_events` row.
 - **Any other exception:** a *system* problem, such as `ModelNotAvailable`, a network error after retries, or an unreadable image. It is recorded as FAILED, and a second failure while recording is only logged ("don't take the other photos down with it").
 - *Asymmetry:* in the `InvalidEvent` branch, `persist_result` is **not** wrapped in its own `try`. A database error there would propagate and fail the batch.
 - **No retry inside Spark.** A failed photo stays FAILED until an admin presses Reprocess or Retry, or until `requeue_stuck --include-failed` (for transport errors) runs. Because the Kafka offset is still committed, the event is **not** consumed again. That makes the database, not Kafka, the source of truth for recovery.
 
-#### Section E — logging and handing off the Drive upload (lines 289–291)
+#### Section E — logging and handing off the Drive upload (lines 331–333)
+
 ```python
     live_log.photo_done(event, status.value, result, error, time.monotonic() - photo_started)
     processed = result.get("processed_image_jpeg") if result else None
     return _UPLOADS.submit(_upload_result, event, status, error, processed)
 ```
+
 - This prints the per-photo line, for example `[photo] 3f2a9c1e maria.soares@gmail.com Viqueque -> common_rust 97.41% risk HIGH (download 1.83s preprocess 0.09s cnn 0.21s render 0.12s total 2.61s)`.
 - `_UPLOADS.submit(...)` returns a `Future` **immediately**. The upload runs in the background, and the sink later waits for it (III.1.5).
 - A FAILED photo is also uploaded. Its result JSON has `status: FAILED` and the error message, so the farmer's phone shows why it failed.
 
-### III.1.8 `_warm_up_model` and `run` — lines 294–345
+### III.1.8 `_warm_up_model` and `run` — lines 336–387
 
 ```python
 def _warm_up_model() -> None:
@@ -2947,6 +3288,177 @@ def run():
 
 **Academic explanation.**
 > "The job is a micro-batch Structured Streaming query: a Kafka source with a write-ahead offset log in the checkpoint, declarative cleaning, and a foreachBatch sink. Spark guarantees that every Kafka record reaches the sink at least once. I make the side effects idempotent, so the end-to-end effect is effectively exactly once per image."
+
+### III.1.9 `spark/ingestion.py` — Spark's ingestion step (lines 1–127)
+
+The Drive watcher has no database (I.7). This file is where a new photo becomes a database row, inside Spark, before it is downloaded and classified.
+
+#### Section A — docstring and imports (lines 1–34)
+
+```python
+"""
+Spark's ingestion step: the first thing spark/streaming_job._process_one
+does with a "drive_upload" event from the Drive watcher (or the dashboard's
+Process button). The watcher has no database; this is where an upload
+becomes a database row:
+
+    resolve the farmer      the Drive owner's Google account (provisioned
+                            on first upload, storage/farmers.py)
+    check the upload        active account, the farmer's own folder, file
+                            name, type, size (the rules the watcher used to
+                            apply before it was made stateless)
+    skip duplicates         an image_id already registered for this Drive
+                            file (the change feed and the safety-net scan
+                            can both report it)
+    insert the row          status INGESTED, before the photo is downloaded
+                            and classified
+
+A refused upload still gets a row: register_upload raises UploadRejected,
+_process_one records it FAILED with the "Upload rejected: " reason and the
+farmer gets that result in Drive, as before.
+"""
+
+import json
+
+from sqlalchemy.exc import IntegrityError
+
+from config.settings import MAX_IMAGE_SIZE, ALLOWED_IMAGE_CONTENT_TYPES
+from storage.auth import normalize_email
+from storage.database import SessionLocal, Image, RejectedEvent, ProcessingStatus, UserStatus, now_utc
+from storage.farmers import get_or_create_farmer
+from storage.pipeline_submit import UPLOAD_REJECTED_PREFIX
+from spark.preprocessing import InvalidEvent
+# the watcher's own rules for the app's image_id and Drive's timestamps
+from kafka.drive_watcher import _UUID_RE, _parse_time
+```
+
+- Lines 7–16: the four steps — resolve the farmer (the Drive owner's Google account, provisioned on the first upload), check the upload (the rules the watcher used to apply), skip duplicates (an `image_id` already registered for this Drive file), insert the row (status INGESTED).
+- Lines 18–20: a refused upload still gets a row, so the farmer gets the reason in Drive.
+- Lines 33–34: the watcher's `_UUID_RE` and `_parse_time` are imported, not copied, so the `image_id` and time rules exist once.
+
+#### Section B — `UploadRejected` and `_float` (lines 37–48)
+
+```python
+class UploadRejected(InvalidEvent):
+    """The upload breaks a rule (inactive account, not the farmer's own
+    folder, wrong name/type/size). Its row exists; the message starts with
+    UPLOAD_REJECTED_PREFIX so storage.pipeline_submit.is_upload_rejected
+    keeps it out of Reprocess."""
+
+
+def _float(value):
+    try:
+        return float(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+```
+
+- `UploadRejected(InvalidEvent)`: inheritance means `_process_one`'s `except InvalidEvent` also catches it. Its message starts with `UPLOAD_REJECTED_PREFIX`, which `is_upload_rejected` uses to keep the photo out of Reprocess (II.5.3).
+- `_float`: GPS text to `float`, `None` for anything unreadable.
+
+#### Section C — `register_upload`: the `image_id` and duplicates (lines 51–71)
+
+```python
+def register_upload(event: dict) -> str:
+    """Registers one drive_upload event. Returns "new" (row created as
+    INGESTED, event["user_id"] set: process it), "duplicate" (this Drive
+    file is already registered: skip) or "conflict" (the image_id belongs to
+    another file: recorded in rejected_events, skip). Raises InvalidEvent
+    for a file the app didn't upload, UploadRejected for a refused upload."""
+    image_id = event.get("image_id") or ""
+    if not _UUID_RE.match(image_id):
+        raise InvalidEvent("file has no valid image_id (not uploaded by the Android app)")
+    session = SessionLocal()
+    try:
+        existing = session.get(Image, image_id)
+        if existing is not None:
+            if existing.image_path == event.get("image_path"):
+                return "duplicate"
+            if session.query(RejectedEvent).filter(
+                    RejectedEvent.raw_event.contains(event.get("drive_file_id") or "")).first() is None:
+                session.add(RejectedEvent(image_id=image_id, raw_event=json.dumps(event, default=str),
+                                          reason=f"image_id {image_id} already belongs to another file"))
+                session.commit()
+            return "conflict"
+```
+
+- Lines 57–59: a file whose `image_id` is not a UUID was not uploaded by the app → `InvalidEvent`, which `persist_result` records in `rejected_events` (there is no row to fail).
+- Lines 62–65: a row with this `image_id` **and** this `image_path` already exists → `"duplicate"`: the same Drive file reported twice.
+- Lines 66–71: the `image_id` exists for a **different** Drive file → `"conflict"`. One `rejected_events` row per file (it checks for an existing one first); the original row is untouched.
+
+#### Section D — the farmer and the upload checks (lines 73–94)
+
+```python
+        owner_email = event.get("owner_email")
+        user = get_or_create_farmer(session, owner_email, event.get("owner_name"))
+        event["user_id"] = user.user_id
+
+        problems = []
+        if user.status != UserStatus.ACTIVE or getattr(user, "is_deleted", False):
+            problems.append("your account is not active — contact the administrator")
+        folder_email = event.get("folder_email")
+        if folder_email is not None and normalize_email(folder_email) != normalize_email(owner_email):
+            problems.append("photo was not uploaded into your own folder")
+        if not (event.get("file_name") or "").startswith(image_id):
+            problems.append("file name does not match its image_id")
+        if (event.get("mime_type") or "").lower() not in ALLOWED_IMAGE_CONTENT_TYPES:
+            problems.append(f"unsupported image type {event.get('mime_type')}")
+        try:
+            size = int(event.get("size_bytes") or 0)
+        except ValueError:
+            size = 0
+        if size <= 0:
+            problems.append("empty file")
+        elif size > MAX_IMAGE_SIZE:
+            problems.append(f"file exceeds max size of {MAX_IMAGE_SIZE} bytes")
+```
+
+- Lines 73–75: `get_or_create_farmer` (I.7.13) finds or creates the account for the Drive owner and sets `event["user_id"]`, so the rest of the pipeline sees the same event shape as a `submit`.
+- Line 77: every problem is collected, not just the first, so the farmer sees them all.
+- Lines 78–94: an inactive or deleted account; a photo not in the owner's own folder (`folder_email` ≠ `owner_email`, both normalised); a file name that doesn't start with the `image_id`; a type outside `ALLOWED_IMAGE_CONTENT_TYPES`; an empty file or one over `MAX_IMAGE_SIZE`.
+
+#### Section E — inserting the row (lines 96–127)
+
+```python
+        captured_at = _parse_time(event.get("captured_at"))
+        lat, lon = _float(event.get("device_gps_lat")), _float(event.get("device_gps_lon"))
+        device_gps = lat is not None and lon is not None
+        now = now_utc()
+        session.add(Image(
+            image_id=image_id,
+            location=event.get("location"),     # already cleaned by parse_events (case, spaces)
+            user_id=user.user_id,
+            original_filename=event.get("original_filename") or event.get("file_name"),
+            image_path=event.get("image_path"),
+            source="android_drive_upload",
+            content_hash=event.get("content_hash"),
+            captured_at=captured_at,
+            captured_at_source="client_trusted" if captured_at else None,
+            uploaded_at=_parse_time(event.get("uploaded_at")) or now,  # Google's clock, not the phone's
+            ingested_at=now,
+            gps_latitude=lat if device_gps else None,
+            gps_longitude=lon if device_gps else None,
+            gps_source="device" if device_gps else None,
+            status=ProcessingStatus.INGESTED,
+        ))
+        try:
+            session.commit()
+        except IntegrityError:
+            session.rollback()
+            return "duplicate"      # another copy of the event registered it a moment ago
+    finally:
+        session.close()
+
+    if problems:
+        raise UploadRejected(UPLOAD_REJECTED_PREFIX + "; ".join(problems))
+    return "new"
+```
+
+- Lines 100–116: the new `Image`: `location` (already cleaned by `parse_events`), the farmer, the original name, `image_path = gdrive:<id>`, `source = "android_drive_upload"`, Drive's SHA-256, the phone's capture time (`captured_at_source = "client_trusted"`), Google's `uploaded_at`, `ingested_at = now`, the phone GPS with `gps_source = "device"`, status **INGESTED**.
+- Lines 117–121: two copies of the same event processed in parallel threads both try to insert; the loser gets `IntegrityError`, rolls back and returns `"duplicate"`.
+- Lines 125–126: with problems, the row is committed first and then `UploadRejected` is raised with every reason joined by `"; "`. `_process_one` records that row as FAILED.
+- **Example (scratch end-to-end test, 2026-10-24):** a photo whose event said `folder_email = "someone.else@gmail.com"` ended FAILED "Upload rejected: photo was not uploaded into your own folder"; a non-app name `IMG_1234` ended in `rejected_events` "file has no valid image_id (not uploaded by the Android app)".
+- **Academic explanation:** "The consumer is the gatekeeper: admission control, identity and the first write all happen in one place, idempotently, so producers can be stateless and replays are harmless."
 
 ---
 
@@ -3120,15 +3632,25 @@ def clean_event(event: dict) -> dict:
 - **Section D, referential check:** the `user_id` must exist in `users`, so an event for a deleted or unknown user is rejected.
 - **Section E, storage-specific checks:** Drive paths go to `_clean_drive_event`. Local paths (the legacy path) are resolved, must stay inside `IMAGE_STORAGE_PATH` (path traversal is blocked with `relative_to`, which raises `ValueError` outside it), and the file name must contain the `image_id`.
 
-### III.2.8 `_clean_drive_event` and `_registered_by_watcher` — lines 235–276
+### III.2.8 `_clean_drive_event` and `_registered_from_drive` — lines 235–276
 
 ```python
 def _clean_drive_event(event: dict) -> dict:
+    """Validation for a Google Drive image (the Drive counterpart of the
+    local-disk checks in clean_event): the file must still exist in Drive,
+    not be trashed, and carry this event's image_id (set by the phone when it
+    uploaded the photo) — so a Kafka event can't point Spark at an
+    arbitrary Drive file."""
     file_id = drive_file_id_from_path(event["image_path"])
     if event.get("drive_file_id") and event["drive_file_id"] != file_id:
         raise InvalidEvent("drive_file_id does not match image_path")
     event["drive_file_id"] = file_id
-    if not SPARK_RECHECK_DRIVE_FILE and _registered_by_watcher(event):
+    if not SPARK_RECHECK_DRIVE_FILE and _registered_from_drive(event):
+        # spark/ingestion checked this very file moments ago from its Drive
+        # metadata (owner, own folder, image_id tag, name, type, size) and
+        # recorded it under this image_id. Asking Drive again cost 0.5 s per
+        # photo, and up to 2 min when Google throttled a large batch. If the
+        # file has gone since, the download fails and the photo is marked FAILED.
         return event
     try:
         meta = drive_client.get_file_metadata(file_id)
@@ -3143,7 +3665,11 @@ def _clean_drive_event(event: dict) -> dict:
     return event
 
 
-def _registered_by_watcher(event: dict) -> bool:
+def _registered_from_drive(event: dict) -> bool:
+    """True when the database has this image_id as a Drive upload registered
+    (spark/ingestion.register_upload, from the file's Drive metadata) for
+    exactly this Drive file, by this user. An event naming any other file
+    gets the full Drive check."""
     session = SessionLocal()
     try:
         image = session.get(Image, event["image_id"])
@@ -3154,8 +3680,8 @@ def _registered_by_watcher(event: dict) -> bool:
 ```
 
 - **Consistency check:** the two Drive-id fields in the event must agree.
-- **Trust shortcut:** if the database confirms that the watcher registered *this exact* `(image_id, Drive file, user)`, the Drive metadata request is skipped. It cost about 0.5 s per photo, and up to 2 minutes when Google throttled. The event alone is never trusted: an event pointing at any other file gets the full check.
-- **Full check** (when `SPARK_RECHECK_DRIVE_FILE=true`, or for an event the watcher didn't register):
+- **Trust shortcut:** if the database confirms that Spark's ingestion step registered *this exact* `(image_id, Drive file, user)` from the file's Drive metadata moments ago (III.1.9), the Drive metadata request is skipped. It cost about 0.5 s per photo, and up to 2 minutes when Google throttled. The event alone is never trusted: an event pointing at any other file gets the full check.
+- **Full check** (when `SPARK_RECHECK_DRIVE_FILE=true`, or for a row that wasn't registered from Drive):
   - the file must exist,
   - it must not be trashed,
   - and its `appProperties.image_id` must match.
@@ -3433,10 +3959,18 @@ The order matters. The duplicate check comes **before** any expensive work. EXIF
 - `save_downloaded_photo`: controlled by `SAVE_DOWNLOADED_PHOTOS`. It catches every error, so it **never fails the diagnosis**.
 - `save_for_review`: writes `REVIEW_DIR/<image_id>.jpg` through a `.tmp` file and an atomic `replace`. The photo is re-encoded **without EXIF**, so the farmer's GPS location never ends up in the training data (a privacy measure). It never fails the diagnosis.
 
-### III.2.15 `replay_state` — lines 596–624
+### III.2.15 `replay_state` — lines 596–618
 
 ```python
 def replay_state(image_id: str):
+    """The Spark sink's replay check, in ONE database lookup per event
+    (~3 ms on the Docker PostgreSQL). Returns:
+      "completed"      - already has its result; a replay is skipped. Asking the
+                         database (instead of Spark's old dropDuplicates) still
+                         lets a real Reprocess through: its status was reset.
+      "result_missing" - a COMPLETED Drive photo whose result never reached
+                         Drive (Spark stopped in between): upload it now.
+      None             - process it."""
     if not image_id:
         return None
     session = SessionLocal()
@@ -3444,8 +3978,6 @@ def replay_state(image_id: str):
         image = session.get(Image, image_id)
         if image is None:
             return None
-        if image.status == ProcessingStatus.PENDING_REVIEW:
-            return "held"
         if image.status == ProcessingStatus.COMPLETED:
             if is_drive_path(image.image_path) and image.result_published_at is None:
                 return "result_missing"
@@ -3454,26 +3986,24 @@ def replay_state(image_id: str):
     finally:
         session.close()
 ```
-**Decision table:**
 
-| Database status | `result_published_at` | Returns | `_process_one` does |
+| Database state | `result_published_at` | Returns | `_process_one` does |
 |---|---|---|---|
-| no row | — | `None` | processes it; `persist_result` writes a RejectedEvent |
-| PENDING_REVIEW | — | `"held"` | skip |
-| COMPLETED (Drive photo) | NULL | `"result_missing"` | processes again and delivers the result |
-| COMPLETED | set | `"completed"` | skip (duplicate or replayed event) |
-| UPLOADED / INGESTED / PROCESSING / FAILED | — | `None` | process |
+| no row, or no `image_id` | — | `None` | process (a nameless event ends in `rejected_events`) |
+| COMPLETED, Drive photo | NULL | `"result_missing"` | process again to deliver the result |
+| COMPLETED | set | `"completed"` | skip |
+| INGESTED, PROCESSING, FAILED | — | `None` | process |
 
-*Subtle point:* a FAILED image that receives an old replayed event (for example after a checkpoint loss) **will be processed again**. That is harmless, and if anything useful, but it means "FAILED" is not a terminal state for replays.
+- One primary-key lookup (about 3 ms on the Docker PostgreSQL) instead of three separate queries.
+- A Reprocess resets FAILED to INGESTED before publishing (II.5.4), so it passes.
+- The old `"held"` result for PENDING_REVIEW rows was removed in 2026-10-24's clean-up: MANUAL mode no longer stores rows, and the live database never had one.
 
-This is a **primary-key lookup of about 3 ms**. It replaced streaming `dropDuplicates` (III.1.4).
-
-### III.2.16 `mark_processing` — lines 627–639
+### III.2.16 `mark_processing` — lines 621–633
 This sets status PROCESSING in a short transaction. It is best effort: an unknown `image_id` does nothing.
 
-### III.2.17 `persist_result` — the database write (lines 642–749)
+### III.2.17 `persist_result` — the database write (lines 636–743)
 
-#### Section A — unknown image becomes a RejectedEvent (lines 675–686)
+#### Section A — unknown image becomes a RejectedEvent (lines 669–680)
 ```python
     session = SessionLocal()
     try:
@@ -3490,7 +4020,7 @@ This sets status PROCESSING in a short transaction. It is best effort: an unknow
 ```
 An event for an image that doesn't exist (deleted by a reset, or a forged event) leaves an auditable trace in `rejected_events`, instead of only a print.
 
-#### Section B — update the image row (lines 688–701)
+#### Section B — update the image row (lines 682–695)
 ```python
         now = datetime.now(timezone.utc)
         kafka_received_at = _as_aware_utc(kafka_received_at) or now
@@ -3500,16 +4030,16 @@ An event for an image that doesn't exist (deleted by a reset, or a forged event)
         if image.ingested_at is None:
             image.ingested_at = now
         if "location" in event:
-            # Spark's cleaned location (parse_events / clean_event); the Drive
-            # watcher stores it as the phone sent it.
+            # Spark's cleaned location (parse_events / clean_event), so a row
+            # registered before the cleaning rule existed is corrected too.
             image.location = event["location"]
         image.processed_at = now
         image.status = status
         image.error_message = error_message
 ```
-The status becomes COMPLETED or FAILED. `error_message` is cleared on success (`None`). The location the watcher stored as typed (`" viqueque "`) is replaced by Spark's cleaned value (`"Viqueque"`).
+The status becomes COMPLETED or FAILED. `error_message` is cleared on success (`None`). The location is written again from the event: `register_upload` already stored the cleaned value (`"Viqueque"`), and an older row that still has the raw text (`" viqueque "`) is corrected here.
 
-#### Section C — idempotent prediction write (lines 703–731)
+#### Section C — idempotent prediction write (lines 697–725)
 ```python
         if result is not None:
             latency_ms = None
@@ -3535,7 +4065,7 @@ The status becomes COMPLETED or FAILED. `error_message` is cleared on success (`
 - **Delete-then-insert:** any existing prediction for this image is deleted, and then the new one is inserted, **in the same transaction**. A replay or a Reprocess therefore leaves exactly one prediction row. This is the **idempotent sink** that turns Spark's at-least-once delivery into an effectively-once result.
 - A HIGH risk prints an `[ALERT]` line on the Spark console. The dashboard's *Risk Alerts* page reads the database.
 
-#### Section D — the append-only audit row, and commit (lines 733–749)
+#### Section D — the append-only audit row, and commit (lines 727–743)
 ```python
         total_latency_ms = int((spark_completed_at - kafka_received_at).total_seconds() * 1000)
 
@@ -3602,7 +4132,7 @@ def farmer_label(user_id: str) -> str:
 
 ---
 
-## III.4 Spark-less processing — `storage/requeue_stuck.process_inline` (lines 198–218)
+## III.4 Spark-less processing — `storage/requeue_stuck.process_inline` (lines 204–224)
 
 ```python
     for img in images:
@@ -3671,7 +4201,7 @@ def read_inputs(spark, jdbc_url, properties) -> tuple:
 - `source <> 'scalability_test'` leaves the scalability test's images out in the database already.
 - The enum columns are cast to text, so Spark sees plain strings.
 
-### III.5.3 `_local_day`, `_location` and `photos_with_latest_prediction` — lines 105–129
+### III.5.3 `_local_day`, `_location` and `photos_with_latest_prediction` — lines 105–130
 ```python
 def _local_day(column):
     from pyspark.sql.functions import col, expr, to_date
@@ -3694,10 +4224,10 @@ def photos_with_latest_prediction(images, predictions):
     return images.join(latest, "image_id", "left")
 ```
 - `_local_day`: the session time zone is UTC (`build_spark`), so 9 hours are added before `to_date`. A photo taken at 07:30 in Dili on 25 October counts on the 25th, not on the UTC 24th.
-- `_location`: the streaming job's location rule (III.1.4), applied again here, so a photo Spark never processed (a refused upload, a photo held for review) groups with the rest. A blank becomes `"Unknown location"`.
+- `_location`: the streaming job's location rule (III.1.4), applied again here, so a row that never got Spark's cleaned value (registered but not finished, or from before the cleaning rule) groups with the rest. A blank becomes `"Unknown location"`.
 - `photos_with_latest_prediction`: a **window function**. `row_number()` over each image's predictions, newest `predicted_at` first (ties broken by the larger `prediction_id`), keeps exactly one prediction per image. The **left join** keeps images that have no prediction yet (pending or failed).
 
-### III.5.4 `compute` — every dashboard figure as a DataFrame (lines 132–211)
+### III.5.4 `compute` — every dashboard figure as a DataFrame (lines 133–212)
 ```python
     distribution = (photos.filter(has_class).groupBy("predicted_class")
                     .agg(F.count("*").alias("photos")))
@@ -3729,7 +4259,7 @@ def photos_with_latest_prediction(images, predictions):
 - `groupBy … agg` is a **wide transformation**: Spark shuffles rows by key across partitions. Each of the seven tables is one such aggregation.
 - `compute` is pure DataFrame work, so it can be checked against local data without a database.
 
-### III.5.5 `write_tables`, `refresh` and `run` — lines 215–247
+### III.5.5 `write_tables`, `refresh` and `run` — lines 216–248
 ```python
 def write_tables(tables: dict, jdbc_url, properties) -> None:
     for name, df in tables.items():
@@ -3752,7 +4282,7 @@ def refresh(spark) -> float:
 - `.cache()` keeps the joined photos in memory, because all seven tables are computed from them; `unpersist()` frees it afterwards.
 - `run()` computes once (`python -m spark.batch_analytics`). It fails fast on SQLite before starting a JVM, and stops the SparkSession only if it created it.
 
-### III.5.6 `data_signature` and `watch` — keeping the figures current (lines 251–293)
+### III.5.6 `data_signature` and `watch` — keeping the figures current (lines 252–294)
 ```python
 def watch() -> int:
     ...
@@ -3798,11 +4328,11 @@ def watch() -> int:
 |---|---|---|
 | Kafka broker (Docker) | `docker compose up -d kafka` | — |
 | PostgreSQL (Docker) | `docker compose up -d` | — |
-| `EWS-DriveWatcher` | `python -m kafka.drive_watcher` | 1 main loop, plus librdkafka's background thread |
+| `EWS-DriveWatcher` | `python -m kafka.drive_watcher` | 1 main loop, plus librdkafka's background thread; no database connection |
 | `EWS-Spark` | `python -m spark.streaming_job` | the JVM (the query's micro-batch thread), the Python driver thread running `foreach_batch_sink`, up to 8 photo threads, 16 `drive-download` threads, 16 `drive-upload` threads |
 | `EWS-KafkaMonitor` | `python -m kafka.monitor` | 1 poll loop |
 | `EWS-SparkAnalytics` | `python -m spark.batch_analytics --watch` | its own JVM; 1 watch loop that recomputes the analytics tables when the data changes (III.5.6) |
-| Dashboard | `streamlit run dashboard/app.py` | one script run per browser interaction; creates a `ResilientBackend` per Process/Reprocess click |
+| Dashboard | `streamlit run dashboard/app.py` | one script run per browser interaction; creates a `ResilientBackend` per Process/Reprocess click; lists Drive for Pending Review (cached 60 s) |
 
 ## IV.2 The full sequence, from upload to delivery
 
@@ -3816,7 +4346,6 @@ sequenceDiagram
     participant APP as Android app
     participant GD as Google Drive
     participant W as drive_watcher.main
-    participant DB as PostgreSQL
     participant P as ResilientBackend
     participant K as Kafka topic
 
@@ -3824,16 +4353,16 @@ sequenceDiagram
     loop every 1–3 s
         W->>GD: list_changes(token)
     end
-    GD-->>W: change {file: metadata}
-    W->>W: scan_changes → _register_safely → register_drive_file
-    W->>DB: INSERT images (UPLOADED)
-    W->>DB: get_processing_mode = AUTOMATIC
-    W->>DB: submit_image_for_processing: status=INGESTED, COMMIT
-    W->>P: backend.send(build_upload_event(image))
-    P->>K: produce(JSON) + flush (wait for ack)
+    GD-->>W: change {file: metadata, owners, sha256}
+    W->>W: scan_changes → _publish_safely → publish_drive_file
+    W->>W: processing_mode.json = AUTOMATIC (MANUAL: send nothing)
+    W->>P: backend.send(build_drive_event(metadata, folder email))
+    P->>K: produce(JSON drive_upload) + flush (wait for ack)
     K-->>P: delivery report (ack)
     W->>W: _save_state(new token)
 ```
+
+The watcher writes nothing to the database. In MANUAL mode the photo simply stays in Drive until the administrator sends the same `drive_upload` event from the Pending Review page.
 
 ### (b) Processing and delivery: Kafka → Spark → database / Drive → phone
 
@@ -3851,6 +4380,7 @@ sequenceDiagram
     S->>K: fetch new offsets (trigger 1 s)
     S->>S: write offsets/N, parse_events (from_json, checks → rejected_reason, location rule)
     S->>FB: foreach_batch_sink(batch_df, N)
+    FB->>DB: register_upload: farmer, upload checks, INSERT images (INGESTED)
     FB->>DB: replay_state → None, mark_processing → PROCESSING
     FB->>GD: download_file (download pool, in parallel with clean_event)
     FB->>DB: check_duplicate_by_hash, extract_metadata
@@ -3873,18 +4403,21 @@ sequenceDiagram
 | 1 | `DriveUploader.upload` (Android) | `DriveRest.uploadImage` (Android) | bytes + `appProperties` |
 | 2 | `drive_watcher.main` | `start_change_feed` → `scan_once`; then `scan_changes` | — |
 | 3 | `scan_changes` | `drive_client.list_changes` | page token |
-| 4 | `scan_changes` | `_register_safely` → `register_drive_file` | Drive metadata dict + folder email |
-| 5 | `register_drive_file` | `submit_image_for_processing` (`storage/pipeline_submit.py`) | ORM `Image`, backend |
-| 6 | `submit_image_for_processing` | `build_upload_event`, then `ResilientBackend.send` (`kafka/producer.py`) | event dict |
+| 4 | `scan_changes` | `_publish_safely` → `publish_drive_file` | Drive metadata dict + folder email |
+| 5 | `publish_drive_file` | `get_processing_mode` (`storage/processing_mode.py`), `build_drive_event` | metadata → `drive_upload` event |
+| 6 | `publish_drive_file` | `ResilientBackend.send` (`kafka/producer.py`) | event dict |
 | 7 | `ResilientBackend.send` | `drain()`, then `KafkaBackend.send` → `Producer.produce` + `flush` | JSON bytes |
 | 8 | Spark engine (JVM) | `foreach_batch_sink` (`spark/streaming_job.py`) | static micro-batch DataFrame |
 | 9 | `foreach_batch_sink` | `_process_one` (in the thread pool) | event dict |
-| 10 | `_process_one` | `replay_state`, `mark_processing`, `process_event`, `persist_result` (`spark/preprocessing.py`) | event, result |
-| 11 | `process_event` | `load_image_bytes` → `drive_client.download_file`; `clean_event`; `check_duplicate_by_hash`; `extract_metadata`; `prepare_image`; `model_input`; `ml.inference.predict`; `compute_risk`; `render_processed_image` | bytes → CNN tensor → features → result |
-| 12 | `_process_one` | `_UPLOADS.submit(_upload_result)` | event, status, processed JPEG |
-| 13 | `_upload_result` | `publish_result_to_drive_safely` → `publish_result_to_drive` → `drive_client.upload_bytes` / `upload_json`; `_mark_result_published` | payload |
-| 14 | Android `DriveRest.findResults` | Drive `files.list` on `results/<email>/` | `image_id`s |
-| 15 | `batch_analytics.watch` (EWS-SparkAnalytics) | `data_signature`, then `refresh` → `read_inputs` (JDBC) → `compute` → `write_tables` | the analytics tables the dashboard reads |
+| 10 | `_process_one` | `register_upload` (`spark/ingestion.py`) → `get_or_create_farmer` (`storage/farmers.py`) | `drive_upload` event → `images` row (INGESTED) |
+| 11 | `_process_one` | `replay_state`, `mark_processing`, `process_event`, `persist_result` (`spark/preprocessing.py`) | event, result |
+| 12 | `process_event` | `load_image_bytes` → `drive_client.download_file`; `clean_event`; `check_duplicate_by_hash`; `extract_metadata`; `prepare_image`; `model_input`; `ml.inference.predict`; `compute_risk`; `render_processed_image` | bytes → CNN tensor → features → result |
+| 13 | `_process_one` | `_UPLOADS.submit(_upload_result)` | event, status, processed JPEG |
+| 14 | `_upload_result` | `publish_result_to_drive_safely` → `publish_result_to_drive` → `drive_client.upload_bytes` / `upload_json`; `_mark_result_published` | payload |
+| 15 | Android `DriveRest.findResults` | Drive `files.list` on `results/<email>/` | `image_id`s |
+| 16 | `batch_analytics.watch` (EWS-SparkAnalytics) | `data_signature`, then `refresh` → `read_inputs` (JDBC) → `compute` → `write_tables` | the analytics tables the dashboard reads |
+| 17 | dashboard Pending Review / switch to AUTOMATIC; `requeue_stuck --from-drive` | `drive_inventory.unprocessed_photos` → `send_for_processing` → `build_drive_event` | Drive minus database → `drive_upload` events |
+| 18 | dashboard Reprocess / Image Management Retry | `submit_image_for_processing` → `build_upload_event` | `submit` event |
 
 ---
 
@@ -3897,10 +4430,10 @@ sequenceDiagram
 - On a lost response the phone retries, first checking with `DriveRest.findImage` whether the file already arrived, so there are no duplicate Drive files.
 
 ### Scenario 2 — The system detects the new image and publishes an event
-**Code path:** `drive_watcher.main` loop → `scan_changes` → `drive_client.list_changes` → `_register_safely` → `register_drive_file` (Sections A–I) → `submit_image_for_processing` → `ResilientBackend.send`.
-- Detection latency is one poll interval (1 s when active, up to 3 s when idle) plus Google's change-feed delay.
-- The event is published **only** after the identity checks (Section B) and business checks (Section D) pass and the mode is AUTOMATIC.
-- `images.status` goes UPLOADED → INGESTED. INGESTED is committed *before* the send.
+**Code path:** `drive_watcher.main` loop → `scan_changes` → `drive_client.list_changes` → `_publish_safely` → `publish_drive_file` → `build_drive_event` → `ResilientBackend.send`.
+- Detection latency is one poll interval (1 s when active, up to 3 s when idle) plus Google's change-feed delay. The non-functional deep test of 2026-10-24 measured upload-to-registered at a median of about 15 s (9–80 s), almost all of it Google's delay.
+- The watcher checks nothing and writes nothing to the database. In AUTOMATIC mode it publishes one `drive_upload` event built from the Drive metadata; in MANUAL mode it publishes nothing and the photo waits in Drive.
+- **Admission happens in Spark:** `register_upload` (III.1.9) checks the account, folder, name, type and size, and inserts the row as INGESTED before the photo is downloaded.
 
 ### Scenario 3 — Kafka receives and transports the event
 **Code path:** `KafkaBackend.send`: `produce` (queued in librdkafka) → background send → broker append to partition 0 of `maize-disease-images` → acknowledgement → delivery callback inside `flush(10)`.
@@ -3929,41 +4462,46 @@ sequenceDiagram
 | Where it fails | Code that catches it | Resulting state | Farmer sees | Recovery |
 |---|---|---|---|---|
 | Phone can't reach Drive | `DriveUploader.upload` retry loop; `Outcome.Transient` | still in the phone's `UploadQueue` | "waiting to upload" | `UploadWorker` retries later |
-| File not from the app (no UUID) | `register_drive_file` Section B | `rejected_events` row | nothing | none (by design) |
-| Inactive account, wrong folder, wrong type or size | Section D/F | `images` FAILED "Upload rejected: …" | FAILED result in Drive | not resubmittable (`NotResubmittable`) |
-| Registration exception (for example `IntegrityError`) | `_register_safely` | `rejected_events` row; feed bookmark moves on | nothing | 10-minute `scan_once` retries |
+| File not from the app (no UUID) | `register_upload` → `InvalidEvent` | `rejected_events` row | nothing | none (by design) |
+| Inactive account, wrong folder, wrong name, type or size | `register_upload` → `UploadRejected` | `images` FAILED "Upload rejected: …" | FAILED result in Drive | not resubmittable (`NotResubmittable`) |
+| Same `image_id` on a different Drive file | `register_upload` → `"conflict"` | `rejected_events` row; original row untouched | nothing | none (by design) |
+| A watcher publish fails (Kafka down, fallback off) | `_publish_safely` | no row; the photo is still in Drive | nothing yet | 10-minute `scan_once`, or `requeue_stuck --from-drive` |
 | Drive API error during the watcher scan | `main` `except Exception` | bookmark not saved | — | next loop re-reads |
-| Kafka down (fallback on) | `ResilientBackend.send` | INGESTED; event in `local_queue/*.jsonl` | "processing" | automatic `drain()` when the broker is back |
-| Kafka down (fallback off / watcher's `KafkaBackend`) | `submit_image_for_processing` | FAILED "Kafka publish failed: …" | — | `requeue_stuck --include-failed`, or dashboard Reprocess |
-| Malformed JSON or missing field in Kafka | `parse_events` sets `rejected_reason` → `_process_one` raises `InvalidEvent` | FAILED "Missing required field: …"; with no `image_id`, a `rejected_events` row keeping the raw record | FAILED result (when the image is known) | none needed: the reason is recorded |
-| Phone clock ahead (future `captured_at`) | `parse_events` / `clean_event` | FAILED "captured_at is in the future: …" | FAILED result | fix the phone's clock and upload again |
+| Kafka down (fallback on) | `ResilientBackend.send` | event in `local_queue/*.jsonl` (no row yet for a new photo) | "processing" | automatic `drain()` when the broker is back |
+| Kafka down during a Reprocess (fallback off) | `submit_image_for_processing` | FAILED "Kafka publish failed: …" | — | `requeue_stuck --include-failed`, or Reprocess again |
+| Malformed JSON or missing field in Kafka | `parse_events` sets `rejected_reason` → `_process_one` raises `InvalidEvent` | with no `image_id` or `owner_email`: a `rejected_events` row keeping the raw record; otherwise FAILED "Missing required field: …" | FAILED result (when the image is known) | none needed: the reason is recorded |
+| Phone clock ahead (future `captured_at`) | `parse_events` / `clean_event` | row registered, then FAILED "captured_at is in the future: …" (since 2026-10-24 it gets a row, so it leaves Pending Review) | FAILED result | fix the phone's clock and upload again |
+| A new farmer's first photos registered in parallel | `get_or_create_farmer` | the second insert hits `IntegrityError`, rolls back and reads the account (fixed 2026-10-24; before, the batch died and the query stopped) | normal results | none needed |
 | Drive file deleted or not tagged | `_clean_drive_event` → `InvalidEvent` | FAILED "Image file not found in Google Drive …" | FAILED result | `requeue_stuck --include-failed` |
 | Download network error after 3 tries | `_process_one` generic `except` | FAILED with the exception text | FAILED result | Reprocess / Retry |
 | Same photo uploaded twice | `check_duplicate_by_hash` → `DuplicateImage` | FAILED "Duplicate photo: identical to …" | FAILED result | intended |
 | No model checkpoint | `ModelNotAvailable` at warm-up | Spark does not start | — | install the model |
-| Database down inside `_process_one` (before `try`) | not caught → batch fails → query stops | batch N not committed | — | restart Spark; batch N replayed |
+| Database down inside `_process_one` (before `try`, including `register_upload`) | not caught → batch fails → query stops | batch N not committed | — | restart Spark; batch N replayed |
 | Drive down while delivering the result | `publish_result_to_drive_safely` | COMPLETED, `result_published_at` NULL | (no result yet) | the next replay (`"result_missing"`) or `requeue_stuck` |
 
 ### Scenario 9 — A duplicate event is received
 
 | Duplicate kind | Where it is absorbed | Code |
 |---|---|---|
-| The watcher sees the same Drive file twice (feed + scan, or the overlap window) | before Kafka | `register_drive_file` Section B → `"already_registered"` |
+| The watcher sees the same Drive file twice (feed + scan, or the overlap window) | before Kafka, in this process | `_PUBLISHED` → `"already_published"` |
+| The same Drive file published twice anyway (after a watcher restart, or Process clicked twice) | Spark ingestion | `register_upload` → `"duplicate"` (same `image_id` and `image_path`); parallel copies: `IntegrityError` → `"duplicate"` |
 | The same event twice in one micro-batch (drain re-send, or a producer retry) | Spark sink | `batch_df.dropDuplicates(["image_id"])` |
 | The event again in a later batch, image already finished | Spark sink | `replay_state` → `"completed"` → skip |
 | A replay of a batch whose photos were part-way through | database | `persist_result` delete-then-insert (one prediction); `processing_events` keeps both attempts |
 | The result written again | Drive | `_ResultFolderIndex` + PATCH update of the same file id |
-| A different `image_id` with the same bytes | content check | `check_duplicate_by_hash` → `DuplicateImage` |
+| A different `image_id` with the same bytes (the same picture uploaded again) | content check | `check_duplicate_by_hash` → `DuplicateImage`; the first copy checked wins, even in the same batch (deep test 2026-10-24: one COMPLETED, one "Duplicate photo") |
 
-**Kafka itself does not de-duplicate.** The producer is not idempotent, and Spark's guarantee is at-least-once. De-duplication is entirely the application's job, keyed on `image_id`.
+**Kafka itself does not de-duplicate.** The producer is not idempotent, and Spark's guarantee is at-least-once. De-duplication is entirely the application's job: by `image_id` in Spark's ingestion step and sink, by SHA-256 in the duplicate check. The Pending Review page filters only by `image_id`, by design; Spark handles the rest.
 
-### Scenario 10 — An administrator reprocesses an existing image
+### Scenario 10 — An administrator reprocesses an existing image, or sends a waiting one
 **Code paths:**
-- *Overview page* (`dashboard/app.py` lines 612–626): **Reprocess** is shown only for FAILED or PENDING_REVIEW images that were not door-rejected → `submit_image_for_processing(session, img)`.
-- *Image Management* `_retry` (`dashboard/image_management_page.py` lines 244–258): re-reads the row, and only acts if it is still FAILED → `submit_image_for_processing`.
-- *Pending Review* page (lines 642–720): **Process** / **Process all** → `submit_image_for_processing`. The sidebar's switch to AUTOMATIC → `_switch_to_automatic_and_drain` (lines 236–254) does the same for every held image.
+- *Overview page* (`dashboard/app.py` lines 626–638): **Reprocess** is shown only for FAILED images that were not refused at upload → `submit_image_for_processing(session, img)` (a `submit` event).
+- *Image Management* `_retry` (`dashboard/image_management_page.py` lines 243–257): re-reads the row, and only acts if it is still FAILED → `submit_image_for_processing`.
+- *Pending Review* page (lines 654–733), MANUAL mode: **Process** / **Process all** → `drive_inventory.send_for_processing` (a `drive_upload` event, the watcher's own). The sidebar's switch to AUTOMATIC → `_switch_to_automatic_and_drain` (lines 237–245) does the same for every photo still waiting in Drive.
 
-**What happens:** status FAILED or PENDING_REVIEW → INGESTED (the error is cleared) → COMMIT → a new event → Spark: `replay_state` returns `None` (the status is INGESTED, not COMPLETED), so it is processed. `check_duplicate_by_hash` lets it through if a prediction already exists. The photo is read from the **local copy**. `persist_result` replaces the prediction, and the Drive files are **updated in place**.
+**What happens on Reprocess:** status FAILED → INGESTED (the error is cleared) → COMMIT → a `submit` event → Spark: `replay_state` returns `None` (the status is INGESTED, not COMPLETED), so it is processed. `check_duplicate_by_hash` lets it through if a prediction already exists. The photo is read from the **local copy**. `persist_result` replaces the prediction, and the Drive files are **updated in place**.
+
+**What happens on Process (MANUAL):** there is no row yet. The `drive_upload` event goes through `register_upload` exactly as in AUTOMATIC mode. The live test of 2026-10-24 confirmed both paths: ten new uploads processed in AUTOMATIC mode ended COMPLETED; four repeat uploads sent with Process in MANUAL mode ended FAILED "Duplicate photo".
 
 **Not supported:** reprocessing a **COMPLETED** image from the dashboard. There is no button for it, and if an event for it arrives, `replay_state` skips it. Re-running the model on finished images is therefore not an implemented feature of the streaming path.
 
@@ -3971,12 +4509,15 @@ sequenceDiagram
 
 | Component restarted | What survives | How work resumes |
 |---|---|---|
-| **Drive watcher** | `drive_watcher_state.json` (change token + `last_created_time`) | `start_change_feed` keeps the token, then `scan_once` catches up from `last_created_time − 2 min`; already-known files are skipped |
+| **Drive watcher** | `drive_watcher_state.json` (change token + `last_created_time`) | `start_change_feed` keeps the token, then `scan_once` catches up from `last_created_time − 2 min`; files it publishes again are skipped by Spark (`"duplicate"`) |
 | **Local file queue** | `storage/local_queue/*.jsonl` and `.draining-*` files | the first `send()` or `drain()` forwards them; claims older than 600 s are recovered |
 | **Kafka broker** | the topic log on the `kafka_data` volume | producers reconnect after the 30 s back-off; Spark resumes |
 | **Spark job** | the checkpoint `offsets/` + `commits/` | an uncommitted batch N is re-run with the same offsets; finished photos are skipped (`"completed"`), undelivered ones re-delivered (`"result_missing"`), others processed again |
 | **Spark killed mid-photo** | the image at PROCESSING | replayed with batch N; if the event is gone (topic cleared), `requeue_stuck` finds PROCESSING rows older than 120 s |
+| **An event lost before Spark registered it** | the photo in Drive | `requeue_stuck --from-drive` (Drive minus database) publishes it again |
 | **Topic wiped while the checkpoint remains** | — | `failOnDataLoss=true` stops the query; this is why the factory reset clears both, and `requeue_stuck` re-publishes INGESTED rows |
+
+The deep test of 2026-10-24 restarted all five services twice: the checkpoint offsets and commits matched (34/34), the local queue was empty, no result was undelivered and the image counts were unchanged.
 
 ---
 
@@ -3986,27 +4527,26 @@ sequenceDiagram
 |---|---|---|---|---|
 | 0.0 | Phone | `DriveUploader.upload` | multipart POST `3f2a….jpg` to `images/maria…/` | Drive file `1AbC…` |
 | ≈1.5 | Watcher main | `drive_watcher.main` → `scan_changes` | `GET /changes?pageToken=…` returns 1 change | — |
-| 1.5 | Watcher main | `register_drive_file` | checks pass; `INSERT images` | UPLOADED |
-| 1.6 | Watcher main | `get_processing_mode` | AUTOMATIC | — |
-| 1.6 | Watcher main | `submit_image_for_processing` | `UPDATE … INGESTED`, COMMIT | INGESTED |
-| 1.6 | Watcher main + librdkafka | `KafkaBackend.send` | `produce` + `flush` → ack | event at offset 1532 |
-| 1.7 | Watcher main | `_save_state` | new change token saved | — |
-| ≤2.7 | Spark JVM | Kafka source | trigger: offsets 1532–1533 → `offsets/57` | — |
-| 2.7 | Spark driver | `foreach_batch_sink` | `collect()` → 1 event; `[kafka] batch 57: 1 photo event(s)` | — |
-| 2.7 | Spark driver | `_process_one` → `replay_state` / `mark_processing` | | PROCESSING |
+| 1.5 | Watcher main | `publish_drive_file` | mode AUTOMATIC; `build_drive_event` | (no row) |
+| 1.5 | Watcher main + librdkafka | `KafkaBackend.send` | `produce` + `flush` → ack | `drive_upload` at offset 1532 |
+| 1.6 | Watcher main | `_save_state` | new change token saved | — |
+| ≤2.6 | Spark JVM | Kafka source | trigger: offsets 1532–1533 → `offsets/57` | — |
+| 2.6 | Spark driver | `foreach_batch_sink` | `collect()` → 1 event; `[kafka] batch 57: 1 photo event(s)` | — |
+| 2.6 | Spark photo thread | `_process_one` → `register_upload` | farmer found; checks pass; `INSERT images` | **INGESTED** |
+| 2.7 | Spark photo thread | `replay_state` / `mark_processing` | | PROCESSING |
 | 2.7 | `drive-download` thread | `load_image_bytes` → `download_file` | GET `alt=media` (≈1.8 s) | — |
-| 2.7 | Spark driver | `clean_event` / `_registered_by_watcher` | validation passes (no Drive call) | — |
-| 4.5 | Spark driver | `save_downloaded_photo`, `check_duplicate_by_hash`, `extract_metadata` | local copy, hash, EXIF written | — |
-| 4.6 | Spark driver | `prepare_image` → `model_input` → `predict` → `compute_risk` | common_rust 0.974, lesion 0.97, HIGH | — |
-| 4.9 | Spark driver | `render_processed_image` | marked-up JPEG | — |
-| 4.9 | Spark driver | `persist_result` | prediction + audit row; `[ALERT] …` | **COMPLETED** |
+| 2.7 | Spark photo thread | `clean_event` / `_registered_from_drive` | validation passes (no Drive call) | — |
+| 4.5 | Spark photo thread | `save_downloaded_photo`, `check_duplicate_by_hash`, `extract_metadata` | local copy, hash, EXIF written | — |
+| 4.6 | Spark photo thread | `prepare_image` → `model_input` → `predict` → `compute_risk` | common_rust 0.974, lesion 0.97, HIGH | — |
+| 4.9 | Spark photo thread | `render_processed_image` | marked-up JPEG | — |
+| 4.9 | Spark photo thread | `persist_result` | prediction + audit row; `[ALERT] …` | **COMPLETED** |
 | 4.9 | `drive-upload` thread | `publish_result_to_drive` | PATCH or POST `3f2a…_processed.jpg`, then `3f2a….json` | files in `results/maria…/` |
 | 6.3 | `drive-upload` thread | `_mark_result_published` | `result_published_at = now` | delivered |
 | 6.3 | Spark driver | `foreach_batch_sink` | `upload.result()` returns; `batch 57 committed: 1 ok` | — |
 | 6.3 | Spark JVM | — | `commits/57` written | Kafka progress durable |
 | next refresh | Phone | `DriveRest.findResults` | lists `results/maria…/` | farmer sees "Common rust — HIGH" |
 
-*(The timings are typical values from the live console's stage timings, not guarantees.)*
+*(The timings are typical values from the live console's stage timings, counted from the moment Google's change feed reports the upload; Google itself took a median of about 15 s to report it in the deep test of 2026-10-24.)*
 
 ---
 
@@ -4028,29 +4568,33 @@ sequenceDiagram
 | `_request` | `drive_client.py:170` | every call: timeout + exponential backoff |
 | `_get_with_retry` | `drive_client.py:192` | GET retry on network drops |
 | `get_file_metadata`, `download_file` | `drive_client.py:214,221` | metadata / bytes of a file |
-| `find_file_in_folder` | `drive_client.py:228` | does this name exist in this folder |
-| `_multipart_body`, `_short_app_properties` | `drive_client.py:251,263` | upload body; 124-byte limit |
-| `upload_bytes`, `_upload_once`, `upload_json` | `drive_client.py:277,303,331` | create-or-update, no duplicates |
-| `get_start_page_token`, `list_changes` | `drive_client.py:339,347` | change-feed bookmark and read |
-| `list_subfolders`, `list_files_in_folders` | `drive_client.py:368,387` | folder search (safety net) |
-| `user_folder_id`, `_find_or_create_user_folder` | `drive_client.py:423,440` | per-farmer folder, cached and locked |
-| `register_farmer`, `share_with`, `ensure_folder` | `drive_client.py:455,497,511` | folders + permissions |
+| `download_thumbnail` | `drive_client.py:228` | Google's small preview, for Pending Review |
+| `find_file_in_folder` | `drive_client.py:242` | does this name exist in this folder |
+| `_multipart_body`, `_short_app_properties` | `drive_client.py:265,277` | upload body; 124-byte limit |
+| `upload_bytes`, `_upload_once`, `upload_json` | `drive_client.py:291,317,345` | create-or-update, no duplicates |
+| `get_start_page_token`, `list_changes` | `drive_client.py:353,361` | change-feed bookmark and read |
+| `list_subfolders`, `list_files_in_folders` | `drive_client.py:382,401` | folder search (safety net, Pending Review) |
+| `user_folder_id`, `_find_or_create_user_folder` | `drive_client.py:437,454` | per-farmer folder, cached and locked |
+| `register_farmer`, `share_with`, `ensure_folder` | `drive_client.py:469,511,525` | folders + permissions |
 | `is_drive_path`, `to_drive_path`, `drive_file_id_from_path`, `load_image_bytes` | `storage/image_storage.py:72,76,80,86` | the `gdrive:` reference |
 | `downloaded_photo_path`, `store_downloaded_photo` | `image_storage.py:112,126` | permanent local copy |
-| `register_drive_file` | `kafka/drive_watcher.py:133` | admission control + hand-off to Kafka |
-| `_register_safely` | `drive_watcher.py:237` | per-file failure isolation |
-| `scan_once`, `scan_changes`, `start_change_feed` | `drive_watcher.py:272,307,338` | detection |
-| `next_interval`, `main` | `drive_watcher.py:351,360` | adaptive polling loop |
-| `publish_result_to_drive` | `spark/preprocessing.py:771` | write result JSON + image to the farmer |
-| `_ResultFolderIndex` | `preprocessing.py:871` | name → id cache per results folder |
-| `_mark_result_published`, `publish_result_to_drive_safely` | `preprocessing.py:922,934` | delivered flag; never-raise wrapper |
+| `build_drive_event` | `kafka/drive_watcher.py:95` | Drive metadata → `drive_upload` event |
+| `publish_drive_file`, `_publish_safely` | `drive_watcher.py:129,151` | publish one file (or hold it in MANUAL); per-file failure isolation |
+| `scan_once`, `scan_changes`, `start_change_feed` | `drive_watcher.py:177,212,243` | detection |
+| `next_interval`, `main` | `drive_watcher.py:256,265` | adaptive polling loop |
+| `ProcessingMode`, `get_processing_mode`, `set_processing_mode` | `storage/processing_mode.py:23,31,39` | AUTOMATIC / MANUAL in a JSON file |
+| `farmer_photos`, `unprocessed_photos`, `send_for_processing` | `storage/drive_inventory.py:23,49,61` | Drive minus database; send them |
+| `get_or_create_farmer` | `storage/farmers.py:17` | account from the Drive owner (race-safe) |
+| `publish_result_to_drive` | `spark/preprocessing.py:765` | write result JSON + image to the farmer |
+| `_ResultFolderIndex` | `preprocessing.py:865` | name → id cache per results folder |
+| `_mark_result_published`, `publish_result_to_drive_safely` | `preprocessing.py:916,928` | delivered flag; never-raise wrapper |
 | `clear_drive_files`, `write_reset_markers`, `_clear_watcher_bookmark` | `storage/reset.py:136,184,291` | factory reset on Drive |
 
 ### Kafka
 
 | Function / class | File : line | One-line role |
 |---|---|---|
-| `kafka` service | `docker-compose.yml` | single-node KRaft broker on `localhost:9092` |
+| `kafka` service | `docker-compose.yml` | single-node KRaft broker on `localhost:9092` (`127.0.0.1` and `::1` only) |
 | `KAFKA_*` settings | `config/settings.py:65–68` | broker, topic, fallback |
 | `bootstrap_address`, `broker_reachable` | `kafka/config.py:12,24` | TCP reachability check |
 | `_parse_lines` | `kafka/producer.py:32` | JSONL parse with corrupt-line isolation |
@@ -4059,48 +4603,50 @@ sequenceDiagram
 | `ResilientBackend._connect` / `_lost_kafka` / `send` | `producer.py:153,168,173` | choose Kafka or file on each send |
 | `ResilientBackend._claim_files` / `drain` | `producer.py:192,218` | forward the backlog once, safely |
 | `get_backend` | `producer.py:271` | factory |
-| `build_upload_event` | `storage/pipeline_submit.py:22` | **the event schema** |
-| `is_upload_rejected`, `NotResubmittable` | `pipeline_submit.py:50,45` | refuse door-rejected uploads |
-| `submit_image_for_processing` | `pipeline_submit.py:55` | INGESTED + publish (all callers) |
-| `consumer_config`, `Assigner`, `describe`, `run` | `kafka/monitor.py:155,116,41,168` | read-only live view |
-| `find_stuck`, `republish`, `process_inline` | `storage/requeue_stuck.py:88,154,184` | re-publish stranded images, or process them without Spark |
+| `build_drive_event` | `kafka/drive_watcher.py:95` | **the `drive_upload` event schema** |
+| `build_upload_event` | `storage/pipeline_submit.py:18` | **the `submit` event schema** |
+| `is_upload_rejected`, `NotResubmittable` | `pipeline_submit.py:51,46` | refuse uploads Spark refused |
+| `submit_image_for_processing` | `pipeline_submit.py:56` | FAILED → INGESTED + publish (Reprocess, Retry) |
+| `consumer_config`, `Assigner`, `describe`, `run` | `kafka/monitor.py:159,120,41,172` | read-only live view |
+| `find_stuck`, `republish`, `process_inline`, `republish_from_drive` | `storage/requeue_stuck.py:94,160,190,229` | re-publish stranded images, process them without Spark, or send Drive photos with no row |
 | `clear_kafka_topic` | `storage/reset.py:106` | delete + recreate the topic |
 
 ### Spark
 
 | Function / class | File : line | One-line role |
 |---|---|---|
-| `CHECKPOINT_DIR`, `EVENT_SCHEMA` | `spark/streaming_job.py:80,82` | checkpoint path; JSON schema |
-| `build_spark` | `streaming_job.py:96` | session + Kafka connector + Windows-safe checkpoint manager |
-| `parse_events` | `streaming_job.py:114` | `from_json`, checks → `rejected_reason`, location rule (Spark SQL) |
-| `foreach_batch_sink` | `streaming_job.py:171` | batch → threads → wait for uploads → commit |
-| `_UPLOADS`, `_upload_result` | `streaming_job.py:207,210` | background Drive delivery |
-| `_process_one` | `streaming_job.py:220` | one photo: replay check → process → persist → hand off |
-| `_warm_up_model`, `run` | `streaming_job.py:294,311` | start-up and the query definition |
+| `CHECKPOINT_DIR`, `EVENT_SCHEMA` | `spark/streaming_job.py:83,85` | checkpoint path; JSON schema (both event kinds) |
+| `build_spark` | `streaming_job.py:117` | session + Kafka connector + Windows-safe checkpoint manager |
+| `parse_events` | `streaming_job.py:135` | `from_json`, checks → `rejected_reason`, location rule (Spark SQL) |
+| `foreach_batch_sink` | `streaming_job.py:199` | batch → threads → wait for uploads → commit |
+| `_UPLOADS`, `_upload_result` | `streaming_job.py:235,238` | background Drive delivery |
+| `_process_one` | `streaming_job.py:248` | one photo: ingestion → replay check → process → persist → hand off |
+| `_warm_up_model`, `run` | `streaming_job.py:336,353` | start-up and the query definition |
+| `UploadRejected`, `register_upload` | `spark/ingestion.py:37,51` | **the ingestion step**: farmer, upload checks, duplicate skip, first row |
 | `InvalidEvent`, `DuplicateImage` | `spark/preprocessing.py:97,101` | rejection types |
 | `check_duplicate_by_hash` | `preprocessing.py:119` | same farmer, same bytes → reject |
-| `clean_event`, `_clean_drive_event`, `_registered_by_watcher` | `preprocessing.py:183,235,265` | per-row validation |
+| `clean_event`, `_clean_drive_event`, `_registered_from_drive` | `preprocessing.py:183,235,265` | per-row validation |
 | `extract_metadata`, `prepare_image` | `preprocessing.py:283,392` | EXIF; one downscale |
 | `model_input`, `model_input_preview`, `heatmap_on_photo` | `preprocessing.py:321,352,362` | Spark's CNN preprocessing (resize, centre crop, normalise); its viewable picture; Grad-CAM back on the photo |
 | `compute_risk` | `preprocessing.py:415` | LOW / MEDIUM / HIGH rule |
 | `process_event` | `preprocessing.py:440` | the per-photo pipeline |
-| `replay_state`, `mark_processing` | `preprocessing.py:596,627` | idempotency gate; PROCESSING flag |
-| `persist_result` | `preprocessing.py:642` | atomic, idempotent database write |
+| `replay_state`, `mark_processing` | `preprocessing.py:596,621` | idempotency gate; PROCESSING flag |
+| `persist_result` | `preprocessing.py:636` | atomic, idempotent database write |
 | `say`, `farmer_label`, `photo_line`, … | `spark/live_log.py` | console output |
-| `process_inline` | `storage/requeue_stuck.py:184` | the same logic without Spark |
-| `jdbc_url_and_properties`, `read_inputs`, `photos_with_latest_prediction` | `spark/batch_analytics.py:47,99,120` | JDBC connection; the three inputs; one row per image with its latest prediction |
-| `compute`, `write_tables`, `refresh`, `run`, `watch` | `batch_analytics.py:132,215,223,236,265` | every dashboard figure; write the analytics tables; compute once or keep them current |
+| `process_inline` | `storage/requeue_stuck.py:190` | the same logic without Spark |
+| `jdbc_url_and_properties`, `read_inputs`, `photos_with_latest_prediction` | `spark/batch_analytics.py:47,99,121` | JDBC connection; the three inputs; one row per image with its latest prediction |
+| `compute`, `write_tables`, `refresh`, `run`, `watch` | `batch_analytics.py:133,216,224,237,266` | every dashboard figure; write the analytics tables; compute once or keep them current |
 
 ---
 
 ## IV.6 The most important design decisions
 
 1. **Drive as the only phone-facing interface.** There is no public API server, no open port and no farmer passwords. Google handles authentication, storage, sharing and transport security. *Cost:* Drive API quotas and latency (Drive round trips are the slowest stage), and dependence on Google.
-2. **Identity from Drive's `owners` field, not from the client.** The phone's tags are trusted only for descriptive fields. Who uploaded is decided by Google, and the folder-owner check stops cross-farmer filing.
+2. **Identity from Drive's `owners` field, not from the client.** The phone's tags are trusted only for descriptive fields. Who uploaded is decided by Google, and the folder-owner check (in Spark's `register_upload`) stops cross-farmer filing.
 3. **The change feed for detection, plus a periodic folder scan as a safety net.** One request per poll whatever the number of farmers, no search-index lag, and at-least-once detection with idempotent registration.
 4. **The claim-check pattern on Kafka.** Events carry `gdrive:<id>`, not bytes. Messages stay about 300 bytes, and there is one copy of each photo.
-5. **Confirmed, synchronous produce, with a durable local fallback.** The database is never INGESTED for an event the broker hasn't acknowledged (or that isn't in the file queue). The fallback is decided on every send and drained automatically.
-6. **Commit INGESTED before publishing.** This prevents the race where Spark finishes first and the late commit overwrites COMPLETED.
+5. **Confirmed, synchronous produce, with a durable local fallback.** An event counts as sent only when the broker acknowledged it (or it is in the file queue). The fallback is decided on every send and drained automatically.
+6. **A stateless watcher, and Spark as the gatekeeper** (since 2026-10-24). The watcher only turns Drive changes into `drive_upload` events; Spark's `register_upload` is the one place that creates a photo's row, checks the upload and skips duplicates. A lost event loses no data: the photo is still in Drive, and `requeue_stuck --from-drive` (Drive minus database) sends it again. MANUAL mode stores nothing: pending is Drive minus database. For a re-sent photo (Reprocess) INGESTED is committed before publishing, which prevents the race where Spark finishes first and the late commit overwrites COMPLETED.
 7. **Structured Streaming with a checkpoint and `foreachBatch`.** Spark supplies offset management, fault tolerance and batching. Python supplies ML and side effects. The batch is committed only after its results are written and their uploads attempted.
 8. **Idempotency over deduplication state.** The database-backed `replay_state` and delete-then-insert replaced the unbounded `dropDuplicates` state that silently dropped real Reprocesses.
 9. **Threads inside the driver, overlapping I/O.** 8 photo threads, 16 download threads and 16 upload threads, measured and tuned (`config/settings.py` comments).
@@ -4128,6 +4674,9 @@ sequenceDiagram
 | 12 | The **centre crop** leaves out the edges of a non-square photo | `model_input` | a leaf at the edge of a wide photo is partly cut off; the farmer should frame the leaf in the middle |
 | 13 | The analytics are **recomputed in full**, not incrementally, after a change is seen (checked every 30 s), through one JDBC connection | `batch_analytics.watch`, `refresh` | dashboard figures can lag by up to a check interval plus one recompute; the cost grows with the data |
 | 14 | A COMPLETED image **cannot be re-run** through the streaming path | `replay_state`, dashboard buttons | model upgrades don't re-score old photos automatically |
+| 15 | Pending Review lists **every** farmer folder in Drive | `drive_inventory.farmer_photos` | about 7 s for 650 photos; cached for 60 s, so a new upload can take up to a minute to appear |
+| 16 | The PostgreSQL enum type still has the unused labels `UPLOADED` and `PENDING_REVIEW` | `processingstatus` type | harmless; PostgreSQL can't drop an enum label without rebuilding the type |
+| 17 | The dashboard (8501) and the Spark UI (4040) listen on **every** network interface; the dashboard is plain HTTP with no login-attempt limit, the Spark UI has no login | Streamlit and Spark defaults | found by the non-functional deep test of 2026-10-24; not yet restricted to this laptop |
 
 ---
 
@@ -4146,16 +4695,16 @@ sequenceDiagram
 > Spark provides the streaming *infrastructure*: Kafka offset tracking, the checkpoint write-ahead log, bounded micro-batches (`maxOffsetsPerTrigger=100`), triggers, replay on failure, and declarative validation in Spark SQL (`parse_events`). The per-image work (Drive I/O, PyTorch) can't run inside JVM DataFrame operations, so `foreachBatch` is the documented pattern for it. I'm honest that inference is not distributed across executors in my deployment.
 
 **Q5. What happens if Kafka is down when a farmer uploads?**
-> `ResilientBackend.send` can't connect (3 s metadata timeout), so the event is appended to `storage/local_queue/maize-disease-images.jsonl` and the image stays INGESTED. Every watcher loop calls `drain()`, and once the broker answers, the backlog is forwarded oldest first, before any new event. The file is claimed by an atomic rename, so the dashboard and the watcher never forward it twice. If fallback is disabled, the image is marked FAILED "Kafka publish failed".
+> `ResilientBackend.send` can't connect (3 s metadata timeout), so the `drive_upload` event is appended to `storage/local_queue/maize-disease-images.jsonl`. No row exists yet, so nothing is stuck in the database. Every watcher loop calls `drain()`, and once the broker answers, the backlog is forwarded oldest first, before any new event; the deep test of 2026-10-24 checked the order and that nothing is lost. The file is claimed by an atomic rename, so the dashboard and the watcher never forward it twice. If the fallback is disabled, `_publish_safely` logs the failure and the 10-minute scan or `requeue_stuck --from-drive` sends the photo later.
 
-**Q6. Why commit INGESTED before publishing instead of after?**
-> If I published first and committed afterwards, Spark could finish the photo (COMPLETED) before my commit landed, and my commit would overwrite COMPLETED with INGESTED. Committing first means the only possible failure is "INGESTED but not published", which I detect and handle: the publish failure is caught and marked FAILED, and `requeue_stuck` finds INGESTED rows.
+**Q6. Why commit INGESTED before publishing a Reprocess instead of after?**
+> If I published first and committed afterwards, Spark could finish the photo (COMPLETED) before my commit landed, and my commit would overwrite COMPLETED with INGESTED. Committing first means the only possible failure is "INGESTED but not published", which I detect and handle: the publish failure is caught and marked FAILED, and `requeue_stuck` finds INGESTED rows. For a new photo the question doesn't arise: nothing is written before the event, and Spark writes the row itself when it consumes it.
 
 **Q7. You removed `dropDuplicates` from the stream. Isn't that worse?**
 > A streaming `dropDuplicates` without a watermark keeps every `image_id` in state forever (memory that grows without limit) and silently dropped a real Reprocess of a known image, which then stayed INGESTED. I now de-duplicate statelessly within each batch, and against the database across batches, so a Reprocess (status reset to INGESTED) passes, while a replay of a COMPLETED image is skipped.
 
 **Q8. How do you stop a farmer from uploading as somebody else, or a forged Kafka event from reading any Drive file?**
-> The uploader is taken from Drive's `owners` field, which Google sets from the authenticated account. The photo must be inside the folder named after that same email. The file name must start with its `image_id`, which must be a UUID. In Spark, `_registered_by_watcher` trusts an event only if the database already has exactly that `image_id`, Drive file and user. Otherwise `_clean_drive_event` asks Drive and requires the file's `appProperties.image_id` to match.
+> The uploader is taken from Drive's `owners` field, which Google sets from the authenticated account. The photo must be inside the folder named after that same email. The file name must start with its `image_id`, which must be a UUID. The owner, folder, name, type and size are checked by Spark's ingestion step (`register_upload`), from the Drive metadata Google reported. In Spark, `_registered_from_drive` trusts an event only if the database already has exactly that `image_id`, Drive file and user. Kafka itself is reachable from this laptop only (`127.0.0.1` and `::1`). Otherwise `_clean_drive_event` asks Drive and requires the file's `appProperties.image_id` to match.
 
 **Q9. What if the Drive upload of the result fails after the prediction is saved?**
 > `publish_result_to_drive_safely` logs it and returns `None`. The image stays COMPLETED with `result_published_at` NULL. Because the batch only commits after the upload *attempt*, a crash before it causes a replay, where `replay_state` returns `"result_missing"` and the photo is redone. For a plain Drive outage, `requeue_stuck` selects those rows (`result_not_delivered()`) and re-sends them. The dashboard's System Status counts them.
@@ -4177,6 +4726,12 @@ sequenceDiagram
 
 **Q15. Where exactly does a Kafka event turn back into a Python dict?**
 > In `foreach_batch_sink`: Spark's `from_json` (in the JVM) has already turned the bytes into typed columns in `parse_events`, and the per-batch dedupe followed by `.collect()` brings the rows to the driver, where `row.asDict()` gives the dict that `_process_one` and `process_event` work on.
+
+**Q16. Why did you move the database work out of the Drive watcher?**
+> The watcher used to create the row, check the upload and hold MANUAL photos as PENDING_REVIEW rows. That gave two writers for the same table and a second copy of the rules. Now the watcher is a stateless producer (Drive → Kafka) and Spark is the gatekeeper: `register_upload` resolves the farmer, checks the upload, skips duplicates and creates the row, idempotently. Nothing is lost if an event is lost, because the photo is still in Drive; reconciliation is a set difference (Drive minus database), which is exactly what the Pending Review page and `requeue_stuck --from-drive` compute.
+
+**Q17. What did your deep tests find?**
+> Two real bugs, both fixed on 2026-10-24. (1) A new farmer's first photos registered in parallel threads both tried to create the account; the second insert failed the `UNIQUE` constraint and the exception stopped the Spark query. `get_or_create_farmer` now rolls back and reads the account the other thread created. (2) A photo refused for its content (a future capture time) got no row, so it stayed on Pending Review forever; it is now registered and marked FAILED. A third finding was configuration: Kafka listened on IPv4 loopback only, while `localhost` resolves to IPv6 first on Windows, so half the connections failed their 3 s check; the broker now listens on both loopback addresses.
 
 ---
 

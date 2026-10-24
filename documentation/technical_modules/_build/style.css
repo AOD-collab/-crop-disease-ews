@@ -1,0 +1,23 @@
+@page { size: A4; margin: 18mm 16mm; }
+body { font-family: 'Segoe UI', Arial, sans-serif; font-size: 10.5pt; line-height: 1.45; color: #1f2328; }
+h1, h2, h3, h4 { color: #1a7f37; line-height: 1.25; page-break-after: avoid; }
+h1 { font-size: 20pt; }
+h2 { font-size: 15pt; border-bottom: 1px solid #d0d7de; padding-bottom: 3px; page-break-before: always; }
+h3 { font-size: 12.5pt; color: #1f2328; }
+h4 { font-size: 11pt; color: #1f2328; }
+code { font-family: Consolas, monospace; font-size: 9pt; background: #f2f4f6; padding: 1px 3px; border-radius: 3px; }
+pre { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 4px; padding: 8px 10px;
+      white-space: pre-wrap; word-wrap: break-word; font-size: 8.3pt; line-height: 1.35; }
+pre code { background: none; padding: 0; font-size: 8.3pt; }
+pre.mermaid { background: none; border: none; text-align: center; page-break-inside: avoid; }
+table { border-collapse: collapse; width: 100%; font-size: 9pt; margin: 8px 0; }
+th { background: #eef6f0; text-align: left; }
+th, td { border: 1px solid #d0d7de; padding: 4px 6px; vertical-align: top; }
+tr { page-break-inside: avoid; }
+blockquote { border-left: 4px solid #2da44e; background: #f3faf5; margin: 8px 0; padding: 6px 12px; }
+.toc-page { page-break-after: always; }
+.toc ul { list-style: none; padding-left: 14px; margin: 0; }
+.toc > ul { padding-left: 0; }
+.toc a { color: #1f2328; text-decoration: none; }
+.katex-display { margin: 6px 0; }
+pre.mermaid svg { max-width: 100%; max-height: 195mm; height: auto; }
