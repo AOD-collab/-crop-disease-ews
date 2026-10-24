@@ -15,7 +15,6 @@ What it clears:
     the central account's trash, recoverable for 30 days; the per-farmer
     folders and their sharing are kept so the app keeps working), plus a
     reset marker that makes each phone clear its saved history copy
-  * optionally the dev mail outbox under MAIL_OUTBOX_DIR
   * the Drive watcher's bookmark (storage/drive_watcher_state.json): after
     the restart every photo still in Drive is registered and processed
     again, from its local copy (no new download)
@@ -36,7 +35,6 @@ runnable on its own:
 
     python -m storage.reset --yes                    # DB + local files only
     python -m storage.reset --yes --kafka --drive    # full clean start
-    python -m storage.reset --yes --mail             # also clear the mail outbox
 """
 
 import argparse
@@ -45,7 +43,7 @@ import sys
 import time
 
 from config.settings import (
-    IMAGE_STORAGE_PATH, LOCAL_QUEUE_DIR, MAIL_OUTBOX_DIR, SPARK_CHECKPOINT_ROOT,
+    IMAGE_STORAGE_PATH, LOCAL_QUEUE_DIR, SPARK_CHECKPOINT_ROOT,
 )
 from storage.database import (
     SessionLocal, init_db, Image, Prediction, ProcessingEvent, RejectedEvent, ScaleTestRun, now_utc,
@@ -232,8 +230,8 @@ def reset_preview() -> dict:
     }
 
 
-def factory_reset(clear_mail_outbox: bool = False, clear_kafka: bool = False,
-                  clear_drive: bool = False, performed_by: str = None) -> dict:
+def factory_reset(clear_kafka: bool = False, clear_drive: bool = False,
+                  performed_by: str = None) -> dict:
     """Perform the reset. Returns a summary of what was removed.
 
     Users and admins are intentionally left untouched — only pipeline
@@ -271,7 +269,6 @@ def factory_reset(clear_mail_outbox: bool = False, clear_kafka: bool = False,
         "spark_checkpoints_cleared": _empty_dir(SPARK_CHECKPOINT_DIR),
         "kafka_topic": clear_kafka_topic() if clear_kafka else None,
         "drive_files": clear_drive_files() if clear_drive else None,
-        "mail_outbox_cleared": _empty_dir(MAIL_OUTBOX_DIR) if clear_mail_outbox else None,
         "drive_watcher_bookmark": _clear_watcher_bookmark(),
     }
     # What stayed on disk, matched against the now-empty catalog: every
@@ -310,8 +307,6 @@ def _main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--yes", action="store_true",
                         help="required — confirm the destructive reset")
-    parser.add_argument("--mail", action="store_true",
-                        help="also clear the dev mail outbox (storage/mail_outbox/)")
     parser.add_argument("--kafka", action="store_true",
                         help="also delete every message in the Kafka image topic")
     parser.add_argument("--drive", action="store_true",
@@ -327,8 +322,7 @@ def _main(argv=None) -> int:
         parser.error("the Drive watcher is running — stop it first, otherwise an upload that "
                      "arrives during the reset can be lost")
 
-    summary = factory_reset(clear_mail_outbox=args.mail, clear_kafka=args.kafka,
-                            clear_drive=args.drive)
+    summary = factory_reset(clear_kafka=args.kafka, clear_drive=args.drive)
     print("[reset] Factory reset complete. Users/admins were kept. Summary:")
     for key, value in summary.items():
         if value is None:

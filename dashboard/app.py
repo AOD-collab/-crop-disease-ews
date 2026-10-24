@@ -1069,11 +1069,6 @@ elif page == "Maintenance":
     )
     also_kafka = st.checkbox("Also delete all Kafka messages", value=True)
     also_drive = st.checkbox("Also delete every farmer's photos and results in Google Drive", value=False)
-    also_mail = st.checkbox(
-        "Also clear the old mail outbox (`storage/mail_outbox/`)",
-        value=False,
-        help="Only used by the previous password/verification-code login.",
-    )
     st.caption(
         "Stop the Spark job and the Drive watcher **before** resetting, and start "
         "them again afterwards."
@@ -1110,8 +1105,7 @@ elif page == "Maintenance":
     if st.button("Factory reset now", icon="🗑️", type="primary",
                  disabled=confirm != "RESET" or bool(spark_running) or bool(watcher_running)):
         with st.spinner("Wiping data and history…"):
-            summary = factory_reset(clear_mail_outbox=also_mail, clear_kafka=also_kafka,
-                                    clear_drive=also_drive,
+            summary = factory_reset(clear_kafka=also_kafka, clear_drive=also_drive,
                                     performed_by=st.session_state["admin_user"]["username"])
         # Shown after the rerun below (which reloads the emptied dashboard).
         st.session_state["reset_summary"] = summary

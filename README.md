@@ -369,7 +369,6 @@ kind:
 | `BOOTSTRAP_ADMIN_USERNAME` / `BOOTSTRAP_ADMIN_PASSWORD` | First admin account, created by `storage/init_db.py` | *(unset — no bootstrap admin without this)* |
 | `BOOTSTRAP_ADMIN_EMAIL` / `BOOTSTRAP_ADMIN_FULL_NAME` | Email/name on that bootstrap admin (created pre-verified) | `admin@example.local` / `System Administrator` |
 | `RISK_THRESHOLD_HIGH` / `RISK_THRESHOLD_MEDIUM` | Risk score cutoffs | `0.6` / `0.3` |
-| `MAIL_OUTBOX_DIR` | Old e-mail outbox of the removed REST API; factory reset can still empty it | `storage/mail_outbox` |
 
 ## 19a. Google Drive setup (once)
 

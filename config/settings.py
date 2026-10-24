@@ -132,9 +132,6 @@ BOOTSTRAP_ADMIN_PASSWORD = os.getenv("BOOTSTRAP_ADMIN_PASSWORD", "")
 BOOTSTRAP_ADMIN_EMAIL = os.getenv("BOOTSTRAP_ADMIN_EMAIL", "admin@example.local")
 BOOTSTRAP_ADMIN_FULL_NAME = os.getenv("BOOTSTRAP_ADMIN_FULL_NAME", "System Administrator")
 
-# Where the removed REST API's e-mail verification wrote its outbox. Nothing
-# writes there any more; factory reset can still empty an old one.
-MAIL_OUTBOX_DIR = Path(os.getenv("MAIL_OUTBOX_DIR", str(BASE_DIR / "storage" / "mail_outbox")))
 
 # --------------------------------------------------------------------
 # Risk thresholds (rule-based risk assessment — see spark/preprocessing.py)

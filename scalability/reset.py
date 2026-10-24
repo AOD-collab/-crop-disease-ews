@@ -48,7 +48,7 @@ class UnsafeReset(Exception):
 
 def _protected_paths() -> list:
     base = Path(settings.BASE_DIR)
-    return [base, base / "storage", base / "data", base / "ml", settings.MAIL_OUTBOX_DIR,
+    return [base, base / "storage", base / "data", base / "ml",
             settings.IMAGE_STORAGE_PATH, settings.DOWNLOADED_PHOTOS_DIR,
             settings.SPARK_CHECKPOINT_ROOT, settings.LOCAL_QUEUE_DIR, settings.REVIEW_DIR,
             settings.LABELLED_TRAIN_DIR, settings.TRAINING_PROJECT_DIR,
