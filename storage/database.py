@@ -77,13 +77,11 @@ class RiskLevel(str, enum.Enum):
 
 
 class ProcessingStatus(str, enum.Enum):
-    UPLOADED = "UPLOADED"          # row created (Drive watcher), not yet published to Kafka
-    # MANUAL processing mode only: the image is stored but deliberately held
-    # back — nothing is published to Kafka until an admin clicks "Process"
-    # on the dashboard. AUTOMATIC
-    # mode never uses this state, so the existing pipeline is unaffected.
-    PENDING_REVIEW = "PENDING_REVIEW"
-    INGESTED = "INGESTED"          # Kafka event published/consumed
+    # A row only exists once Spark has registered the photo
+    # (spark/ingestion.register_upload); a photo waiting in MANUAL mode is
+    # still only a file in Drive. (The PostgreSQL enum type also keeps the
+    # old UPLOADED / PENDING_REVIEW labels; no row uses them.)
+    INGESTED = "INGESTED"          # registered by Spark (or sent again by Reprocess)
     PROCESSING = "PROCESSING"      # Spark/CNN picked it up
     COMPLETED = "COMPLETED"        # prediction stored
     FAILED = "FAILED"              # any stage failed — see error_message
@@ -174,7 +172,7 @@ class Image(Base):
     image_width = Column(Integer, nullable=True)
     image_height = Column(Integer, nullable=True)
 
-    status = Column(Enum(ProcessingStatus), nullable=False, default=ProcessingStatus.UPLOADED)
+    status = Column(Enum(ProcessingStatus), nullable=False, default=ProcessingStatus.INGESTED)
     error_message = Column(Text, nullable=True)
 
     created_at = Column(DateTime(timezone=True), default=now_utc, nullable=False)
@@ -276,20 +274,6 @@ class RejectedEvent(Base):
     raw_event = Column(Text, nullable=True)   # JSON-serialized event payload, best-effort
     reason = Column(Text, nullable=False)
     created_at = Column(DateTime(timezone=True), default=now_utc, nullable=False)
-
-
-# ----------------------------------------------------------------------
-# system_settings — tiny key/value store for runtime-toggleable settings.
-# It held the image-processing mode until that moved to
-# storage/processing_mode.json (the Drive watcher reads it without a
-# database); processing_mode.migrate_from_database() copies the old value.
-# ----------------------------------------------------------------------
-class SystemSetting(Base):
-    __tablename__ = "system_settings"
-
-    key = Column(String, primary_key=True)
-    value = Column(String, nullable=False)
-    updated_at = Column(DateTime(timezone=True), default=now_utc, onupdate=now_utc, nullable=False)
 
 
 # ----------------------------------------------------------------------
@@ -502,11 +486,6 @@ ANALYTICS_TABLES = (
 )
 
 
-# The image-processing mode lives in storage/processing_mode.json
-# (storage/processing_mode.py), so the Drive watcher needs no database.
-from storage.processing_mode import ProcessingMode  # noqa: E402,F401 - re-exported
-
-
 # ----------------------------------------------------------------------
 # Engine / session
 # ----------------------------------------------------------------------
@@ -615,22 +594,11 @@ def _drop_field_feature(conn):
             conn.execute(sql_text(drop_stmt))
 
 
-def _ensure_pending_review_enum_value():
-    """PostgreSQL stores ProcessingStatus as a native ENUM type, so the new
-    PENDING_REVIEW member needs `ALTER TYPE ... ADD VALUE` on a pre-existing
-    database. SQLite stores it as plain VARCHAR (SQLAlchemy 1.4+ adds no
-    CHECK constraint by default), so nothing is required there. Best-effort:
-    a failure here must not stop init_db()."""
-    if engine.dialect.name != "postgresql":
-        return
-    try:
-        with engine.connect() as conn:
-            conn.execute(sql_text("COMMIT"))  # ADD VALUE can't run inside a txn block
-            conn.execute(sql_text(
-                "ALTER TYPE processingstatus ADD VALUE IF NOT EXISTS 'PENDING_REVIEW'"
-            ))
-    except Exception as e:  # pragma: no cover - depends on a live PG server
-        print(f"[init_db] Could not ensure PENDING_REVIEW enum value: {e}")
+def _drop_system_settings(conn):
+    """system_settings held only the image-processing mode, which now lives
+    in storage/processing_mode.json (the Drive watcher reads it without a
+    database)."""
+    conn.execute(sql_text("DROP TABLE IF EXISTS system_settings"))
 
 
 TABLEAU_VIEW = "v_tableau_images"
@@ -767,9 +735,9 @@ def init_db():
     _add_missing_columns("predictions", _PREDICTIONS_MIGRATION_COLUMNS)
     _add_missing_columns("processing_events", _PROCESSING_EVENTS_MIGRATION_COLUMNS)
     _add_missing_columns("scale_test_items", _SCALE_TEST_ITEMS_MIGRATION_COLUMNS)
-    _ensure_pending_review_enum_value()
     with engine.begin() as conn:
         _drop_field_feature(conn)
+        _drop_system_settings(conn)
         _create_tableau_view(conn)
         _create_admin_catalog_view(conn)
 

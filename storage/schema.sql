@@ -55,8 +55,8 @@ CREATE TABLE IF NOT EXISTS images (
     image_width          INTEGER,
     image_height         INTEGER,
 
-    status               VARCHAR NOT NULL DEFAULT 'UPLOADED'
-                          CHECK (status IN ('UPLOADED','PENDING_REVIEW','INGESTED','PROCESSING','COMPLETED','FAILED')),
+    status               VARCHAR NOT NULL DEFAULT 'INGESTED'
+                          CHECK (status IN ('INGESTED','PROCESSING','COMPLETED','FAILED')),
     error_message        TEXT,
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -105,7 +105,7 @@ CREATE TABLE IF NOT EXISTS processing_events (
     prediction_completed_at       TIMESTAMPTZ,
     total_latency_ms              INTEGER,
     status                        VARCHAR NOT NULL DEFAULT 'INGESTED'
-                                   CHECK (status IN ('UPLOADED','PENDING_REVIEW','INGESTED','PROCESSING','COMPLETED','FAILED')),
+                                   CHECK (status IN ('INGESTED','PROCESSING','COMPLETED','FAILED')),
     error_message                 TEXT,
     created_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -118,14 +118,6 @@ CREATE TABLE IF NOT EXISTS rejected_events (
     raw_event                    TEXT,
     reason                        TEXT NOT NULL,
     created_at                    TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
--- Runtime-toggleable key/value settings shared across the dashboard and the
--- Drive watcher processes (currently just the AUTOMATIC/MANUAL image-processing mode).
-CREATE TABLE IF NOT EXISTS system_settings (
-    key                            VARCHAR PRIMARY KEY,
-    value                          VARCHAR NOT NULL,
-    updated_at                     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Scalability test runs (scalability/run.py). Test photos get their own

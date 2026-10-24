@@ -302,7 +302,7 @@ if auto_refresh:
 _PAGE_HEAD = {
     "Overview": ("Overview", "How many leaves were checked, what was found, and what is still waiting."),
     "Real-Time Monitoring": ("Recent submissions", "The latest results, as soon as Spark finishes each photo."),
-    "Pending Review": ("Pending review", "Uploads held in manual mode until you release them."),
+    "Pending Review": ("Pending review", "Farmer photos waiting in Google Drive until you send them for processing."),
     "Users": ("Farmer management", "Register farmers, and pause or remove their access."),
     "Images": ("Image management", "Find, compare and track every farmer photo, and manage the local photo "
                                    "cache."),
@@ -485,8 +485,7 @@ def _system_status() -> dict:
         cutoff = now_utc() - timedelta(minutes=2)
         with SessionLocal() as s_:
             stuck = (s_.query(Image)
-                     .filter(Image.status.in_([ProcessingStatus.UPLOADED, ProcessingStatus.INGESTED,
-                                               ProcessingStatus.PROCESSING]),
+                     .filter(Image.status.in_([ProcessingStatus.INGESTED, ProcessingStatus.PROCESSING]),
                              Image.uploaded_at < cutoff, Image.source != SCALE_TEST_SOURCE).count())
             # photos in Drive not sent for processing yet (MANUAL mode, or a lost event)
             pending = len(_pending_drive_photos())
@@ -627,10 +626,9 @@ if page == "Overview":
                     # Only offer "Reprocess" where it actually means
                     # something — there's no "Flag for Review" feature in
                     # this system, so that mockup action isn't reproduced.
-                    # Not for an upload the Drive watcher refused (inactive
+                    # Not for an upload Spark's ingestion step refused (inactive
                     # account, someone else's folder, ...): that stays refused.
-                    if (img.status in (ProcessingStatus.FAILED, ProcessingStatus.PENDING_REVIEW)
-                            and not is_upload_rejected(img)):
+                    if img.status == ProcessingStatus.FAILED and not is_upload_rejected(img):
                         if st.button("Reprocess", icon="🔄", key=f"reprocess_{img.image_id}"):
                             try:
                                 submit_image_for_processing(session, img)
@@ -869,7 +867,7 @@ elif page == "Users":
                         "Status", [s.value for s in UserStatus],
                         index=[s.value for s in UserStatus].index(target.status.value),
                         help="Anything other than ACTIVE blocks this farmer's new uploads "
-                             "(the Drive watcher rejects them and tells the app why).")
+                             "(Spark refuses them and tells the app why).")
                     update_submitted = st.form_submit_button("Save changes")
 
                 if update_submitted:

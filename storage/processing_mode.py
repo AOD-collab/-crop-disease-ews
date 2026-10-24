@@ -7,9 +7,7 @@ so the Drive watcher can read it without a database connection.
                page lists the Drive photos that have no database row yet and
                the administrator sends them with "Process"
 
-The dashboard writes the file, the watcher reads it on every check. It used
-to be a row in system_settings; migrate_from_database() copies that value
-once (storage/init_db.py runs it at start-up).
+The dashboard writes the file, the watcher reads it on every check.
 """
 
 import enum
@@ -48,21 +46,3 @@ def set_processing_mode(mode) -> ProcessingMode:
     tmp.write_text(json.dumps({"mode": mode.value}), encoding="utf-8")
     tmp.replace(MODE_FILE)
     return mode
-
-
-def migrate_from_database() -> None:
-    """One-time: when there is no mode file yet, take the value the old
-    system_settings row holds, so a system left in MANUAL stays in MANUAL."""
-    if MODE_FILE.exists():
-        return
-    from storage.database import SessionLocal, SystemSetting
-    try:
-        with SessionLocal() as s:
-            row = s.get(SystemSetting, "processing_mode")
-            value = row.value if row is not None else None
-    except Exception:  # noqa: BLE001 - no table / no database: AUTOMATIC
-        value = None
-    try:
-        set_processing_mode(value or ProcessingMode.AUTOMATIC)
-    except ValueError:
-        set_processing_mode(ProcessingMode.AUTOMATIC)

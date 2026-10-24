@@ -143,8 +143,8 @@ def spark_streaming_alive() -> bool:
 
 
 def count_stuck_images() -> dict | None:
-    """{"waiting": photos the pipeline still owes a result (UPLOADED /
-    INGESTED / PROCESSING), "undelivered": COMPLETED Drive photos whose result
+    """{"waiting": photos the pipeline still owes a result (INGESTED /
+    PROCESSING), "undelivered": COMPLETED Drive photos whose result
     never reached Drive} — both older than 2 minutes, i.e. what
     storage.requeue_stuck re-sends. Returns None if the DB can't be read for
     any reason (don't let a reporting nicety break the launcher)."""
@@ -358,6 +358,7 @@ def main() -> int:
               f"{stuck['undelivered']} finished result(s) never reached Google Drive. To clear them:")
         print("  python -m storage.requeue_stuck --all            # re-publish to Kafka (Spark must be up)")
         print("  python -m storage.requeue_stuck --all --inline    # or process them now, in-process")
+        print("  python -m storage.requeue_stuck --from-drive      # Drive photos Spark never registered")
 
     # ---- 4. report ------------------------------------------------
     print("\nUp. Open:")

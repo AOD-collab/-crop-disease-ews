@@ -38,7 +38,7 @@ catalog = Table(
     Column("reviewed_at", DateTime(timezone=True)),
 )
 
-PROCESSING_STATUSES = ("UPLOADED", "INGESTED", "PROCESSING")
+PROCESSING_STATUSES = ("INGESTED", "PROCESSING")
 NO_PREDICTION = "(no prediction)"
 NO_RISK = "(no risk level)"
 
@@ -151,7 +151,6 @@ def summary() -> dict:
     return {
         "total": sum(by_status.values()),
         "completed": by_status.get("COMPLETED", 0),
-        "pending_review": by_status.get("PENDING_REVIEW", 0),
         "processing": sum(by_status.get(k, 0) for k in PROCESSING_STATUSES),
         "failed": by_status.get("FAILED", 0),
         "with_prediction": with_prediction,

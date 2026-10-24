@@ -109,9 +109,10 @@ def _local_day(column):
 
 
 def _location():
-    """Location cleaned like the streaming job's (case, spaces), so a photo
-    Spark never processed (refused upload, held for review) groups with the
-    rest; blanks are grouped under UNKNOWN_LOCATION."""
+    """Location cleaned like the streaming job's (case, spaces), so a row
+    that never got Spark's cleaned value (registered but not finished, or
+    from before the cleaning rule) groups with the rest; blanks are grouped
+    under UNKNOWN_LOCATION."""
     from pyspark.sql.functions import coalesce, col, initcap, lit, regexp_replace, trim, when
     loc = initcap(regexp_replace(trim(coalesce(col("location"), lit(""))), r"\s+", " "))
     return when(loc == "", lit(UNKNOWN_LOCATION)).otherwise(loc)

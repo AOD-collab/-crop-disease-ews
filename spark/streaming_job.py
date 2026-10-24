@@ -153,8 +153,8 @@ def parse_events(raw):
     Kafka value (the dead-letter table).
 
     spark/preprocessing.clean_event() enforces the same rules again,
-    per-row, so a direct process_event() call (unit tests, or the
-    MANUAL-mode admin release path, which doesn't go through this
+    per-row, so a direct process_event() call (unit tests, or
+    storage.requeue_stuck --inline, which doesn't go through this
     DataFrame) can't skip validation.
 
     Duplicate image_ids are NOT dropped here any more: a streaming
@@ -278,11 +278,6 @@ def _process_one(event: dict):
                   f"{why}, skipping")
             return None
     state = replay_state(event.get("image_id"))      # one lookup instead of three
-    if state == "held":
-        # MANUAL mode holds this photo; an admin's Process sets it INGESTED
-        # before publishing, so this is an old event (a replay) — skip it.
-        print(f"[streaming_job] {event.get('image_id')} is held for manual review, skipping old event")
-        return None
     if state == "completed":
         print(f"[streaming_job] {event.get('image_id')} already COMPLETED, skipping replayed event")
         return None

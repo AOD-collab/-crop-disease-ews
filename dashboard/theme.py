@@ -17,8 +17,7 @@ DISEASE_COLOR_MAP = {
     "uncertain": "#E0A800",
 }
 STATUS_BADGE_COLOR = {
-    "COMPLETED": "green", "INGESTED": "blue", "PROCESSING": "blue",
-    "PENDING_REVIEW": "gray", "UPLOADED": "gray", "FAILED": "red",
+    "COMPLETED": "green", "INGESTED": "blue", "PROCESSING": "blue", "FAILED": "red",
 }
 
 

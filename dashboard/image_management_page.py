@@ -59,14 +59,13 @@ def _summary():
     total_bytes = sum(u["bytes"] for u in usage)
 
     st.markdown("**Database records** (farmer images in PostgreSQL)")
-    c = st.columns(7)
+    c = st.columns(6)
     c[0].metric("Farmer images", db["total"])
     c[1].metric("Completed", db["completed"])
-    c[2].metric("Pending review", db["pending_review"])
-    c[3].metric("Processing", db["processing"], help="Uploaded, ingested or being processed.")
-    c[4].metric("Failed", db["failed"])
-    c[5].metric("With a prediction", db["with_prediction"])
-    c[6].metric("Awaiting labels", len(image_cache.review_ids()),
+    c[2].metric("Processing", db["processing"], help="Ingested or being processed.")
+    c[3].metric("Failed", db["failed"])
+    c[4].metric("With a prediction", db["with_prediction"])
+    c[5].metric("Awaiting labels", len(image_cache.review_ids()),
                 help="Photos waiting on the Label photos page (files in the review folder).")
     st.markdown("**Files on this laptop**")
     c = st.columns(4)

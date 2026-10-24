@@ -21,7 +21,6 @@ farmer gets that result in Drive, as before.
 """
 
 import json
-from datetime import datetime
 
 from sqlalchemy.exc import IntegrityError
 
@@ -31,8 +30,8 @@ from storage.database import SessionLocal, Image, RejectedEvent, ProcessingStatu
 from storage.farmers import get_or_create_farmer
 from storage.pipeline_submit import UPLOAD_REJECTED_PREFIX
 from spark.preprocessing import InvalidEvent
-
-_UUID_CHARS = set("0123456789abcdef-")
+# the watcher's own rules for the app's image_id and Drive's timestamps
+from kafka.drive_watcher import _UUID_RE, _parse_time
 
 
 class UploadRejected(InvalidEvent):
@@ -40,22 +39,6 @@ class UploadRejected(InvalidEvent):
     folder, wrong name/type/size). Its row exists; the message starts with
     UPLOAD_REJECTED_PREFIX so storage.pipeline_submit.is_upload_rejected
     keeps it out of Reprocess."""
-
-
-def _is_uuid(value) -> bool:
-    value = value or ""
-    parts = value.split("-")
-    return (len(value) == 36 and set(value) <= _UUID_CHARS
-            and [len(p) for p in parts] == [8, 4, 4, 4, 12])
-
-
-def _parse_time(value):
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
 
 
 def _float(value):
@@ -72,7 +55,7 @@ def register_upload(event: dict) -> str:
     another file: recorded in rejected_events, skip). Raises InvalidEvent
     for a file the app didn't upload, UploadRejected for a refused upload."""
     image_id = event.get("image_id") or ""
-    if not _is_uuid(image_id):
+    if not _UUID_RE.match(image_id):
         raise InvalidEvent("file has no valid image_id (not uploaded by the Android app)")
     session = SessionLocal()
     try:
@@ -116,7 +99,7 @@ def register_upload(event: dict) -> str:
         now = now_utc()
         session.add(Image(
             image_id=image_id,
-            location=event.get("location"),     # as the phone sent it; Spark's cleaning writes the clean one
+            location=event.get("location"),     # already cleaned by parse_events (case, spaces)
             user_id=user.user_id,
             original_filename=event.get("original_filename") or event.get("file_name"),
             image_path=event.get("image_path"),

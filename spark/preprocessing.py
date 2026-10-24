@@ -87,7 +87,7 @@ def normalize_location(location) -> str:
     """Case/whitespace-normalized location string — mirrors the
     initcap(trim(...)) normalization applied at the DataFrame level in
     spark/streaming_job.py's parse_events(), so a direct process_event()
-    call (unit tests, the manual-release path) enforces the same rule."""
+    call (unit tests, storage.requeue_stuck --inline) enforces the same rule."""
     if not location:
         return None
     collapsed = re.sub(r"\s+", " ", str(location).strip())
@@ -596,10 +596,6 @@ def save_for_review(image_id: str, image_bytes: bytes) -> None:
 def replay_state(image_id: str):
     """The Spark sink's replay check, in ONE database lookup per event
     (~3 ms on the Docker PostgreSQL). Returns:
-      "held"           - MANUAL mode still holds it (PENDING_REVIEW). The admin's
-                         Process sets INGESTED before publishing, so this is an
-                         OLD event (e.g. a topic replay after a factory reset)
-                         and processing it would bypass manual mode.
       "completed"      - already has its result; a replay is skipped. Asking the
                          database (instead of Spark's old dropDuplicates) still
                          lets a real Reprocess through: its status was reset.
@@ -613,8 +609,6 @@ def replay_state(image_id: str):
         image = session.get(Image, image_id)
         if image is None:
             return None
-        if image.status == ProcessingStatus.PENDING_REVIEW:
-            return "held"
         if image.status == ProcessingStatus.COMPLETED:
             if is_drive_path(image.image_path) and image.result_published_at is None:
                 return "result_missing"
@@ -693,8 +687,8 @@ def persist_result(
         if image.ingested_at is None:
             image.ingested_at = now
         if "location" in event:
-            # Spark's cleaned location (parse_events / clean_event); the Drive
-            # watcher stores it as the phone sent it.
+            # Spark's cleaned location (parse_events / clean_event), so a row
+            # registered before the cleaning rule existed is corrected too.
             image.location = event["location"]
         image.processed_at = now
         image.status = status

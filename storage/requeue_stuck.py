@@ -25,7 +25,7 @@ This tool finds those rows and gets them unstuck. Two modes:
                checkpoint involved. Use this for a one-shot backfill of
                events that are genuinely gone from Kafka.
 
-Rows touched: non-terminal ones (INGESTED, UPLOADED, PROCESSING — the
+Rows touched: non-terminal ones (INGESTED, PROCESSING — the
 last is a photo Spark stopped in the middle of), COMPLETED Google Drive
 photos whose result never reached the farmer's Drive folder
 (result_published_at is empty: the Drive upload failed after the result was
@@ -63,7 +63,7 @@ from storage.pipeline_submit import build_upload_event
 # Statuses that mean "the pipeline still owes this image a result".
 # PROCESSING: Spark stopped in the middle of the photo; its Kafka event may be
 # gone (topic wiped / checkpoint reset), so nothing would ever finish it.
-STUCK_STATUSES = {ProcessingStatus.INGESTED, ProcessingStatus.UPLOADED, ProcessingStatus.PROCESSING}
+STUCK_STATUSES = {ProcessingStatus.INGESTED, ProcessingStatus.PROCESSING}
 
 # FAILED rows worth retrying with --include-failed: the failure was in the
 # transport or in locating the file, not in the image itself — a retry

@@ -73,8 +73,7 @@ def submit_image_for_processing(session, image, backend=None) -> None:
     # FAILED stomped back to INGESTED. A FAILED image is reset too — that is
     # the dashboard's "Reprocess"; before, it stayed FAILED with the old
     # error while the new event was in flight.
-    if image.status in (ProcessingStatus.UPLOADED, ProcessingStatus.PENDING_REVIEW,
-                        ProcessingStatus.FAILED):
+    if image.status == ProcessingStatus.FAILED:
         image.status = ProcessingStatus.INGESTED
         image.error_message = None
     image.ingested_at = now_utc()
