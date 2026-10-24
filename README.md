@@ -472,9 +472,8 @@ Google Drive, Kafka, the database, Spark and the Drive watcher;
 
 ## 26. Performance evaluation
 
-Spark (`spark/batch_analytics.py`, stored in `analytics_summary`, read by
-`spark/analytics.performance_metrics()` and surfaced by
-`scripts/perf_report.py`) computes, from real recorded timestamps only:
+Spark (`spark/batch_analytics.py`, stored in the `analytics_summary`
+table) computes, from real recorded timestamps only:
 
 - `avg_capture_to_upload_seconds` — only for images with a real EXIF/
   trusted capture timestamp; `null` otherwise (never estimated)
@@ -607,8 +606,7 @@ crop_disease_image_system/
 │   ├── streaming_job.py      Spark Structured Streaming: Kafka → per-photo processing
 │   ├── preprocessing.py      validation, EXIF, image preprocessing (model_input), CNN call, risk, persistence, Drive results
 │   ├── analytics.py          reads the Spark-computed analytics for the dashboard
-│   ├── batch_analytics.py    Spark analytics job (JDBC): every dashboard figure; --watch keeps them current
-│   └── data_quality.py       duplicate / outlier / missing-value checks
+│   └── batch_analytics.py    Spark analytics job (JDBC): every dashboard figure; --watch keeps them current
 ├── ml/
 │   ├── inference.py          the CNN: loads the checkpoint, classifies Spark's prepared input
 │   ├── render.py             marked-up image (Grad-CAM + banner)
@@ -629,7 +627,7 @@ crop_disease_image_system/
 │   └── schema.sql            raw PostgreSQL DDL
 ├── scalability/              isolated scalability test (dataset, run, worker, report, monitor)
 ├── dashboard/                Streamlit admin dashboard (app.py + one module per larger page)
-├── scripts/                  Drive authorisation, farmer sharing, benchmarks, performance report
+├── scripts/                  Drive authorisation, farmer sharing, benchmarks
 ├── requirements.txt, docker-compose.yml
 └── README.md
 ```

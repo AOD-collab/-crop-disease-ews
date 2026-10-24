@@ -2,7 +2,7 @@
 Data Analytics (DIT manual section 46) for the dashboard. The figures are
 computed by Spark (spark/batch_analytics.py, run by the EWS-SparkAnalytics
 service) and stored in the analytics tables; the functions here only read
-them for the dashboard and scripts/perf_report.py. Nothing is invented: a
+them for the dashboard. Nothing is invented: a
 table Spark hasn't filled yet reads as empty (or None).
 
 Also here: images_with_predictions(), the row-level list behind the
@@ -94,21 +94,6 @@ def kpi_summary() -> dict | None:
     out = {k: int(row[k]) for k in keys}
     out["most_detected_disease"] = None if pd.isna(row["most_detected_disease"]) else row["most_detected_disease"]
     out["avg_processing_latency_ms"] = None if pd.isna(row["avg_processing_latency_ms"])         else float(row["avg_processing_latency_ms"])
-    return out
-
-
-def performance_metrics() -> dict:
-    """Pipeline timings Spark computed from the recorded timestamps
-    (None = that stage never happened), or {} before its first run."""
-    summary = _spark_table("analytics_summary")
-    if summary.empty:
-        return {}
-    row = summary.iloc[0]
-    out = {}
-    for k in ("avg_capture_to_upload_seconds", "avg_upload_to_ingestion_seconds",
-              "avg_processing_latency_ms", "avg_end_to_end_latency_seconds"):
-        out[k] = None if pd.isna(row[k]) else float(row[k])
-    out["total_processed"], out["total_failed"] = int(row["total_processed"]), int(row["total_failed"])
     return out
 
 
