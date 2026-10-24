@@ -692,6 +692,10 @@ def persist_result(
 
         if image.ingested_at is None:
             image.ingested_at = now
+        if "location" in event:
+            # Spark's cleaned location (parse_events / clean_event); the Drive
+            # watcher stores it as the phone sent it.
+            image.location = event["location"]
         image.processed_at = now
         image.status = status
         image.error_message = error_message

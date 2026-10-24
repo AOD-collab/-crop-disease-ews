@@ -53,9 +53,9 @@ from storage.database import (  # noqa: E402
 from storage.pipeline_submit import submit_image_for_processing, UPLOAD_REJECTED_PREFIX  # noqa: E402
 from storage.image_storage import to_drive_path  # noqa: E402
 from storage.auth import hash_password, normalize_email  # noqa: E402
-# Spark's cleaning rules: the location is stored the way Spark normalises it,
-# and a refused upload's FAILED result is written to Drive the way Spark does.
-from spark.preprocessing import normalize_location, publish_result_to_drive_safely  # noqa: E402
+# A refused upload never reaches Spark: its FAILED result is written to Drive
+# the way Spark writes one.
+from spark.preprocessing import publish_result_to_drive_safely  # noqa: E402
 
 # Drive API quota: each check is ONE change-feed request (~100 units of the
 # 325,000/minute per-user limit), whatever the number of farmers.
@@ -120,18 +120,6 @@ def _get_or_create_user(session, email: str, display_name: str):
 # Public name, used by the dashboard's "Register farmer" button so a farmer
 # shows up in Farmer Management before their first upload.
 get_or_create_farmer = _get_or_create_user
-
-
-def _find_duplicate(session, content_hash, image_id):
-    if not content_hash:
-        return None
-    row = (
-        session.query(Image.image_id)
-        .filter(Image.content_hash == content_hash, Image.image_id != image_id)
-        .order_by(Image.created_at.asc())
-        .first()
-    )
-    return row[0] if row else None
 
 
 def _publish_failure(image_id: str) -> None:
@@ -202,7 +190,7 @@ def register_drive_file(meta: dict, backend=None, folder_email: str = None) -> d
 
         image = Image(
             image_id=image_id,
-            location=normalize_location(props.get("location")),
+            location=props.get("location"),     # as the phone sent it; Spark cleans it
             user_id=user.user_id,
             original_filename=props.get("original_filename") or meta.get("name"),
             image_path=to_drive_path(file_id),
@@ -227,10 +215,6 @@ def register_drive_file(meta: dict, backend=None, folder_email: str = None) -> d
             session.close()
             _publish_failure(image_id)
             return {"image_id": image_id, "status": "failed"}
-
-        duplicate_of = _find_duplicate(session, content_hash, image_id)
-        if duplicate_of:
-            print(f"[drive_watcher] {image_id} has the same content as {duplicate_of}")
 
         if get_processing_mode(session) == ProcessingMode.MANUAL:
             image.status = ProcessingStatus.PENDING_REVIEW
