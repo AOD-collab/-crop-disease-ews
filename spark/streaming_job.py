@@ -263,10 +263,15 @@ def _process_one(event: dict):
     raw_value = event.pop("raw_value", None)
     if rejected_reason and not event.get("image_id"):
         event["raw_value"] = raw_value       # rejected_events.raw_event keeps what Kafka carried
-    if event.get("kind") == DRIVE_UPLOAD and not rejected_reason:
+    if (event.get("kind") == DRIVE_UPLOAD
+            and all(event.get(f) for f in ("image_id", "image_path", "owner_email"))):
         # A new photo from Drive: farmer, upload checks, duplicate skip and its
         # first database row (spark/ingestion.py). A refused upload gets its
-        # row and fails below with the reason, like any invalid event.
+        # row and fails below with the reason, like any invalid event — also
+        # one parse_events refused for its content (captured_at in the
+        # future): without a row it would stay in Pending Review and
+        # requeue_stuck --from-drive forever. Only an event missing what
+        # registration needs ends in rejected_events alone.
         try:
             outcome = register_upload(event)
         except InvalidEvent as e:

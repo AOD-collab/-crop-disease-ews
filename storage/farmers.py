@@ -8,6 +8,8 @@ button, so both create the account the same way.
 
 import secrets
 
+from sqlalchemy.exc import IntegrityError
+
 from storage.auth import hash_password, normalize_email
 from storage.database import User, Role, UserStatus
 
@@ -29,6 +31,12 @@ def get_or_create_farmer(session, email: str, display_name: str):
         email_verified=True,  # verified by Google sign-in
     )
     session.add(user)
-    session.commit()
+    try:
+        session.commit()
+    except IntegrityError:
+        # A new farmer's first photos arrive together and Spark registers them
+        # in parallel: another photo created this account a moment ago.
+        session.rollback()
+        return session.query(User).filter(User.email == email).one()
     print(f"[farmers] New user from Google Drive: {email}")
     return user

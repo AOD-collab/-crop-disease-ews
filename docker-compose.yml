@@ -23,8 +23,12 @@ services:
     ports:
       # Bound to localhost only, like PostgreSQL: Spark registers a new photo
       # under the Google account its Kafka event names, so nobody else on the
-      # same network may publish to the topic.
+      # same network may publish to the topic. Both loopback addresses:
+      # "localhost" (KAFKA_BOOTSTRAP_SERVERS and the advertised listener)
+      # resolves to ::1 first on Windows, and with IPv4 alone a client lost
+      # ~2 s per connection and often failed its 3 s metadata check.
       - "127.0.0.1:9092:9092"
+      - "[::1]:9092:9092"
     environment:
       # Single-node KRaft mode (no separate Zookeeper container needed).
       KAFKA_NODE_ID: 1
