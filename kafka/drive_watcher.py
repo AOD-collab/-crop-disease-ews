@@ -4,8 +4,8 @@ architecture). Runs on the laptop/server next to Kafka and Spark.
 
     Android --upload--> Drive /images/<email>/<image_id>.jpg  (the farmer's own folder)
     THIS SCRIPT: follows the central account's Drive change feed (one
-                 request per check, every 2 s while uploads arrive, up to
-                 9 s when quiet) for new files in EVERY farmer's
+                 request per check, every 1 s while uploads arrive, up to
+                 3 s when quiet) for new files in EVERY farmer's
                  /images/<email>/ folder, registers each one in the database and
                  publishes a Kafka event carrying the Drive file id +
                  metadata (never the image bytes). A full folder search
@@ -53,6 +53,9 @@ from storage.database import (  # noqa: E402
 from storage.pipeline_submit import submit_image_for_processing, UPLOAD_REJECTED_PREFIX  # noqa: E402
 from storage.image_storage import to_drive_path  # noqa: E402
 from storage.auth import hash_password, normalize_email  # noqa: E402
+# Spark's cleaning rules: the location is stored the way Spark normalises it,
+# and a refused upload's FAILED result is written to Drive the way Spark does.
+from spark.preprocessing import normalize_location, publish_result_to_drive_safely  # noqa: E402
 
 # Drive API quota: each check is ONE change-feed request (~100 units of the
 # 325,000/minute per-user limit), whatever the number of farmers.
@@ -67,16 +70,6 @@ STATE_FILE = Path(os.getenv("DRIVE_WATCHER_STATE_FILE", str(BASE_DIR / "storage"
 OVERLAP = timedelta(minutes=2)
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-
-
-def _normalize_location(location):
-    """Case/whitespace-normalised location ("viqueque " -> "Viqueque"), the
-    same rule as Spark's initcap(trim(...)) so places group together in
-    analytics."""
-    if not location:
-        return None
-    collapsed = re.sub(r"\s+", " ", str(location).strip())
-    return collapsed.title() if collapsed else None
 
 
 def _device_gps(props: dict):
@@ -143,7 +136,6 @@ def _find_duplicate(session, content_hash, image_id):
 
 def _publish_failure(image_id: str) -> None:
     """Writes the FAILED result to Drive /results so the phone shows why."""
-    from spark.preprocessing import publish_result_to_drive_safely  # heavy import, only when needed
     with SessionLocal() as s:
         img = s.get(Image, image_id)
         message = img.error_message if img else None
@@ -210,7 +202,7 @@ def register_drive_file(meta: dict, backend=None, folder_email: str = None) -> d
 
         image = Image(
             image_id=image_id,
-            location=_normalize_location(props.get("location")),
+            location=normalize_location(props.get("location")),
             user_id=user.user_id,
             original_filename=props.get("original_filename") or meta.get("name"),
             image_path=to_drive_path(file_id),

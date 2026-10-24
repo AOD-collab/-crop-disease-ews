@@ -25,7 +25,8 @@ from storage import drive_client
 from storage.database import SessionLocal, User
 from storage.auth import normalize_email
 from storage.image_storage import downloaded_photo_path, store_downloaded_photo
-from kafka.drive_watcher import _UUID_RE, _device_gps, _normalize_location
+from kafka.drive_watcher import _UUID_RE, _device_gps
+from spark.preprocessing import normalize_location
 
 
 @dataclass
@@ -128,7 +129,7 @@ def enumerate_collection() -> Collection:
             image_id=props["image_id"], drive_file_id=meta["id"], user_id=users[owner],
             name=meta.get("name"), mime_type=meta.get("mimeType"), size=int(meta["size"]),
             sha256=sha, md5=meta.get("md5Checksum"), created_time=meta.get("createdTime"),
-            location=_normalize_location(props.get("location")),
+            location=normalize_location(props.get("location")),
             captured_at_client=props.get("captured_at_client"),
             device_gps=_device_gps(props),
         ))

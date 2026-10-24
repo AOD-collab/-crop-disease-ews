@@ -132,23 +132,14 @@ def spark_streaming_alive() -> bool:
     "alive" even after the Python streaming job under it has died. This
     looks for the actual child so run_all.py can warn when the consumer
     side of the pipeline is down (the exact condition that leaves uploads
-    stuck at INGESTED).
+    stuck at INGESTED). Same check as the factory reset's
+    (storage/reset.spark_job_running, PowerShell CIM on Windows: `wmic`,
+    used here before, is gone from current Windows 11, so this always
+    answered "running").
     """
-    try:
-        if IS_WINDOWS:
-            out = subprocess.run(
-                ["wmic", "process", "where",
-                 "name='python.exe'", "get", "CommandLine"],
-                capture_output=True, text=True, timeout=10,
-            ).stdout
-        else:
-            out = subprocess.run(
-                ["pgrep", "-af", "spark.streaming_job"],
-                capture_output=True, text=True, timeout=10,
-            ).stdout
-    except Exception:
-        return True  # can't tell — don't cry wolf
-    return "spark.streaming_job" in out or "spark/streaming_job.py" in out
+    from storage.reset import spark_job_running
+    running = spark_job_running()
+    return True if running is None else running  # can't tell — don't cry wolf
 
 
 def count_stuck_images() -> dict | None:
