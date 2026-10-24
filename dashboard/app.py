@@ -319,29 +319,14 @@ def load_data():
 
 
 def _spark_analytics_note() -> None:
-    """Under the Spark-computed figures: when Spark computed them. When it
-    never did, or the EWS-SparkAnalytics service seems stopped (no recompute
-    for twice its longest wait), say so and offer a one-off Spark run."""
-    from config.settings import ANALYTICS_MAX_AGE_SECONDS, DATABASE_URL
+    """Under the Spark-computed figures: when Spark computed them, or that
+    they appear once the EWS-SparkAnalytics service has computed them."""
     when = analytics.analytics_generated_at()
-    stale = when is None or (now_local() - when).total_seconds() > 2 * ANALYTICS_MAX_AGE_SECONDS
     if when is not None:
-        st.caption(f"⚡ Computed by Spark at {format_local(when)} — kept up to date by the "
-                   "EWS-SparkAnalytics service (run_all.py).")
-    if not stale:
-        return
-    if not DATABASE_URL.startswith("postgresql"):
-        st.info("Analytics are computed by Spark, which reads the database over JDBC: "
-                "this needs PostgreSQL (DATABASE_URL).")
-        return
-    st.warning("No analytics from Spark yet." if when is None else
-               "Spark hasn't recomputed the analytics recently — is the EWS-SparkAnalytics service running?")
-    if st.button("Compute with Spark now", icon="⚡", key=f"spark_analytics_{st.session_state.get('page')}"):
-        import subprocess
-        subprocess.Popen([sys.executable, "-m", "spark.batch_analytics"], cwd=PROJECT_ROOT,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        st.success("Spark started in the background. The figures appear here in about a minute.")
+        st.caption(f"⚡ Computed by Spark at {format_local(when)}")
+    else:
+        st.info("The figures appear here once Spark has computed them "
+                "(the EWS-SparkAnalytics service that run_all.py starts).")
 
 
 # ------------------------------------------------------------------

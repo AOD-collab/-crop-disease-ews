@@ -274,8 +274,7 @@ which the dashboard reads (`spark/analytics.py`). The `EWS-SparkAnalytics`
 service that `run_all.py` starts (`python -m spark.batch_analytics --watch`)
 checks the database every `ANALYTICS_CHECK_SECONDS` (30) and recomputes
 when anything changed, and at least every `ANALYTICS_MAX_AGE_SECONDS` (600).
-Each page says when Spark last computed them, and offers "Compute with
-Spark now" when that is missing or old. Rules: scalability-test photos are
+Each page says when Spark last computed them. Rules: scalability-test photos are
 left out, each photo counts once with its latest prediction, days are
 Timor-Leste days. Needs PostgreSQL (Spark's JDBC reader); on SQLite the
 charts stay empty. Row-level lists (recent submissions, HIGH-risk photos)
