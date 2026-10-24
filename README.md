@@ -250,7 +250,7 @@ managed cache:
 | `storage/downloaded_photos/<user_id>/<image_id>.jpg` | byte-for-byte cache of the Drive original, checked against `images.content_hash` (SHA-256) before use; a missing or wrong copy is downloaded again and checked before it is stored | only an administrator-confirmed clean-up (section 31) |
 | `REVIEW_DIR` (`data/review`) | EXIF-stripped copies waiting on the Label photos page | labelled (moved to training) or discarded |
 | `LABELLED_TRAIN_DIR/<class>/` | confirmed training images | never cleaned by the app |
-| `storage/scalability_reports/<run_id>/` | a scalability run's staged photos, its before/after pair and CSV files | clean-up of finished runs |
+| `storage/scalability_reports/<run_id>/` | a scalability run's staged photos (hard links), `photo_paths.json`, the gallery previews made when a page is viewed, its before/after pair and CSV files | clean-up of finished runs; Delete test removes everything |
 | `storage/images/` | photos from the previous (REST upload) design | factory reset |
 
 Processed images are kept in Drive only. Local files are always named by
@@ -496,8 +496,8 @@ environment doesn't have, per DIT manual section 58:
 **Running on this laptop:** a single-node Kafka broker and PostgreSQL 16
 in Docker, the Spark Structured Streaming job in local mode reading Kafka,
 the CNN on the GPU, the Drive watcher, the dashboard and Tableau. The
-largest scalability test processed 6,977 photos from a local folder (one
-iteration, 0 failures).
+largest scalability test processed 9,942 photos from a local folder (one
+iteration, 0 failures, about 17 photos/s on its own Spark query).
 
 **Not available or not demonstrated:** a multi-node Kafka/Spark cluster
 (everything shares one laptop, so the scalability test can only give the
@@ -573,9 +573,16 @@ The dashboard's **Image management** page (`dashboard/image_management_page.py`)
 Isolated from the real-time pipeline: its own Kafka topic
 (`SCALABILITY_KAFKA_TOPIC`), consumer group and worker process, the same
 `prepare_image` + `model_input` + CNN code, no `images`/`predictions` rows, no Drive results.
-Real-time processing has priority. The page shows one before/after
-preprocessing pair and two averages — execution time per iteration and
-processing time (preprocessing + CNN) per photo, both in seconds.
+By default the test's own Spark Structured Streaming query reads the topic
+(`--engine python` uses a plain consumer). Real-time processing has
+priority: the test pauses while a farmer photo is being processed. The page
+shows the latest test: total and average execution time and processing time
+(preprocessing + CNN) per photo, the disease data the test's CNN found, and
+a gallery of every photo before and after preprocessing. The run ends as
+soon as its results are saved; the gallery makes the previews of the page
+being viewed (from `photo_paths.json`) and keeps them. The dashboard can't
+load torch, so the "after" picture is the same resize and centre crop done
+with PIL (`scalability/worker.model_input_square`).
 
 ## 33. Factory reset
 
