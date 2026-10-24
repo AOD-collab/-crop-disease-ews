@@ -1,39 +1,32 @@
 """
-Data Analytics (DIT manual section 46): descriptive analytics, trend
-analysis, and performance metrics, computed from what's actually in the
-database — no invented numbers. Used by dashboard/app.py.
+Data Analytics (DIT manual section 46) for the dashboard. The figures are
+computed by Spark (spark/batch_analytics.py, run by the EWS-SparkAnalytics
+service) and stored in the analytics tables; the functions here only read
+them for the dashboard and scripts/perf_report.py. Nothing is invented: a
+table Spark hasn't filled yet reads as empty (or None).
 
-Uses pandas over the ORM's underlying SQL engine for these batch
-aggregations (appropriate here since dashboard queries are small,
-already-persisted result sets — the heavy per-image processing itself runs
-in Spark, per spark/streaming_job.py). A Spark-based batch version of these
-same aggregations would read the same tables via spark.read.jdbc(...) for
-larger deployments; the query logic is identical.
+Also here: images_with_predictions(), the row-level list behind the
+dashboard's tables (recent submissions, HIGH-risk photos, predictions), and
+high_risk_by_location() for one scalability-test run's own rows.
 """
 
 import pandas as pd
 
 from storage.database import engine
-from config.localtime import series_to_local
+from config.localtime import series_to_local, to_local
 
 
 def _read_sql(query: str) -> pd.DataFrame:
     return pd.read_sql(query, engine)
 
 
-def _clean_record(record: dict) -> dict:
-    """pandas NaT/NaN become None and pandas Timestamps ISO strings, so a
-    record is plain JSON-safe values (NaT would otherwise show up as the
-    literal string "NaT")."""
-    cleaned = {}
-    for key, value in record.items():
-        if isinstance(value, pd.Timestamp):
-            cleaned[key] = None if pd.isna(value) else value.isoformat()
-        elif pd.isna(value) if not isinstance(value, (list, dict)) else False:
-            cleaned[key] = None
-        else:
-            cleaned[key] = value
-    return cleaned
+def _spark_table(name: str, order_by: str = None) -> pd.DataFrame:
+    """A Spark analytics table, or an empty frame when it doesn't exist yet
+    (SQLite, or the Spark analytics never ran)."""
+    try:
+        return _read_sql(f"SELECT * FROM {name}" + (f" ORDER BY {order_by}" if order_by else ""))
+    except Exception:  # noqa: BLE001 - missing table
+        return pd.DataFrame()
 
 
 def images_with_predictions() -> pd.DataFrame:
@@ -87,67 +80,99 @@ def images_with_predictions() -> pd.DataFrame:
     return df.drop(columns=["prediction_id"], errors="ignore")
 
 
-def kpi_summary() -> dict:
-    df = images_with_predictions()
-    # Soft-deleted USERs are kept for historical integrity (their images/
-    # predictions stay fully queryable) but shouldn't inflate a "how many
-    # active accounts do we have" headline count, consistent with the
-    # dashboard's user list excluding them by default.
-    total_users = pd.read_sql("SELECT COUNT(*) AS n FROM users WHERE NOT is_deleted", engine)["n"].iloc[0]
+def analytics_generated_at():
+    """When Spark last computed the analytics (Timor-Leste Time), or None."""
+    summary = _spark_table("analytics_summary")
+    if summary.empty:
+        return None
+    return to_local(pd.Timestamp(summary["generated_at"].iloc[0]).to_pydatetime())
 
-    predicted_class_lower = df["predicted_class"].astype(str).str.lower()
-    has_class = df["predicted_class"].notna()
-    healthy = int((predicted_class_lower == "healthy").sum())
-    uncertain = int((predicted_class_lower == "uncertain").sum())
-    diseased = int(has_class.sum() - healthy - uncertain)
-    # No predicted_class at all: not processed yet (pending/failed).
-    # Surfaced explicitly so healthy+diseased+uncertain
-    # not summing to total_images is never a silent, unexplained gap on the
-    # dashboard.
-    unclassified = int(len(df) - has_class.sum())
-    high_risk = int((df["risk_level"] == "HIGH").sum())
-    avg_latency = df["processing_latency_ms"].dropna().mean()
 
-    latest_processed = df.dropna(subset=["predicted_at"]).sort_values("predicted_at", ascending=False)
-    latest_row = _clean_record(latest_processed.iloc[0].to_dict()) if not latest_processed.empty else None
+def kpi_summary() -> dict | None:
+    """The headline figures Spark computed, or None before its first run.
+    Keys: total_users, total_images, total_healthy, total_diseased,
+    total_uncertain, total_unclassified, total_high_risk, submissions_24h,
+    active_farmers_24h, most_detected_disease, avg_processing_latency_ms."""
+    summary = _spark_table("analytics_summary")
+    if summary.empty:
+        return None
+    row = summary.iloc[0]
+    keys = ("total_users", "total_images", "total_healthy", "total_diseased", "total_uncertain",
+            "total_unclassified", "total_high_risk", "submissions_24h", "active_farmers_24h")
+    out = {k: int(row[k]) for k in keys}
+    out["most_detected_disease"] = None if pd.isna(row["most_detected_disease"]) else row["most_detected_disease"]
+    out["avg_processing_latency_ms"] = None if pd.isna(row["avg_processing_latency_ms"])         else float(row["avg_processing_latency_ms"])
+    return out
 
-    return {
-        "total_users": int(total_users),
-        "total_images": int(len(df)),
-        "total_healthy": healthy,
-        "total_diseased": diseased,
-        "total_uncertain": uncertain,
-        "total_unclassified": unclassified,
-        "total_high_risk": high_risk,
-        "avg_processing_latency_ms": None if pd.isna(avg_latency) else round(float(avg_latency), 1),
-        "latest_processed_image": latest_row,
-    }
+
+def performance_metrics() -> dict:
+    """Pipeline timings Spark computed from the recorded timestamps
+    (None = that stage never happened), or {} before its first run."""
+    summary = _spark_table("analytics_summary")
+    if summary.empty:
+        return {}
+    row = summary.iloc[0]
+    out = {}
+    for k in ("avg_capture_to_upload_seconds", "avg_upload_to_ingestion_seconds",
+              "avg_processing_latency_ms", "avg_end_to_end_latency_seconds"):
+        out[k] = None if pd.isna(row[k]) else float(row[k])
+    out["total_processed"], out["total_failed"] = int(row["total_processed"]), int(row["total_failed"])
+    return out
 
 
 def disease_distribution() -> pd.DataFrame:
-    df = images_with_predictions()
-    dist = df.dropna(subset=["predicted_class"])["predicted_class"].value_counts().reset_index()
-    dist.columns = ["predicted_class", "count"]
-    return dist
+    """Columns predicted_class, count — most photos first."""
+    df = _spark_table("analytics_disease_distribution", "photos DESC, predicted_class")
+    return df.rename(columns={"photos": "count"})[["predicted_class", "count"]] if not df.empty         else pd.DataFrame(columns=["predicted_class", "count"])
 
 
 def risk_distribution() -> pd.DataFrame:
-    df = images_with_predictions()
-    dist = df.dropna(subset=["risk_level"])["risk_level"].value_counts().reset_index()
-    dist.columns = ["risk_level", "count"]
-    return dist
+    """Columns risk_level, count — most photos first."""
+    df = _spark_table("analytics_risk_distribution", "photos DESC, risk_level")
+    return df.rename(columns={"photos": "count"})[["risk_level", "count"]] if not df.empty         else pd.DataFrame(columns=["risk_level", "count"])
+
+
+def high_risk_locations() -> pd.DataFrame:
+    """Per municipality: location, high (n), total (N), high_pct (0-100).
+    Most HIGH first, then highest share."""
+    df = _spark_table("analytics_high_risk_by_location", "high DESC, high_pct DESC, location")
+    cols = ["location", "high", "total", "high_pct"]
+    return df[cols].reset_index(drop=True) if not df.empty else pd.DataFrame(columns=cols)
+
+
+def disease_trend_by_location() -> pd.DataFrame:
+    """Columns location, day (Timor-Leste), predicted_class, photos —
+    sorted by location, then day."""
+    df = _spark_table("analytics_disease_trend", "location, day, predicted_class")
+    cols = ["location", "day", "predicted_class", "photos"]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    df["day"] = pd.to_datetime(df["day"])
+    return df[cols].reset_index(drop=True)
+
+
+def disease_daily() -> pd.DataFrame:
+    """Columns day (Timor-Leste), predicted_class, photos — by day."""
+    df = _spark_table("analytics_disease_daily", "day, predicted_class")
+    cols = ["day", "predicted_class", "photos"]
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    df["day"] = pd.to_datetime(df["day"])
+    return df[cols].reset_index(drop=True)
 
 
 UNKNOWN_LOCATION = "Unknown location"
 
 
-def high_risk_by_location(df: pd.DataFrame = None) -> pd.DataFrame:
-    """Per municipality: how many of its analysed maize photos are HIGH risk.
+def high_risk_by_location(df: pd.DataFrame) -> pd.DataFrame:
+    """Per municipality: how many of `df`'s analysed photos are HIGH risk —
+    for one scalability-test run's own rows (dashboard/scalability_page.py),
+    which aren't in the images table. The dashboard's farmer figures come
+    from Spark instead (high_risk_locations), with the same rules.
     Columns: location, high (n), total (N), high_pct (0-100). "Analysed"
     means the photo has a prediction — photos rejected as not a leaf / not
     maize have none and don't count. Photos without a location are grouped
     under UNKNOWN_LOCATION. Sorted by most HIGH first, then highest share."""
-    df = images_with_predictions() if df is None else df
     analysed = df.dropna(subset=["risk_level"])
     if analysed.empty:
         return pd.DataFrame(columns=["location", "high", "total", "high_pct"])
@@ -159,69 +184,3 @@ def high_risk_by_location(df: pd.DataFrame = None) -> pd.DataFrame:
     out["high"] = out["high"].astype(int)
     out["high_pct"] = (out["high"] / out["total"] * 100).round(1)
     return out.sort_values(["high", "high_pct", "location"], ascending=[False, False, True]).reset_index(drop=True)
-
-
-def disease_trend() -> pd.DataFrame:
-    df = images_with_predictions().dropna(subset=["predicted_at", "predicted_class"])
-    return df.sort_values("predicted_at")[["predicted_at", "location", "predicted_class"]]
-
-
-def disease_trend_by_location(df: pd.DataFrame = None) -> pd.DataFrame:
-    """Per municipality, per day (Timor-Leste Time) and per disease: how
-    many photos the CNN classified — the Analytics page's "Disease trend by
-    municipality". Columns: location, day, predicted_class, photos. Photos
-    without a location are grouped under UNKNOWN_LOCATION; photos without a
-    prediction don't count. Sorted by location, then day."""
-    df = images_with_predictions() if df is None else df
-    done = df.dropna(subset=["predicted_at", "predicted_class"])
-    cols = ["location", "day", "predicted_class", "photos"]
-    if done.empty:
-        return pd.DataFrame(columns=cols)
-    location = done["location"].fillna("").astype(str).str.strip().replace("", UNKNOWN_LOCATION)
-    when = pd.to_datetime(done["predicted_at"])
-    if when.dt.tz is not None:
-        when = when.dt.tz_localize(None)            # keep the Timor-Leste wall-clock date
-    day = when.dt.normalize()
-    out = (done.assign(location=location, day=day)
-           .groupby(["location", "day", "predicted_class"]).size().reset_index(name="photos"))
-    return out.sort_values(["location", "day", "predicted_class"]).reset_index(drop=True)[cols]
-
-
-def performance_metrics() -> dict:
-    """Latency/throughput metrics computed from real recorded timestamps.
-    Stages that never happened (e.g. no images captured with EXIF) are
-    reported as None/unavailable rather than estimated."""
-    df = images_with_predictions()
-    if df.empty:
-        return {}
-
-    metrics = {}
-    has_capture = df["captured_at"].notna()
-    if has_capture.any():
-        cap_to_upload = (df.loc[has_capture, "uploaded_at"] - df.loc[has_capture, "captured_at"]).dt.total_seconds()
-        metrics["avg_capture_to_upload_seconds"] = round(float(cap_to_upload.mean()), 1)
-    else:
-        metrics["avg_capture_to_upload_seconds"] = None
-
-    has_ingest = df["ingested_at"].notna()
-    if has_ingest.any():
-        upload_to_ingest = (df.loc[has_ingest, "ingested_at"] - df.loc[has_ingest, "uploaded_at"]).dt.total_seconds()
-        metrics["avg_upload_to_ingestion_seconds"] = round(float(upload_to_ingest.mean()), 1)
-    else:
-        metrics["avg_upload_to_ingestion_seconds"] = None
-
-    has_latency = df["processing_latency_ms"].notna()
-    metrics["avg_processing_latency_ms"] = (
-        round(float(df.loc[has_latency, "processing_latency_ms"].mean()), 1) if has_latency.any() else None
-    )
-
-    has_pred = df["predicted_at"].notna()
-    if has_pred.any():
-        e2e = (df.loc[has_pred, "predicted_at"] - df.loc[has_pred, "uploaded_at"]).dt.total_seconds()
-        metrics["avg_end_to_end_latency_seconds"] = round(float(e2e.mean()), 1)
-    else:
-        metrics["avg_end_to_end_latency_seconds"] = None
-
-    metrics["total_processed"] = int(has_pred.sum())
-    metrics["total_failed"] = int((df["status"] == "FAILED").sum())
-    return metrics

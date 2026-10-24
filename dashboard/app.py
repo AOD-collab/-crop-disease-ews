@@ -318,6 +318,32 @@ def load_data():
     return analytics.images_with_predictions()
 
 
+def _spark_analytics_note() -> None:
+    """Under the Spark-computed figures: when Spark computed them. When it
+    never did, or the EWS-SparkAnalytics service seems stopped (no recompute
+    for twice its longest wait), say so and offer a one-off Spark run."""
+    from config.settings import ANALYTICS_MAX_AGE_SECONDS, DATABASE_URL
+    when = analytics.analytics_generated_at()
+    stale = when is None or (now_local() - when).total_seconds() > 2 * ANALYTICS_MAX_AGE_SECONDS
+    if when is not None:
+        st.caption(f"⚡ Computed by Spark at {format_local(when)} — kept up to date by the "
+                   "EWS-SparkAnalytics service (run_all.py).")
+    if not stale:
+        return
+    if not DATABASE_URL.startswith("postgresql"):
+        st.info("Analytics are computed by Spark, which reads the database over JDBC: "
+                "this needs PostgreSQL (DATABASE_URL).")
+        return
+    st.warning("No analytics from Spark yet." if when is None else
+               "Spark hasn't recomputed the analytics recently — is the EWS-SparkAnalytics service running?")
+    if st.button("Compute with Spark now", icon="⚡", key=f"spark_analytics_{st.session_state.get('page')}"):
+        import subprocess
+        subprocess.Popen([sys.executable, "-m", "spark.batch_analytics"], cwd=PROJECT_ROOT,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        st.success("Spark started in the background. The figures appear here in about a minute.")
+
+
 # ------------------------------------------------------------------
 # Google Drive helpers (Farmer Management, Images gallery). Cached so
 # pages stay fast; nothing is saved to disk — images are fetched from
@@ -492,44 +518,39 @@ def _system_status() -> dict:
 
 # Only the pages below use the full images x predictions table; the others
 # no longer load it on every rerun.
-df = load_data() if page in ("Overview", "Real-Time Monitoring", "Risk Alerts", "Analytics") else None
+df = load_data() if page in ("Real-Time Monitoring", "Risk Alerts", "Analytics") else None
 
 if page == "Overview":
-    # Real numbers only. The mockup this page's layout follows also shows
-    # "Active Remote Devices" — this system has no device registry, so that
-    # metric isn't something we can honestly report; it's left out rather
-    # than faked.
+    # Real numbers only, computed by Spark (spark/batch_analytics.py). The
+    # mockup this page's layout follows also shows "Active Remote Devices" —
+    # this system has no device registry, so that metric isn't something we
+    # can honestly report; it's left out rather than faked.
     kpi = analytics.kpi_summary()
-    cutoff_24h = now_utc() - timedelta(hours=24)
-    recent_df = df[df["uploaded_at"] >= cutoff_24h] if not df.empty else df
-    submissions_24h = len(recent_df)
-    active_farmers_24h = recent_df["user_id"].nunique() if not recent_df.empty else 0
-
     dist = analytics.disease_distribution()
-    diseased_only = dist[dist["predicted_class"].str.lower() != "healthy"] if not dist.empty else dist
-    most_detected = diseased_only.iloc[0]["predicted_class"] if not diseased_only.empty else "—"
 
     st.subheader("📊 System Performance")
-    p1, p2, p3 = st.columns(3)
-    p1.metric("Submissions (Last 24h)", submissions_24h)
-    p2.metric("Active Farmers (Last 24h)", active_farmers_24h)
-    p3.metric("Most Detected Disease", most_detected)
-    st.caption(f"{kpi['total_users']} total farmers · {kpi['total_images']} total submissions all-time")
+    if kpi is not None:
+        p1, p2, p3 = st.columns(3)
+        p1.metric("Submissions (Last 24h)", kpi["submissions_24h"])
+        p2.metric("Active Farmers (Last 24h)", kpi["active_farmers_24h"])
+        p3.metric("Most Detected Disease", kpi["most_detected_disease"] or "—")
+        st.caption(f"{kpi['total_users']} total farmers · {kpi['total_images']} total submissions all-time")
 
-    # Explicit healthy/diseased/uncertain/unclassified breakdown so
-    # "unclassified" (not yet processed, or failed) is a labeled bucket
-    # instead of a silent gap where healthy+diseased looked like "0 and 0"
-    # with no explanation.
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Healthy", kpi["total_healthy"])
-    c2.metric("Diseased", kpi["total_diseased"])
-    c3.metric("Uncertain (low confidence)", kpi["total_uncertain"])
-    c4.metric("Unclassified", kpi["total_unclassified"])
-    if kpi["total_unclassified"] and kpi["total_images"]:
-        st.caption(
-            "Unclassified submissions have no disease classification yet — they are still "
-            "pending, or their processing failed."
-        )
+        # Explicit healthy/diseased/uncertain/unclassified breakdown so
+        # "unclassified" (not yet processed, or failed) is a labeled bucket
+        # instead of a silent gap where healthy+diseased looked like "0 and 0"
+        # with no explanation.
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Healthy", kpi["total_healthy"])
+        c2.metric("Diseased", kpi["total_diseased"])
+        c3.metric("Uncertain (low confidence)", kpi["total_uncertain"])
+        c4.metric("Unclassified", kpi["total_unclassified"])
+        if kpi["total_unclassified"] and kpi["total_images"]:
+            st.caption(
+                "Unclassified submissions have no disease classification yet — they are still "
+                "pending, or their processing failed."
+            )
+    _spark_analytics_note()
 
     st.divider()
 
@@ -905,7 +926,7 @@ elif page == "Images":
 
 
 elif page == "Risk Alerts":
-    by_location = analytics.high_risk_by_location(df)
+    by_location = analytics.high_risk_locations()
     if not by_location.empty:
         n_high, n_total = int(by_location["high"].sum()), int(by_location["total"].sum())
         st.subheader("HIGH risk by municipality")
@@ -926,6 +947,8 @@ elif page == "Risk Alerts":
         )
         st.caption("Counts only photos that were analysed (photos rejected as not a leaf or not "
                    "maize are left out). Each photo counts once, with its latest result.")
+    _spark_analytics_note()
+    if not by_location.empty:
         st.divider()
         st.subheader("Latest HIGH risk photos")
 
@@ -970,7 +993,7 @@ elif page == "Analytics":
             )
     # Disease trend in every municipality (replaced the risk-score trend):
     # photos per disease per day, one panel per municipality.
-    rt = analytics.disease_trend_by_location(df)
+    rt = analytics.disease_trend_by_location()
     if not rt.empty:
         st.subheader("📈 Disease Trend by Municipality")
         places = rt.groupby("location")["photos"].sum().sort_values(ascending=False).index.tolist()
@@ -995,16 +1018,18 @@ elif page == "Analytics":
                    color_discrete_map=RISK_COLOR_MAP),
             width="stretch",
         )
-    dt = analytics.disease_trend()
+    dt = analytics.disease_daily()
     if not dt.empty:
         st.subheader("🦠 Disease Trend")
-        st.plotly_chart(
-            px.histogram(dt, x="predicted_at", color="predicted_class",
-                         color_discrete_map=DISEASE_COLOR_MAP, color_discrete_sequence=CATEGORICAL_HUES),
-            width="stretch",
-        )
-    if dist.empty and rt.empty and rdist.empty and dt.empty:
+        fig = px.bar(dt, x="day", y="photos", color="predicted_class",
+                     color_discrete_map=DISEASE_COLOR_MAP, color_discrete_sequence=CATEGORICAL_HUES,
+                     labels={"day": "Day (Timor-Leste Time)", "photos": "Photos", "predicted_class": "Disease"})
+        fig.update_xaxes(tickformat="%d/%m")
+        fig.update_layout(barmode="stack", legend_title_text="Disease")
+        st.plotly_chart(fig, width="stretch")
+    if dist.empty and rt.empty and rdist.empty and dt.empty and analytics.analytics_generated_at() is not None:
         st.info("No analytics available yet — no images have been fully processed.")
+    _spark_analytics_note()
 
 elif page == "System Status":
     st.caption("Android → Google Drive → Kafka → Spark → Google Drive → Android. "

@@ -5,6 +5,7 @@ Initializes the database, then starts these long-running components, each in
 its own console window:
     * Kafka broker        docker compose up -d             localhost:9092
     * Spark streaming job  python -m spark.streaming_job
+    * Spark analytics      python -m spark.batch_analytics --watch  (the dashboard's figures; PostgreSQL)
     * Admin dashboard      streamlit run dashboard/app.py   http://localhost:8501
     * Drive watcher        python -m kafka.drive_watcher    (Google Drive /images -> Kafka)
 
@@ -22,7 +23,8 @@ Examples
 --------
     python run_all.py                     # DB init + Kafka + Spark + dashboard + Drive watcher
     python run_all.py --no-kafka          # skip starting a broker (one already running / started elsewhere)
-    python run_all.py --no-spark          # skip the Spark streaming job
+    python run_all.py --no-spark          # skip the Spark streaming job (and the Spark analytics)
+    python run_all.py --no-analytics      # skip only the Spark analytics service
     python run_all.py --no-drive          # skip the Google Drive watcher
     python run_all.py --reset             # factory-reset pipeline data + Kafka messages first (keeps users/admins)
     python run_all.py --stop              # stop everything this script started
@@ -191,7 +193,9 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--no-kafka", action="store_true", help="don't start a Kafka broker (one is already running elsewhere)")
-    p.add_argument("--no-spark", action="store_true", help="don't start the Spark streaming job")
+    p.add_argument("--no-spark", action="store_true", help="don't start the Spark streaming job (or the Spark analytics)")
+    p.add_argument("--no-analytics", action="store_true",
+                   help="don't start the Spark analytics service (EWS-SparkAnalytics, the dashboard's figures)")
     p.add_argument("--no-dashboard", action="store_true", help="don't start the Streamlit dashboard")
     p.add_argument("--no-mail", action="store_true", help=argparse.SUPPRESS)  # old flag: accepted, does nothing
     p.add_argument("--no-drive", action="store_true", help="don't start the Google Drive -> Kafka watcher")
@@ -303,6 +307,15 @@ def main() -> int:
 
     if not args.no_spark:
         services.append(start_service("EWS-Spark", ["python", "-m", "spark.streaming_job"]))
+
+    if not (args.no_spark or args.no_analytics):
+        from config.settings import DATABASE_URL
+        if DATABASE_URL.startswith("postgresql"):
+            # keeps the dashboard's analytics tables current (spark/batch_analytics.py)
+            services.append(start_service("EWS-SparkAnalytics", ["python", "-m", "spark.batch_analytics", "--watch"]))
+        else:
+            print("  skipped Spark analytics - it reads the database over JDBC, which needs PostgreSQL "
+                  "(DATABASE_URL); the dashboard's charts stay empty on SQLite")
 
     if not args.no_kafka_monitor:
         # read-only window: each farmer-photo event as it reaches Kafka (kafka/monitor.py)

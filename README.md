@@ -266,6 +266,21 @@ Risk alerts, Analytics, System status, Label photos, Model training,
 Scalability test (section 32) and System settings (processing mode,
 factory reset).
 
+The dashboard's figures and charts (Overview, Risk alerts, Analytics) are
+computed by **Spark**: `spark/batch_analytics.py` reads `images`,
+`predictions` and `users` over JDBC, aggregates them with Spark DataFrames
+and writes the `analytics_*` tables (plus `batch_location_daily_summary`),
+which the dashboard reads (`spark/analytics.py`). The `EWS-SparkAnalytics`
+service that `run_all.py` starts (`python -m spark.batch_analytics --watch`)
+checks the database every `ANALYTICS_CHECK_SECONDS` (30) and recomputes
+when anything changed, and at least every `ANALYTICS_MAX_AGE_SECONDS` (600).
+Each page says when Spark last computed them, and offers "Compute with
+Spark now" when that is missing or old. Rules: scalability-test photos are
+left out, each photo counts once with its latest prediction, days are
+Timor-Leste days. Needs PostgreSQL (Spark's JDBC reader); on SQLite the
+charts stay empty. Row-level lists (recent submissions, HIGH-risk photos)
+are read directly from the database.
+
 ## 17. Real-time architecture
 
 ```
@@ -405,6 +420,16 @@ No multi-node cluster? `spark-submit` also runs this job in local mode
 (`--master local[*]`, the default when no master is set), which still needs
 a reachable Kafka broker.
 
+The analytics job (section 16) is a second Spark application:
+
+```bash
+python -m spark.batch_analytics            # compute once
+python -m spark.batch_analytics --watch    # keep the dashboard's figures current
+```
+
+The first run downloads the PostgreSQL JDBC driver from Maven Central
+(`org.postgresql:postgresql:42.7.3`).
+
 ## 22. REST API (removed)
 
 The FastAPI server the Android app used before Google Drive (`api/`, with
@@ -449,9 +474,9 @@ Google Drive, Kafka, the database, Spark and the Drive watcher;
 
 ## 26. Performance evaluation
 
-`spark/analytics.performance_metrics()` (surfaced by `scripts/perf_report.py`; the dashboard's Performance page was removed
-on 11 October 2026) computes, from real recorded
-timestamps only:
+Spark (`spark/batch_analytics.py`, stored in `analytics_summary`, read by
+`spark/analytics.performance_metrics()` and surfaced by
+`scripts/perf_report.py`) computes, from real recorded timestamps only:
 
 - `avg_capture_to_upload_seconds` — only for images with a real EXIF/
   trusted capture timestamp; `null` otherwise (never estimated)
@@ -583,8 +608,8 @@ crop_disease_image_system/
 ├── spark/
 │   ├── streaming_job.py      Spark Structured Streaming: Kafka → per-photo processing
 │   ├── preprocessing.py      validation, EXIF, image preprocessing (model_input), CNN call, risk, persistence, Drive results
-│   ├── analytics.py          dashboard/Tableau analytics and performance metrics
-│   ├── batch_analytics.py    Spark batch job (JDBC) — daily summary per municipality
+│   ├── analytics.py          reads the Spark-computed analytics for the dashboard
+│   ├── batch_analytics.py    Spark analytics job (JDBC): every dashboard figure; --watch keeps them current
 │   └── data_quality.py       duplicate / outlier / missing-value checks
 ├── ml/
 │   ├── inference.py          the CNN: loads the checkpoint, classifies Spark's prepared input

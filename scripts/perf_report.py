@@ -1,9 +1,10 @@
 """
 Performance report (DIT manual section 14B): throughput, CPU, and memory
-usage during a pipeline run. Extends spark/analytics.performance_metrics()
-(which reports LATENCY from timestamps already recorded in the database)
-with process-level CPU/memory usage sampled via psutil, which the database
-has no way to record on its own.
+usage during a pipeline run. Extends the pipeline timings Spark computes
+from the timestamps recorded in the database (spark/batch_analytics.py,
+read through spark/analytics.performance_metrics()) with process-level
+CPU/memory usage sampled via psutil, which the database has no way to
+record on its own.
 
 Usage:
     python scripts/perf_report.py --volume 200
@@ -55,6 +56,11 @@ def main():
     print(f"[perf_report] Completed: {result['completed']}, Failed: {result['failed']}")
 
     print("\n[perf_report] Recorded pipeline latency (from DB timestamps, whole-DB not just this run):")
+    try:
+        from spark import batch_analytics
+        batch_analytics.run()                  # Spark recomputes, including this run's photos
+    except Exception as e:  # noqa: BLE001 - e.g. SQLite: Spark analytics need PostgreSQL
+        print(f"  (Spark analytics not recomputed: {e})")
     for key, value in analytics.performance_metrics().items():
         print(f"  {key}: {value}")
 

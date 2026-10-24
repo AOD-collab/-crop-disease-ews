@@ -179,18 +179,74 @@ CREATE TABLE IF NOT EXISTS scale_test_items (
 CREATE INDEX IF NOT EXISTS ix_scale_test_items_run_id ON scale_test_items (run_id);
 CREATE INDEX IF NOT EXISTS ix_scale_test_items_run_status ON scale_test_items (run_id, status);
 
--- Batch aggregation output of spark/batch_analytics.py (manual objective 7's
--- batch-processing half — streaming is spark/streaming_job.py). Overwritten
--- on each batch run, one row per location per day.
+-- Analytics computed by Spark (spark/batch_analytics.py — manual objective
+-- 7's batch-processing half; streaming is spark/streaming_job.py) and read by
+-- the dashboard (spark/analytics.py). Spark replaces every table's rows on
+-- each run. Scalability-test images are left out, each image counts once with
+-- its latest prediction, a blank location is "Unknown location", and days are
+-- Timor-Leste days.
+CREATE TABLE IF NOT EXISTS analytics_summary (
+    summary_id                     INTEGER PRIMARY KEY,         -- always 1
+    total_users                    BIGINT NOT NULL,             -- accounts not deleted
+    total_images                   BIGINT NOT NULL,
+    total_healthy                  BIGINT NOT NULL,
+    total_diseased                 BIGINT NOT NULL,             -- classified, not healthy, not uncertain
+    total_uncertain                BIGINT NOT NULL,
+    total_unclassified             BIGINT NOT NULL,             -- no prediction yet (pending / failed)
+    total_high_risk                BIGINT NOT NULL,
+    total_processed                BIGINT NOT NULL,
+    total_failed                   BIGINT NOT NULL,
+    submissions_24h                BIGINT NOT NULL,
+    active_farmers_24h             BIGINT NOT NULL,
+    most_detected_disease          VARCHAR,
+    avg_processing_latency_ms      DOUBLE PRECISION,            -- ingested -> predicted
+    avg_capture_to_upload_seconds  DOUBLE PRECISION,
+    avg_upload_to_ingestion_seconds DOUBLE PRECISION,
+    avg_end_to_end_latency_seconds DOUBLE PRECISION,            -- uploaded -> predicted
+    generated_at                   TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS analytics_disease_distribution (
+    predicted_class                VARCHAR PRIMARY KEY,
+    photos                         BIGINT NOT NULL,
+    generated_at                   TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS analytics_risk_distribution (
+    risk_level                     VARCHAR PRIMARY KEY,
+    photos                         BIGINT NOT NULL,
+    generated_at                   TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS analytics_high_risk_by_location (
+    location                       VARCHAR PRIMARY KEY,
+    high                           BIGINT NOT NULL,
+    total                          BIGINT NOT NULL,
+    high_pct                       DOUBLE PRECISION NOT NULL,
+    generated_at                   TIMESTAMPTZ NOT NULL
+);
+CREATE TABLE IF NOT EXISTS analytics_disease_trend (
+    location                       VARCHAR NOT NULL,
+    day                            DATE NOT NULL,
+    predicted_class                VARCHAR NOT NULL,
+    photos                         BIGINT NOT NULL,
+    generated_at                   TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (location, day, predicted_class)
+);
+CREATE TABLE IF NOT EXISTS analytics_disease_daily (
+    day                            DATE NOT NULL,
+    predicted_class                VARCHAR NOT NULL,
+    photos                         BIGINT NOT NULL,
+    generated_at                   TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (day, predicted_class)
+);
+-- One row per municipality per upload day, for reports / BI tools.
 CREATE TABLE IF NOT EXISTS batch_location_daily_summary (
     location                       VARCHAR NOT NULL,
     summary_date                   DATE NOT NULL,
-    total_images                   INTEGER NOT NULL,
-    total_healthy                  INTEGER NOT NULL,
-    total_diseased                 INTEGER NOT NULL,
+    total_images                   BIGINT NOT NULL,
+    total_healthy                  BIGINT NOT NULL,
+    total_diseased                 BIGINT NOT NULL,
     avg_risk_score                 DOUBLE PRECISION,
-    high_risk_count                INTEGER NOT NULL,
-    generated_at                   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    high_risk_count                BIGINT NOT NULL,
+    generated_at                   TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (location, summary_date)
 );
 

@@ -36,7 +36,7 @@ import uuid
 from datetime import datetime, timezone
 
 from sqlalchemy import (
-    create_engine, Column, String, Float, Integer, DateTime, ForeignKey,
+    create_engine, Column, String, Float, Integer, BigInteger, Date, DateTime, ForeignKey,
     Enum, Text, Boolean, Index, event, inspect, text as sql_text,
 )
 from sqlalchemy.orm import declarative_base, sessionmaker, relationship
@@ -403,6 +403,105 @@ class StorageAuditLog(Base):
     __table_args__ = (Index("ix_storage_audit_log_created_at", "created_at"),)
 
 
+# ----------------------------------------------------------------------
+# Analytics computed by Spark (spark/batch_analytics.py) and shown by the
+# dashboard. Spark replaces the rows of every table on each run; nothing
+# else writes them. Scalability-test images are left out; each image counts
+# once, with its latest prediction; days are Timor-Leste days.
+# ----------------------------------------------------------------------
+class AnalyticsSummary(Base):
+    """One row: the headline figures and the pipeline timings."""
+    __tablename__ = "analytics_summary"
+
+    summary_id = Column(Integer, primary_key=True)                  # always 1
+    total_users = Column(BigInteger, nullable=False)                # accounts not deleted
+    total_images = Column(BigInteger, nullable=False)
+    total_healthy = Column(BigInteger, nullable=False)
+    total_diseased = Column(BigInteger, nullable=False)             # classified, not healthy, not uncertain
+    total_uncertain = Column(BigInteger, nullable=False)
+    total_unclassified = Column(BigInteger, nullable=False)         # no prediction yet (pending / failed)
+    total_high_risk = Column(BigInteger, nullable=False)
+    total_processed = Column(BigInteger, nullable=False)            # has a prediction
+    total_failed = Column(BigInteger, nullable=False)
+    submissions_24h = Column(BigInteger, nullable=False)            # uploaded in the 24 h before generated_at
+    active_farmers_24h = Column(BigInteger, nullable=False)
+    most_detected_disease = Column(String, nullable=True)           # most frequent class except healthy
+    avg_processing_latency_ms = Column(Float, nullable=True)        # ingested -> predicted
+    avg_capture_to_upload_seconds = Column(Float, nullable=True)
+    avg_upload_to_ingestion_seconds = Column(Float, nullable=True)
+    avg_end_to_end_latency_seconds = Column(Float, nullable=True)   # uploaded -> predicted
+    generated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class AnalyticsDiseaseDistribution(Base):
+    __tablename__ = "analytics_disease_distribution"
+
+    predicted_class = Column(String, primary_key=True)
+    photos = Column(BigInteger, nullable=False)
+    generated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class AnalyticsRiskDistribution(Base):
+    __tablename__ = "analytics_risk_distribution"
+
+    risk_level = Column(String, primary_key=True)
+    photos = Column(BigInteger, nullable=False)
+    generated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class AnalyticsHighRiskByLocation(Base):
+    """Per municipality: analysed photos and how many are HIGH risk."""
+    __tablename__ = "analytics_high_risk_by_location"
+
+    location = Column(String, primary_key=True)                     # blank -> "Unknown location"
+    high = Column(BigInteger, nullable=False)
+    total = Column(BigInteger, nullable=False)
+    high_pct = Column(Float, nullable=False)
+    generated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class AnalyticsDiseaseTrend(Base):
+    """Photos classified per municipality, day and disease."""
+    __tablename__ = "analytics_disease_trend"
+
+    location = Column(String, primary_key=True)
+    day = Column(Date, primary_key=True)
+    predicted_class = Column(String, primary_key=True)
+    photos = Column(BigInteger, nullable=False)
+    generated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class AnalyticsDiseaseDaily(Base):
+    """Photos classified per day and disease, all municipalities together."""
+    __tablename__ = "analytics_disease_daily"
+
+    day = Column(Date, primary_key=True)
+    predicted_class = Column(String, primary_key=True)
+    photos = Column(BigInteger, nullable=False)
+    generated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class BatchLocationDailySummary(Base):
+    """Per municipality and upload day: the batch summary for reports/BI."""
+    __tablename__ = "batch_location_daily_summary"
+
+    location = Column(String, primary_key=True)
+    summary_date = Column(Date, primary_key=True)
+    total_images = Column(BigInteger, nullable=False)
+    total_healthy = Column(BigInteger, nullable=False)
+    total_diseased = Column(BigInteger, nullable=False)
+    avg_risk_score = Column(Float, nullable=True)
+    high_risk_count = Column(BigInteger, nullable=False)
+    generated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+ANALYTICS_TABLES = (
+    "analytics_summary", "analytics_disease_distribution", "analytics_risk_distribution",
+    "analytics_high_risk_by_location", "analytics_disease_trend", "analytics_disease_daily",
+    "batch_location_daily_summary",
+)
+
+
 class ProcessingMode(str, enum.Enum):
     # AUTOMATIC: the original, unchanged behaviour — an upload is published
     # to Kafka the moment it is stored and Spark processes it immediately.
@@ -567,7 +666,7 @@ def _ensure_pending_review_enum_value():
 
 
 TABLEAU_VIEW = "v_tableau_images"
-TABLEAU_TABLES = ("images", "predictions")
+TABLEAU_TABLES = ("images", "predictions") + ANALYTICS_TABLES
 
 
 def _create_tableau_view(conn):

@@ -189,6 +189,11 @@ SPARK_RECHECK_DRIVE_FILE = os.getenv("SPARK_RECHECK_DRIVE_FILE", "false").lower(
 # Longer side, in pixels, of the copy of a photo that Spark analyses
 # (spark/preprocessing.prepare_image). Every step already works at <= 600 px.
 ANALYSIS_MAX_PX = int(os.getenv("ANALYSIS_MAX_PX", "1280"))
+# Spark analytics service (python -m spark.batch_analytics --watch): how often
+# it checks the database for changes, and the longest it lets the dashboard's
+# figures go without a recompute (the "last 24 h" numbers move with time).
+ANALYTICS_CHECK_SECONDS = float(os.getenv("ANALYTICS_CHECK_SECONDS", "30"))
+ANALYTICS_MAX_AGE_SECONDS = float(os.getenv("ANALYTICS_MAX_AGE_SECONDS", "600"))
 
 # Scalability test (scalability/): its OWN Kafka topic and consumer group, read
 # by its own process — never the production topic or the live Spark job.
