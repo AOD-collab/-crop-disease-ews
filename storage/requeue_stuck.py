@@ -51,9 +51,8 @@ from sqlalchemy import and_, or_
 from storage.database import (
     SessionLocal, Image, ProcessingStatus, now_utc, init_db, SCALE_TEST_SOURCE,
 )
-from storage.image_storage import (
-    resolve_image_path, to_stored_path, is_drive_path, drive_file_id_from_path, DRIVE_PATH_PREFIX,
-)
+from storage.image_storage import resolve_image_path, to_stored_path, is_drive_path, DRIVE_PATH_PREFIX
+from storage.pipeline_submit import build_upload_event
 
 # Statuses that mean "the pipeline still owes this image a result".
 # PROCESSING: Spark stopped in the middle of the photo; its Kafka event may be
@@ -69,19 +68,6 @@ _RETRYABLE_FAILURE_MARKERS = (
     "Image file missing on disk",
     "Image file not found in Google Drive",
 )
-
-
-def _event_from_image(img: Image) -> dict:
-    """Rebuild the exact upload event storage/pipeline_submit.py publishes."""
-    return {
-        "image_id": img.image_id,
-        "user_id": img.user_id,
-        "location": img.location,
-        "image_path": img.image_path,
-        "drive_file_id": drive_file_id_from_path(img.image_path) if is_drive_path(img.image_path) else None,
-        "captured_at": img.captured_at.isoformat() if img.captured_at else None,
-        "uploaded_at": img.uploaded_at.isoformat() if img.uploaded_at else None,
-    }
 
 
 def result_not_delivered():
@@ -187,7 +173,7 @@ def republish(images, dry_run: bool) -> int:
             with SessionLocal() as s:
                 _mark_failed(s, img.image_id, f"Image file missing on disk at re-queue time: {img.image_path}")
             continue
-        backend.send(_event_from_image(img))
+        backend.send(build_upload_event(img))
         print(f"  re-published  {img.image_id}")
         done += 1
     print(f"\nRe-published {done} event(s) to Kafka topic '{KAFKA_TOPIC}'.")
@@ -210,7 +196,7 @@ def process_inline(images, dry_run: bool) -> int:
     done = 0
     failed = 0
     for img in images:
-        event = _event_from_image(img)
+        event = build_upload_event(img)
         try:
             result = process_event(event)
             persist_result(event, result, ProcessingStatus.COMPLETED)

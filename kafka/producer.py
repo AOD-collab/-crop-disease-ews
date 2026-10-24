@@ -150,10 +150,6 @@ class ResilientBackend:
         self._next_attempt = 0.0
         self._connect()
 
-    @property
-    def active_name(self) -> str:
-        return "KafkaBackend" if self._kafka is not None else "LocalFileBackend"
-
     def _connect(self):
         if self._kafka is not None:
             return self._kafka

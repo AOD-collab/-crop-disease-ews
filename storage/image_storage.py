@@ -1,34 +1,23 @@
 """
 Persistent image storage per DIT manual section 12.
 
-- Never trusts the client-supplied filename for anything beyond display
-  (original_filename is stored separately, purely informational).
-- Writes under storage/images/YYYY/MM/DD/<uuid>.<ext> — no path traversal
-  possible since the path is built entirely from server-generated
-  components (date + a fresh uuid4 + a whitelisted extension).
-- Rejects disallowed extensions/content-types and oversized files before
-  touching disk.
-- Keeps the original image bytes unmodified (no forced re-compression).
+- Legacy local-disk photos (storage/images/YYYY/MM/DD/<uuid>.<ext>, written
+  by the removed REST API) are still found through resolve_image_path().
+- Google Drive photos are recorded as "gdrive:<file id>" and downloaded on
+  demand; Spark keeps a permanent byte-for-byte copy of each one under
+  DOWNLOADED_PHOTOS_DIR.
 """
 
 import re
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
 
-from config.settings import (
-    BASE_DIR, IMAGE_STORAGE_PATH, MAX_IMAGE_SIZE, ALLOWED_IMAGE_EXTENSIONS, DOWNLOADED_PHOTOS_DIR,
-)
-
-
-class InvalidImage(Exception):
-    pass
+from config.settings import BASE_DIR, IMAGE_STORAGE_PATH, DOWNLOADED_PHOTOS_DIR
 
 
 def resolve_image_path(stored: str) -> Path:
     """Turn whatever is in images.image_path into a real path on THIS host.
 
-    Historically save_image stored an absolute path, so a DB carried across
+    Historically the upload code stored an absolute path, so a DB carried across
     machines / moved project folders (e.g. OneDrive -> A:\\final) pointed at
     files that no longer exist there even though the bytes came along under
     storage/images/. This resolver is the single place that copes with it:
@@ -69,57 +58,6 @@ def to_stored_path(file_path: Path) -> str:
     except ValueError:
         # image storage lives outside the project (custom IMAGE_STORAGE_PATH)
         return str(Path(file_path).resolve())
-
-
-def _safe_extension(filename: str, content_type: str) -> str:
-    ext = Path(filename or "").suffix.lower()
-    if ext not in ALLOWED_IMAGE_EXTENSIONS:
-        # fall back to content-type based extension if the filename's
-        # extension is missing/untrustworthy
-        ext = ".jpg" if content_type == "image/jpeg" else ".png" if content_type == "image/png" else ""
-    if ext not in ALLOWED_IMAGE_EXTENSIONS:
-        raise InvalidImage(f"Unsupported file extension: {ext or '(none)'}")
-    return ext
-
-
-def save_image(image_bytes: bytes, original_filename: str, content_type: str) -> str:
-    """Validates and persists the image. Returns the relative image_path
-    stored in the database (relative to the project so it stays portable
-    across environments/hosts)."""
-    if len(image_bytes) == 0:
-        raise InvalidImage("Empty file")
-    if len(image_bytes) > MAX_IMAGE_SIZE:
-        raise InvalidImage(f"File exceeds max size of {MAX_IMAGE_SIZE} bytes")
-
-    # Confirm it's actually a decodable image, not just a renamed file
-    # (corrupted-image / unsupported-format check — section 41/42).
-    try:
-        from io import BytesIO
-        from PIL import Image
-        img = Image.open(BytesIO(image_bytes))
-        img.verify()
-    except Exception as e:
-        raise InvalidImage(f"File is not a valid image: {e}") from e
-
-    ext = _safe_extension(original_filename, content_type)
-
-    now = datetime.now(timezone.utc)
-    day_dir = IMAGE_STORAGE_PATH / f"{now.year:04d}" / f"{now.month:02d}" / f"{now.day:02d}"
-    day_dir.mkdir(parents=True, exist_ok=True)
-
-    image_id = str(uuid.uuid4())
-    file_path = day_dir / f"{image_id}{ext}"
-
-    # image_id collision is astronomically unlikely with uuid4, but guard
-    # against accidental overwrite anyway.
-    while file_path.exists():
-        image_id = str(uuid.uuid4())
-        file_path = day_dir / f"{image_id}{ext}"
-
-    with open(file_path, "wb") as f:
-        f.write(image_bytes)
-
-    return image_id, to_stored_path(file_path)
 
 
 # ---------------------------------------------------------------------------

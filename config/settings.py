@@ -54,7 +54,6 @@ TABLEAU_DB_PASSWORD = os.getenv("TABLEAU_DB_PASSWORD", "")
 # --------------------------------------------------------------------
 IMAGE_STORAGE_PATH = Path(os.getenv("IMAGE_STORAGE_PATH", str(BASE_DIR / "storage" / "images")))
 MAX_IMAGE_SIZE = int(os.getenv("MAX_IMAGE_SIZE", str(15 * 1024 * 1024)))  # 15 MB default
-ALLOWED_IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 ALLOWED_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/png"}
 
 # --------------------------------------------------------------------

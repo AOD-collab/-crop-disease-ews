@@ -20,7 +20,7 @@ from kafka.producer import get_backend
 
 
 def build_upload_event(image) -> dict:
-    """The upload event published to Kafka, built from a stored Image row (mirrors storage/requeue_stuck._event_from_image).
+    """The upload event published to Kafka, built from a stored Image row (storage/requeue_stuck.py re-publishes with it too).
 
     For a Google Drive upload, image_path is "gdrive:<file id>" and
     drive_file_id carries the same id explicitly: Kafka transports only
