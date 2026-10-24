@@ -13,7 +13,7 @@ high_risk_by_location() for one scalability-test run's own rows.
 import pandas as pd
 
 from storage.database import engine
-from config.localtime import series_to_local, to_local
+from config.localtime import series_to_local
 
 
 def _read_sql(query: str) -> pd.DataFrame:
@@ -78,14 +78,6 @@ def images_with_predictions() -> pd.DataFrame:
         )
 
     return df.drop(columns=["prediction_id"], errors="ignore")
-
-
-def analytics_generated_at():
-    """When Spark last computed the analytics (Timor-Leste Time), or None."""
-    summary = _spark_table("analytics_summary")
-    if summary.empty:
-        return None
-    return to_local(pd.Timestamp(summary["generated_at"].iloc[0]).to_pydatetime())
 
 
 def kpi_summary() -> dict | None:

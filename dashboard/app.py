@@ -318,16 +318,6 @@ def load_data():
     return analytics.images_with_predictions()
 
 
-def _spark_analytics_note() -> None:
-    """Under the Spark-computed figures: when Spark computed them, or that
-    they appear once the EWS-SparkAnalytics service has computed them."""
-    when = analytics.analytics_generated_at()
-    if when is not None:
-        st.caption(f"⚡ Computed by Spark at {format_local(when)}")
-    else:
-        st.info("The figures appear here once Spark has computed them "
-                "(the EWS-SparkAnalytics service that run_all.py starts).")
-
 
 # ------------------------------------------------------------------
 # Google Drive helpers (Farmer Management, Images gallery). Cached so
@@ -535,7 +525,6 @@ if page == "Overview":
                 "Unclassified submissions have no disease classification yet — they are still "
                 "pending, or their processing failed."
             )
-    _spark_analytics_note()
 
     st.divider()
 
@@ -932,8 +921,6 @@ elif page == "Risk Alerts":
         )
         st.caption("Counts only photos that were analysed (photos rejected as not a leaf or not "
                    "maize are left out). Each photo counts once, with its latest result.")
-    _spark_analytics_note()
-    if not by_location.empty:
         st.divider()
         st.subheader("Latest HIGH risk photos")
 
@@ -1012,9 +999,8 @@ elif page == "Analytics":
         fig.update_xaxes(tickformat="%d/%m")
         fig.update_layout(barmode="stack", legend_title_text="Disease")
         st.plotly_chart(fig, width="stretch")
-    if dist.empty and rt.empty and rdist.empty and dt.empty and analytics.analytics_generated_at() is not None:
+    if dist.empty and rt.empty and rdist.empty and dt.empty:
         st.info("No analytics available yet — no images have been fully processed.")
-    _spark_analytics_note()
 
 elif page == "System Status":
     st.caption("Android → Google Drive → Kafka → Spark → Google Drive → Android. "
