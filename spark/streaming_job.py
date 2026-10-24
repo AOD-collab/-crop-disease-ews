@@ -59,7 +59,9 @@ if os.name == "nt" and "HADOOP_HOME" not in os.environ:
         os.environ["PATH"] += os.pathsep + _hadoop_bin
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import col, from_json, initcap, trim, to_timestamp, current_timestamp
+from pyspark.sql.functions import (
+    col, concat, current_timestamp, from_json, initcap, lit, regexp_replace, to_timestamp, trim, when,
+)
 from pyspark.sql.types import StructType, StructField, StringType
 
 from kafka.config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC
@@ -112,13 +114,21 @@ def build_spark():
 def parse_events(raw):
     """Kafka record value (JSON bytes) -> one typed row per upload event,
     then a genuine distributed-DataFrame cleaning stage (DIT manual 5.4):
-    drop rows missing a required field, parse/validate uploaded_at and
-    captured_at as real timestamps, normalize location casing/whitespace,
-    and reject events with a future captured_at. This runs as real Spark
-    SQL transformations on
-    the streaming DataFrame — NOT per-row Python — before foreachBatch's
-    per-row CNN inference / persistence work (which can't be expressed as a
-    DataFrame transformation) ever sees a row.
+    check the required fields, validate captured_at as a real timestamp
+    that is not in the future, and normalize location casing/whitespace.
+    This runs as real Spark SQL transformations on the streaming DataFrame
+    — NOT per-row Python — before foreachBatch's per-row CNN inference /
+    persistence work (which can't be expressed as a DataFrame
+    transformation) ever sees a row.
+
+    An event that fails a check is NOT filtered out: it keeps flowing with
+    `rejected_reason` set (EIP Invalid Message Channel). Filtering it used
+    to drop it silently, so a photo whose phone clock ran ahead (a future
+    captured_at) sat at INGESTED for ever, and storage.requeue_stuck only
+    re-sent it to be dropped again. _process_one records a rejected event
+    as FAILED with its reason, and the farmer gets that result in Drive;
+    one too broken to name an image lands in rejected_events with its raw
+    Kafka value (the dead-letter table).
 
     spark/preprocessing.clean_event() enforces the same rules again,
     per-row, so a direct process_event() call (unit tests, or the
@@ -134,23 +144,28 @@ def parse_events(raw):
     Extracted from run() so the exact projection the streaming query uses
     can be exercised without a Kafka broker."""
     parsed = raw.select(
-        from_json(col("value").cast("string"), EVENT_SCHEMA).alias("data")
-    ).select("data.*")
+        from_json(col("value").cast("string"), EVENT_SCHEMA).alias("data"),
+        col("value").cast("string").alias("raw_value"),
+    ).select("data.*", "raw_value")
 
-    cleaned = (
-        parsed
-        .filter(
-            col("image_id").isNotNull() & (col("image_id") != "")
-            & col("user_id").isNotNull() & (col("user_id") != "")
-            & col("image_path").isNotNull() & (col("image_path") != "")
-            & col("uploaded_at").isNotNull() & (col("uploaded_at") != "")
-        )
-        .withColumn("location", initcap(trim(col("location"))))
-        .withColumn("_captured_at_ts", to_timestamp(col("captured_at")))
-        .filter(col("_captured_at_ts").isNull() | (col("_captured_at_ts") <= current_timestamp()))
-        .drop("_captured_at_ts")
+    def missing(field):
+        return col(field).isNull() | (col(field) == "")
+
+    rejected_reason = when(lit(False), lit(None))
+    for field in ("image_id", "user_id", "image_path", "uploaded_at"):
+        rejected_reason = rejected_reason.when(missing(field), lit(f"Missing required field: {field}"))
+    rejected_reason = rejected_reason.when(
+        to_timestamp(col("captured_at")) > current_timestamp(),
+        concat(lit("captured_at is in the future: "), col("captured_at")),
     )
-    return cleaned
+
+    return (
+        parsed
+        .withColumn("location", initcap(regexp_replace(trim(col("location")), r"\s+", " ")))
+        .withColumn("rejected_reason", rejected_reason)
+        # the raw record is only kept for a rejected event (rejected_events.raw_event)
+        .withColumn("raw_value", when(col("rejected_reason").isNotNull(), col("raw_value")))
+    )
 
 
 def foreach_batch_sink(batch_df, batch_id):
@@ -162,7 +177,11 @@ def foreach_batch_sink(batch_df, batch_id):
     if batch_df.isEmpty():
         return
     # Stateless dedupe of THIS micro-batch only (see parse_events).
-    events = [row.asDict() for row in batch_df.dropDuplicates(["image_id"]).collect()]
+    # Records with no image_id (rejected ones) are kept apart: dropDuplicates
+    # would fold them all into one and only one would reach rejected_events.
+    named = col("image_id").isNotNull() & (col("image_id") != "")
+    deduped = batch_df.filter(named).dropDuplicates(["image_id"]).unionByName(batch_df.filter(~named))
+    events = [row.asDict() for row in deduped.collect()]
     started = time.monotonic()
     live_log.batch_started(batch_id, len(events))
     # Several photos at once: they overlap instead of queueing. dropDuplicates
@@ -211,6 +230,11 @@ def _process_one(event: dict):
         print(f"[streaming_job] {event.get('image_id')} is a scalability-test event "
               f"(run {event.get('run_id')}), skipping")
         return None
+    # Set by parse_events' cleaning stage; the raw record only for a rejected event.
+    rejected_reason = event.pop("rejected_reason", None)
+    raw_value = event.pop("raw_value", None)
+    if rejected_reason and not event.get("image_id"):
+        event["raw_value"] = raw_value       # rejected_events.raw_event keeps what Kafka carried
     state = replay_state(event.get("image_id"))      # one lookup instead of three
     if state == "held":
         # MANUAL mode holds this photo; an admin's Process sets it INGESTED
@@ -236,6 +260,8 @@ def _process_one(event: dict):
     spark_started_at = datetime.now(timezone.utc)
     result, status, error = None, ProcessingStatus.FAILED, None
     try:
+        if rejected_reason:
+            raise InvalidEvent(rejected_reason)
         result = process_event(event)
         persist_result(
             event, result, ProcessingStatus.COMPLETED,

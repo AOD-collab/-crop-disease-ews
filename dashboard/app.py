@@ -25,7 +25,7 @@ import plotly.express as px
 from sqlalchemy import or_ as sa_or
 
 from storage.database import (
-    SessionLocal, User, Image, Prediction, Role, UserStatus, ProcessingStatus,
+    SessionLocal, User, Image, Prediction, RejectedEvent, Role, UserStatus, ProcessingStatus,
     ProcessingMode, get_processing_mode, set_processing_mode, init_db, now_utc, SCALE_TEST_SOURCE,
     SCALE_TEST_USERNAME,
 )
@@ -478,10 +478,14 @@ def _system_status() -> dict:
             failed = (s_.query(Image).filter(Image.status == ProcessingStatus.FAILED,
                                              Image.uploaded_at >= now_utc() - timedelta(hours=24)).count())
             undelivered = count_owed(s_)["undelivered"]
+            # Kafka events too broken to name a photo (spark/streaming_job.parse_events)
+            rejected = (s_.query(RejectedEvent)
+                        .filter(RejectedEvent.created_at >= now_utc() - timedelta(hours=24)).count())
         lines = [f"{stuck} photo(s) waiting longer than 2 minutes",
                  f"{pending} photo(s) held for review (manual mode)",
                  f"{failed} failed in the last 24 hours",
-                 f"{undelivered} finished result(s) not delivered to the farmer's Google Drive"]
+                 f"{undelivered} finished result(s) not delivered to the farmer's Google Drive",
+                 f"{rejected} unreadable Kafka event(s) in the last 24 hours (table rejected_events)"]
         stuck += undelivered
         if stuck:
             lines.append("To re-send them: `python -m storage.requeue_stuck --all`")
