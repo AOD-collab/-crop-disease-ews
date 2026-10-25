@@ -23,7 +23,7 @@ _CHUNK = 500
 def farmer_photos() -> list:
     """(Drive metadata, folder email) for every file in every farmer's
     images/<email>/ folder, oldest upload first."""
-    folders = {f["id"]: f["name"] for f in drive_client.list_subfolders(drive_client.images_folder_id())}
+    folders = drive_client.user_image_folders()
     if not folders:
         return []
     out = []

@@ -247,11 +247,25 @@ def compute_scale_test(items) -> dict:
 
 # ----------------------------------------------------------------- output
 def write_tables(tables: dict, jdbc_url, properties) -> None:
-    """Replaces each table's rows. truncate keeps the table itself (types,
-    keys, the Tableau login's grants) as init_db() created it."""
+    """Replaces every table's rows in ONE transaction, so the dashboard never
+    reads a half-written or empty table: Spark writes each result into a
+    <name>_staging copy (same columns and types), then DELETE + INSERT ...
+    SELECT swaps all of them in at once — readers see the old rows until the
+    commit. The tables themselves (types, keys, the Tableau login's grants)
+    stay as init_db() created them."""
+    from sqlalchemy import text
+    from storage.database import engine
+    with engine.begin() as conn:
+        for name in tables:
+            conn.execute(text(f"DROP TABLE IF EXISTS {name}_staging"))
+            conn.execute(text(f"CREATE TABLE {name}_staging (LIKE {name})"))
     for name, df in tables.items():
-        (df.write.mode("overwrite").option("truncate", "true")
-         .jdbc(jdbc_url, name, properties=properties))
+        df.write.mode("append").jdbc(jdbc_url, f"{name}_staging", properties=properties)
+    with engine.begin() as conn:
+        for name in tables:
+            conn.execute(text(f"DELETE FROM {name}"))
+            conn.execute(text(f"INSERT INTO {name} SELECT * FROM {name}_staging"))
+            conn.execute(text(f"DROP TABLE {name}_staging"))
 
 
 def refresh(spark) -> float:
@@ -261,8 +275,7 @@ def refresh(spark) -> float:
     images, predictions, users, scale_test_items = read_inputs(spark, jdbc_url, properties)
     photos = photos_with_latest_prediction(images, predictions).cache()
     try:
-        write_tables(compute(photos, users), jdbc_url, properties)
-        write_tables(compute_scale_test(scale_test_items), jdbc_url, properties)
+        write_tables({**compute(photos, users), **compute_scale_test(scale_test_items)}, jdbc_url, properties)
     finally:
         photos.unpersist()
     return time.monotonic() - started

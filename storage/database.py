@@ -749,19 +749,19 @@ def init_db():
     already existed before this feature added new columns. Safe to call
     repeatedly."""
     Base.metadata.create_all(engine)
-    _add_missing_columns("users", _USERS_MIGRATION_COLUMNS)
     had_published_column = "result_published_at" in {
         c["name"] for c in inspect(engine).get_columns("images")}
-    _add_missing_columns("images", _IMAGES_MIGRATION_COLUMNS)
+    for table, columns in (("users", _USERS_MIGRATION_COLUMNS), ("images", _IMAGES_MIGRATION_COLUMNS),
+                           ("predictions", _PREDICTIONS_MIGRATION_COLUMNS),
+                           ("processing_events", _PROCESSING_EVENTS_MIGRATION_COLUMNS),
+                           ("scale_test_items", _SCALE_TEST_ITEMS_MIGRATION_COLUMNS)):
+        _add_missing_columns(table, columns)
     if not had_published_column:
         # Photos finished before the column existed already had their result
         # uploaded at the time: don't treat them as "not in Drive yet".
         with engine.begin() as conn:
             conn.execute(sql_text("UPDATE images SET result_published_at = processed_at "
                                   "WHERE status = 'COMPLETED' AND result_published_at IS NULL"))
-    _add_missing_columns("predictions", _PREDICTIONS_MIGRATION_COLUMNS)
-    _add_missing_columns("processing_events", _PROCESSING_EVENTS_MIGRATION_COLUMNS)
-    _add_missing_columns("scale_test_items", _SCALE_TEST_ITEMS_MIGRATION_COLUMNS)
     with engine.begin() as conn:
         _drop_field_feature(conn)
         _drop_system_settings(conn)

@@ -222,26 +222,24 @@ def _get_with_retry(url: str, params: dict):
     return _with_network_retry(_GET_ATTEMPTS, "GET attempt {attempt}", get)
 
 
-def get_file_metadata(file_id: str) -> dict:
+def _get_file(file_id: str, params: dict, action: str):
+    """GET files/<file_id> (with retries), checked; `action` names it in errors."""
     _require_valid_id(file_id)
-    return _check(_get_with_retry(f"{DRIVE_API}/files/{file_id}", {"fields": FILE_METADATA_FIELDS}),
-                  f"get metadata for {file_id}").json()
+    return _check(_get_with_retry(f"{DRIVE_API}/files/{file_id}", params), f"{action} {file_id}")
+
+
+def get_file_metadata(file_id: str) -> dict:
+    return _get_file(file_id, {"fields": FILE_METADATA_FIELDS}, "get metadata for").json()
 
 
 def download_file(file_id: str) -> bytes:
-    _require_valid_id(file_id)
-    resp = _get_with_retry(f"{DRIVE_API}/files/{file_id}", {"alt": "media"})
-    _check(resp, f"download {file_id}")
-    return resp.content
+    return _get_file(file_id, {"alt": "media"}, "download").content
 
 
 def download_thumbnail(file_id: str, size_px: int = 220) -> Optional[bytes]:
     """Google's own small preview of a file (a few KB instead of the whole
     photo), or None when Drive hasn't made one."""
-    _require_valid_id(file_id)
-    resp = _get_with_retry(f"{DRIVE_API}/files/{file_id}", {"fields": "thumbnailLink"})
-    _check(resp, f"get thumbnail link for {file_id}")
-    link = resp.json().get("thumbnailLink")
+    link = _get_file(file_id, {"fields": "thumbnailLink"}, "get thumbnail link for").json().get("thumbnailLink")
     if not link:
         return None
     # thumbnailLink ends in "=s220"; ask for the size the page needs
@@ -392,6 +390,11 @@ def list_subfolders(parent_id: str) -> list:
     _require_valid_id(parent_id, "parent folder id")
     q = f"'{parent_id}' in parents and mimeType = '{FOLDER_MIME_TYPE}' and trashed = false"
     return _list_files(q, "id,name,appProperties", "list subfolders")
+
+
+def user_image_folders() -> dict:
+    """{folder id: farmer email} of every farmer's /images/<email>/ folder."""
+    return {f["id"]: f["name"] for f in list_subfolders(images_folder_id())}
 
 
 def list_files_in_folders(parent_ids: list, created_after: Optional[str] = None) -> list:

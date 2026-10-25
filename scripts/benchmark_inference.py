@@ -33,6 +33,7 @@ import json
 import statistics
 import sys
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -171,9 +172,7 @@ def accuracy(loaded, folder: Path, precisions, batch_size) -> dict:
             continue
         items += [(f, cls) for f in sorted(sub.iterdir()) if f.suffix.lower() in (".jpg", ".jpeg", ".png")]
     tensors = [inference._as_input(loaded, model_input(f.read_bytes())) for f, _ in items]
-    out = {"images": len(items), "per_class_images": {}}
-    for f, c in items:
-        out["per_class_images"][c] = out["per_class_images"].get(c, 0) + 1
+    out = {"images": len(items), "per_class_images": dict(Counter(c for _, c in items))}
     for prec in precisions:
         probs = _forward_all(loaded, tensors, batch_size, prec)
         pred = [loaded["class_names"][int(p.argmax())] for p in probs]      # raw top class

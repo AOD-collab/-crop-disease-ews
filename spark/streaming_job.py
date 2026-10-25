@@ -47,7 +47,6 @@ has not been exercised.
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -63,7 +62,7 @@ from config.settings import (
     SPARK_DRIVE_UPLOAD_WORKERS, SPARK_AUTO_RESEND_SECONDS, SPARK_AUTO_RESEND_AFTER_SECONDS, SPARK_AUTO_RESEND_MAX,
 )
 from spark.preprocessing import (
-    process_event, persist_result, mark_processing, InvalidEvent, publish_result_to_drive_safely,
+    process_and_persist, mark_processing, InvalidEvent, publish_result_to_drive_safely,
     replay_state, resend_duplicates_of,
 )
 from storage.database import ProcessingStatus, init_db
@@ -281,24 +280,8 @@ def _process_one(event: dict):
     if image_id:
         mark_processing(image_id)
     spark_started_at = datetime.now(timezone.utc)
-    save = partial(persist_result, event, kafka_received_at=kafka_received_at, spark_started_at=spark_started_at)
-    result, status, error = None, ProcessingStatus.FAILED, None
-    try:
-        if rejected_reason:
-            raise InvalidEvent(rejected_reason)
-        result = process_event(event)
-        save(result, ProcessingStatus.COMPLETED)
-        status = ProcessingStatus.COMPLETED
-    except Exception as e:                     # an InvalidEvent too, only reported differently
-        print(f"[streaming_job] Invalid event, skipping: {e}" if isinstance(e, InvalidEvent)
-              else f"[streaming_job] Processing failed for {event.get('image_id')}: {e}")
-        error = str(e)
-        try:
-            save(None, ProcessingStatus.FAILED, error_message=error)
-        except Exception as db_error:  # noqa: BLE001 - don't take the other photos (or the job) down with it
-            # The photo stays PROCESSING; storage/requeue_stuck.py sends it again.
-            print(f"[streaming_job] Could not record the failure for {image_id}: {db_error}")
-
+    result, status, error = process_and_persist(event, rejected_reason, kafka_received_at=kafka_received_at,
+                                                spark_started_at=spark_started_at)
     live_log.photo_done(event, status.value, result, error, time.monotonic() - photo_started)
     processed = result.get("processed_image_jpeg") if result else None
     return _UPLOADS.submit(_upload_result, event, status, error, processed)

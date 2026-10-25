@@ -197,36 +197,20 @@ def process_inline(images, dry_run: bool) -> int:
     if _listed_only(images, dry_run, "process inline"):
         return 0
 
-    from spark.preprocessing import (
-        process_event, persist_result, InvalidEvent, publish_result_to_drive_safely, resend_duplicates_of,
-    )
+    from spark.preprocessing import process_and_persist, publish_result_to_drive_safely, resend_duplicates_of
 
     done = 0
-    failed = 0
     for img in images:
         event = build_upload_event(img)
-        try:
-            result = process_event(event)
-            persist_result(event, result, ProcessingStatus.COMPLETED)
-            publish_result_to_drive_safely(
-                event, ProcessingStatus.COMPLETED, processed_image=result.get("processed_image_jpeg"),
-            )
+        result, status, error = process_and_persist(event)
+        if status == ProcessingStatus.COMPLETED:
             print(f"  processed  {img.image_id}  -> {result['predicted_class']} "
                   f"(risk {result['risk_level']} {result['risk_score']})")
             done += 1
-        except Exception as e:                     # an InvalidEvent too, only labelled differently
-            print(f"  {'FAILED (invalid)' if isinstance(e, InvalidEvent) else 'FAILED'}  {img.image_id}: {e}")
-            failed += 1
-            try:
-                persist_result(event, None, ProcessingStatus.FAILED, error_message=str(e))
-                publish_result_to_drive_safely(event, ProcessingStatus.FAILED, str(e))
-            except Exception as db_error:  # noqa: BLE001 - keep going with the other photos
-                print(f"  could not record the failure of {img.image_id}: {db_error}")
-    print(f"\nProcessed inline: {done} completed, {failed} failed.")
-    with SessionLocal() as s:
-        ids = [img.image_id for img in images
-               if (row := s.get(Image, img.image_id)) is not None and row.status == ProcessingStatus.FAILED]
-    if resent := resend_duplicates_of(ids):
+        publish_result_to_drive_safely(event, status, error,
+                                       processed_image=(result or {}).get("processed_image_jpeg"))
+    print(f"\nProcessed inline: {done} completed, {len(images) - done} failed.")
+    if resent := resend_duplicates_of([img.image_id for img in images]):   # it picks the FAILED ones
         print(f"Sent {resent} copy/copies of failed photo(s) to Kafka for their own result.")
     return done
 
@@ -240,9 +224,7 @@ def resend_owed(older_than_seconds: int, limit: int, backend=None) -> int:
     `older_than_seconds` before it can be sent again. While Google Drive
     can't be reached, undelivered results are left for a later round (they
     would only fail at the upload again). Returns how many were sent."""
-    from kafka.config import KAFKA_TOPIC
-    from kafka.producer import get_backend
-    from storage.pipeline_submit import submit_image_for_processing
+    from storage.pipeline_submit import submit_all
     from storage import drive_client
     with SessionLocal() as session:
         owed = find_stuck(session, older_than_seconds, include_failed=False, ignore_age=False)
@@ -252,15 +234,7 @@ def resend_owed(older_than_seconds: int, limit: int, backend=None) -> int:
                 drive_client.account_info()
             except Exception:  # noqa: BLE001 - Drive down: deliver those later
                 owed = [i for i in owed if i.status != ProcessingStatus.COMPLETED]
-        sent = 0
-        for img in owed[:limit]:
-            try:
-                backend = backend or get_backend(KAFKA_TOPIC)
-                submit_image_for_processing(session, img, backend)
-                sent += 1
-            except Exception as e:  # noqa: BLE001 - recorded on the row; the others still go
-                print(f"[requeue_stuck] Could not re-send {img.image_id}: {e}")
-    return sent
+        return submit_all(session, owed[:limit], backend, "[requeue_stuck]")
 
 
 def republish_from_drive(dry_run: bool) -> int:
@@ -329,13 +303,9 @@ def main() -> int:
     ids = [iid for iid, _ in summary]
 
     with SessionLocal() as session:
-        live = [session.get(Image, iid) for iid in ids]
-        healed = rebase_paths(session, live, args.dry_run)
-    if healed:
-        print(f"  ({healed} stale image_path value(s) rebased to this project)\n")
-
-    with SessionLocal() as session:
         images = [session.get(Image, iid) for iid in ids]
+        if healed := rebase_paths(session, images, args.dry_run):
+            print(f"  ({healed} stale image_path value(s) rebased to this project)\n")
         if args.inline:
             process_inline(images, args.dry_run)
         else:

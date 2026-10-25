@@ -212,13 +212,9 @@ def reset_preview() -> dict:
     from storage import image_cache
     init_db()
     with SessionLocal() as s:
-        deleted = {"images": s.query(Image).count(), "predictions": s.query(Prediction).count(),
-                   "processing_events": s.query(ProcessingEvent).count(),
-                   "rejected_events": s.query(RejectedEvent).count()}
-        kept_db = {"users": s.query(User).count(), "image_reviews": s.query(ImageReview).count(),
-                   "storage_audit_log": s.query(StorageAuditLog).count(),
-                   "scale_test_runs": s.query(ScaleTestRun).count(),
-                   "scale_test_items": s.query(ScaleTestItem).count()}
+        deleted, kept_db = ({t.__tablename__: s.query(t).count() for t in tables} for tables in (
+            (Image, Prediction, ProcessingEvent, RejectedEvent),
+            (User, ImageReview, StorageAuditLog, ScaleTestRun, ScaleTestItem)))
     usage = {u["category"]: u for u in image_cache.usage()}
     return {
         "deleted_rows": deleted,

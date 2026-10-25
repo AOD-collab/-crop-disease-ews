@@ -43,6 +43,7 @@ from storage.image_storage import (
     downloaded_photo_path, store_downloaded_photo,
 )
 from storage.exif_utils import extract_image_metadata
+from kafka.drive_watcher import _parse_time
 from ml.render import render_processed_image
 from storage import drive_client
 from ml.inference import predict as run_model, model_version as get_model_version, disease_heatmap, input_spec
@@ -73,11 +74,8 @@ def _parse_timestamp(value, field_name: str):
     """Parses an ISO-8601 string (what every event field is serialized as)
     into a timezone-aware datetime. Raises InvalidEvent for anything that
     doesn't parse, instead of silently passing a bad string through."""
-    if value is None or value == "":
-        return None
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
+    dt = _parse_time(value)
+    if dt is None and value:
         raise InvalidEvent(f"Invalid {field_name}: not a valid ISO-8601 timestamp ({value!r})")
     return _as_aware_utc(dt)
 
@@ -179,24 +177,14 @@ def resend_duplicates_of(failed_ids: list, backend=None) -> int:
     requeue_stuck --include-failed retries. Returns how many were sent."""
     if not failed_ids:
         return 0
-    from kafka.config import KAFKA_TOPIC
-    from kafka.producer import get_backend
-    from storage.pipeline_submit import submit_image_for_processing
-    sent = 0
+    from storage.pipeline_submit import submit_all
     with SessionLocal() as session:
         failed = [i for (i,) in session.query(Image.image_id).filter(
             Image.image_id.in_(failed_ids), Image.status == ProcessingStatus.FAILED)]
         copies = session.query(Image).filter(
             Image.status == ProcessingStatus.FAILED,
             Image.error_message.in_([DUPLICATE_OF + i for i in failed])).order_by(Image.uploaded_at).all()
-        for img in copies:
-            try:
-                backend = backend or get_backend(KAFKA_TOPIC)
-                submit_image_for_processing(session, img, backend)
-                sent += 1
-            except Exception as e:  # noqa: BLE001 - recorded on the row; the others still go
-                print(f"[preprocessing] Could not send {img.image_id} again: {e}")
-    return sent
+        return submit_all(session, copies, backend, "[preprocessing]")
 
 
 def clean_event(event: dict) -> dict:
@@ -206,17 +194,12 @@ def clean_event(event: dict) -> dict:
         if not event.get(key):
             raise InvalidEvent(f"Missing required field: {key}")
 
-    uploaded_at = _parse_timestamp(event.get("uploaded_at"), "uploaded_at")
-    captured_at = _parse_timestamp(event.get("captured_at"), "captured_at")
-
     now = datetime.now(timezone.utc)
-    if uploaded_at is not None and uploaded_at > now:
-        raise InvalidEvent(f"uploaded_at is in the future: {uploaded_at.isoformat()}")
-    if captured_at is not None and captured_at > now:
-        raise InvalidEvent(f"captured_at is in the future: {captured_at.isoformat()}")
-
-    event["uploaded_at"] = uploaded_at.isoformat() if uploaded_at else event.get("uploaded_at")
-    event["captured_at"] = captured_at.isoformat() if captured_at else None
+    times = {field: _parse_timestamp(event.get(field), field) for field in ("uploaded_at", "captured_at")}
+    for field, value in times.items():
+        if value is not None and value > now:
+            raise InvalidEvent(f"{field} is in the future: {value.isoformat()}")
+    event.update({field: value.isoformat() if value else None for field, value in times.items()})
     event["location"] = normalize_location(event.get("location"))
 
     with SessionLocal() as session:
@@ -316,14 +299,11 @@ def extract_metadata(event: dict, image_bytes: bytes) -> dict:
         if image is not None:
             for name in _METADATA_COLUMNS:
                 setattr(image, name, meta[name])
-            if meta["gps_latitude"] is not None and meta["gps_longitude"] is not None:
+            exif_gps = meta["gps_latitude"] is not None and meta["gps_longitude"] is not None
+            if exif_gps or image.gps_source != "device":
                 for name in _GPS_COLUMNS:
-                    setattr(image, name, meta[name])
-                image.gps_source = "exif"
-            elif image.gps_source != "device":
-                for name in _GPS_COLUMNS:
-                    setattr(image, name, None)
-                image.gps_source = None
+                    setattr(image, name, meta[name] if exif_gps else None)
+                image.gps_source = "exif" if exif_gps else None
             if image.captured_at is None and meta["captured_at"] is not None:
                 image.captured_at = meta["captured_at"]
                 image.captured_at_source = meta["captured_at_source"]
@@ -434,13 +414,7 @@ def compute_risk(features: dict, is_uncertain: bool = False) -> tuple:
     """
     score = round(min(max(features.get("lesion_score") or 0.0, 0.0), 1.0), 3)
 
-    if score >= RISK_THRESHOLDS["high"]:
-        level = "HIGH"
-    elif score >= RISK_THRESHOLDS["medium"]:
-        level = "MEDIUM"
-    else:
-        level = "LOW"
-
+    level = next((lvl for lvl in ("HIGH", "MEDIUM") if score >= RISK_THRESHOLDS[lvl.lower()]), "LOW")
     if is_uncertain and level == "HIGH":
         level = "MEDIUM"
 
@@ -506,11 +480,10 @@ def process_event(event: dict) -> dict:
     lap("preprocess_s")
     features = run_model(cnn_input)
     lap("cnn_s")
+    # The batch this photo ran in, its precision, checking the prepared input
+    # (inside cnn_s), and waiting for + running the forward pass.
     used = features.get("inference") or {}
-    timings["cnn_batch_size"] = used.get("batch_size")      # batch this photo ran in
-    timings["cnn_precision"] = used.get("precision")
-    timings["cnn_input_s"] = used.get("input_s")            # checking the prepared input, inside cnn_s
-    timings["cnn_forward_s"] = used.get("forward_s")        # waiting for + running the forward pass
+    timings.update({f"cnn_{k}": used.get(k) for k in ("batch_size", "precision", "input_s", "forward_s")})
     if scale_run is None:
         save_for_review(event["image_id"], image_bytes)
 
@@ -622,10 +595,16 @@ def mark_processing(image_id: str) -> None:
     long-running CNN call is visible in the dashboard as in-flight rather
     than silently still showing INGESTED. Best-effort: an unknown image_id
     is a no-op (persist_result's own guard handles that case properly)."""
+    _update_image(image_id, status=ProcessingStatus.PROCESSING)
+
+
+def _update_image(image_id: str, **fields) -> None:
+    """Sets `fields` on one Image row and commits; an unknown image_id is a no-op."""
     with SessionLocal() as session:
         image = session.get(Image, image_id)
         if image is not None:
-            image.status = ProcessingStatus.PROCESSING
+            for name, value in fields.items():
+                setattr(image, name, value)
             session.commit()
 
 
@@ -720,6 +699,31 @@ def persist_result(
         session.commit()
 
 
+def process_and_persist(event: dict, rejected_reason: str = None, **stamps) -> tuple:
+    """process_event + persist_result for one photo (the Spark sink and
+    storage.requeue_stuck --inline): COMPLETED with its result, or FAILED
+    with the error — an InvalidEvent too, e.g. `rejected_reason` from
+    parse_events. Never raises: if even the failure can't be saved, the
+    photo stays PROCESSING and storage/requeue_stuck.py sends it again.
+    `stamps`: persist_result's kafka_received_at / spark_started_at.
+    Returns (result, status, error)."""
+    result = None
+    try:
+        if rejected_reason:
+            raise InvalidEvent(rejected_reason)
+        result = process_event(event)
+        persist_result(event, result, ProcessingStatus.COMPLETED, **stamps)
+        return result, ProcessingStatus.COMPLETED, None
+    except Exception as e:                     # an InvalidEvent too, only reported differently
+        print(f"[preprocessing] Invalid event, skipping: {e}" if isinstance(e, InvalidEvent)
+              else f"[preprocessing] Processing failed for {event.get('image_id')}: {e}")
+        try:
+            persist_result(event, None, ProcessingStatus.FAILED, error_message=str(e), **stamps)
+        except Exception as db_error:  # noqa: BLE001 - don't take the other photos (or the job) down with it
+            print(f"[preprocessing] Could not record the failure for {event.get('image_id')}: {db_error}")
+        return result, ProcessingStatus.FAILED, str(e)
+
+
 # ---------------------------------------------------------------------------
 # Spark -> Google Drive /results
 # ---------------------------------------------------------------------------
@@ -810,19 +814,15 @@ def publish_result_to_drive(event: dict, status: ProcessingStatus, error_message
         "kind": "result",
         "status": status.value,
         "drive_image_file_id": payload["drive_image_file_id"],
-        "processed_file_id": payload["processed_file_id"] or "",
-        "location": payload["location"] or "",
-        "uploaded_at": payload["uploaded_at"] or "",
-        "predicted_class": pred.get("predicted_class") or "",
-        "prediction_confidence": pred.get("prediction_confidence") if pred else "",
-        "risk_level": pred.get("risk_level") or "",
-        "risk_score": pred.get("risk_score") if pred else "",
+        **{k: payload[k] or "" for k in ("processed_file_id", "location", "uploaded_at")},
+        **{k: pred.get(k) or "" for k in ("predicted_class", "risk_level")},
+        **{k: pred.get(k) if pred else "" for k in ("prediction_confidence", "risk_score")},
         "error_message": (error_message or "")[:80],
     }
     name = f"{image_id}.json"
     file_id = _RESULT_FILES.upload(folder, name, lambda existing: drive_client.upload_json(
         name, payload, folder, summary, may_exist=False, existing_id=existing))
-    _mark_result_published(image_id)
+    _update_image(image_id, result_published_at=datetime.now(timezone.utc))   # this result is in Drive
     return file_id
 
 
@@ -854,9 +854,8 @@ class _ResultFolderIndex:
             with self._lock:
                 if folder in self._folders:
                     return self._folders[folder]
-            names = {}
-            for f in drive_client.list_files_in_folders([folder]):    # oldest first: newest copy wins
-                names[f["name"]] = f["id"]
+            # oldest first: the newest copy of a name wins
+            names = {f["name"]: f["id"] for f in drive_client.list_files_in_folders([folder])}
             with self._lock:
                 self._folders[folder] = names
             return names
@@ -880,15 +879,6 @@ class _ResultFolderIndex:
 
 
 _RESULT_FILES = _ResultFolderIndex()
-
-
-def _mark_result_published(image_id: str) -> None:
-    """Images.result_published_at = now: this photo's result is in Drive."""
-    with SessionLocal() as session:
-        image = session.get(Image, image_id)
-        if image is not None:
-            image.result_published_at = datetime.now(timezone.utc)
-            session.commit()
 
 
 def publish_result_to_drive_safely(event: dict, status: ProcessingStatus, error_message: str = None,

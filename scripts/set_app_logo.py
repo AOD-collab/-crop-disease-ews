@@ -221,12 +221,9 @@ def main():
         print("4. Home screen: no leaf on the Scan button (nothing to do)")
 
     # ---- 5. delete the old logo files -------------------------------------
-    removed = []
-    for rel in OLD_FILES:
-        f = RES / rel
-        if f.exists():
-            f.unlink()
-            removed.append(rel)
+    removed = [rel for rel in OLD_FILES if (RES / rel).exists()]
+    for rel in removed:
+        (RES / rel).unlink()
     if (RES / "mipmap").is_dir() and not any((RES / "mipmap").iterdir()):
         try:
             (RES / "mipmap").rmdir()
@@ -237,12 +234,11 @@ def main():
     print("5. Old logo files deleted: " + (", ".join(removed) if removed else "none left"))
 
     # ---- safety check: nothing still points at a deleted file ---------------
-    leftovers = []
-    for f in list(RES.rglob("*.xml")) + list((RES.parent / "java").rglob("*.kt")):
-        body = f.read_text(encoding="utf-8", errors="ignore")
-        for name in ("ic_leaf", "bg_logo_badge", "drawable/ic_launcher_foreground", "drawable/ic_launcher_background"):
-            if name in body:
-                leftovers.append(f"{f.relative_to(RES.parent)} still uses {name}")
+    old_names = ("ic_leaf", "bg_logo_badge", "drawable/ic_launcher_foreground", "drawable/ic_launcher_background")
+    leftovers = [f"{f.relative_to(RES.parent)} still uses {name}"
+                 for f in list(RES.rglob("*.xml")) + list((RES.parent / "java").rglob("*.kt"))
+                 if (body := f.read_text(encoding="utf-8", errors="ignore"))
+                 for name in old_names if name in body]
     if leftovers:
         print("\nWARNING - these still refer to the old logo (the build will fail until fixed):")
         for x in leftovers:

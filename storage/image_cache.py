@@ -477,24 +477,21 @@ def cleanup(kinds, confirmed: list, performed_by=None, dry_run: bool = False) ->
         if category in PROTECTED or not any(c.path.resolve().is_relative_to(a) for a in allowed):
             report["skipped"].append((rel, "outside the managed cache"))
             continue
-        if dry_run:
+        outcome, detail = "done", None
+        if not dry_run:
+            try:
+                c.path.unlink()
+            except FileNotFoundError:
+                outcome, detail = "skipped", "already gone"
+            except OSError as e:          # locked, permission denied, ...
+                outcome, detail = "failed", e
+            audit("cleanup_delete", outcome, category=category, target=rel, reason=c.reason,
+                  detail=detail, performed_by=performed_by)
+        if outcome == "done":
             report["deleted"] += 1
             report["bytes"] += c.size
-            continue
-        try:
-            c.path.unlink()
-            report["deleted"] += 1
-            report["bytes"] += c.size
-            audit("cleanup_delete", "done", category=category, target=rel, reason=c.reason,
-                  performed_by=performed_by)
-        except FileNotFoundError:
-            report["skipped"].append((rel, "already gone"))
-            audit("cleanup_delete", "skipped", category=category, target=rel, reason=c.reason,
-                  detail="already gone", performed_by=performed_by)
-        except OSError as e:          # locked, permission denied, ...
-            report["failed"].append((rel, str(e)))
-            audit("cleanup_delete", "failed", category=category, target=rel, reason=c.reason,
-                  detail=e, performed_by=performed_by)
+        else:
+            report[outcome].append((rel, str(detail)))
     for rel in sorted(wanted):        # confirmed but no longer a candidate
         report["skipped"].append((rel, "no longer eligible (changed, in use or repaired since the preview)"))
         if not dry_run:

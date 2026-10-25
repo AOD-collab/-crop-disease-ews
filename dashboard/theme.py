@@ -49,3 +49,11 @@ def high_risk_table(df, summary: list, summary_label: str) -> None:
         },
         hide_index=True, width="stretch",
     )
+
+
+def metric_row(*specs) -> None:
+    """One row of st.metric cards, side by side: each spec is
+    (label, value) or (label, value, help)."""
+    import streamlit as st
+    for col, (label, value, *help_text) in zip(st.columns(len(specs)), specs):
+        col.metric(label, value, help=help_text[0] if help_text else None)

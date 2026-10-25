@@ -85,3 +85,18 @@ def submit_image_for_processing(session, image, backend=None) -> None:
         image.error_message = f"Kafka publish failed: {e}"
         session.commit()
         raise
+
+
+def submit_all(session, images, backend=None, log_prefix="[pipeline_submit]") -> int:
+    """submit_image_for_processing for each image, one backend for all; one
+    that can't be sent only logs (its row says why) and the others still go.
+    Returns how many were sent."""
+    sent = 0
+    for image in images:
+        try:
+            backend = backend or get_backend(KAFKA_TOPIC)
+            submit_image_for_processing(session, image, backend)
+            sent += 1
+        except Exception as e:  # noqa: BLE001 - recorded on the row; the others still go
+            print(f"{log_prefix} Could not re-send {image.image_id}: {e}")
+    return sent

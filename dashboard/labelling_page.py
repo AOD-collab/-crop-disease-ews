@@ -43,8 +43,7 @@ def pending_photos() -> list[Path]:
 
 
 def labelled_counts() -> dict[str, int]:
-    return {c: len(list((settings.LABELLED_TRAIN_DIR / c).glob("*.jpg"))) if
-            (settings.LABELLED_TRAIN_DIR / c).exists() else 0 for c in CLASSES}
+    return {c: len(list((settings.LABELLED_TRAIN_DIR / c).glob("*.jpg"))) for c in CLASSES}   # no folder -> 0
 
 
 def _log(photo: Path, decision: str, ai_class: str | None, admin: str | None) -> None:

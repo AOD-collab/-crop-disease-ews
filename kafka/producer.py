@@ -29,6 +29,25 @@ LOCAL_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
 _APPEND_LOCK = threading.Lock()
 
 
+def _append(path, text: str) -> None:
+    """Appends `text` to a queue file, one writer at a time across PROCESSES
+    too (the Drive watcher and the dashboard share the file): an OS lock on
+    its first byte while writing."""
+    with _APPEND_LOCK, open(path, "a") as f:
+        if os.name == "nt":
+            import msvcrt
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)   # waits up to ~10 s, then raises
+            f.write(text)
+            f.flush()
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)      # released when the file closes
+            f.write(text)
+
+
 def _parse_lines(lines):
     """(messages, bad_lines) of a JSON-lines queue. A line that isn't valid
     JSON (a process killed half-way through an append) is returned apart
@@ -55,32 +74,15 @@ class KafkaBackend:
 
     def send(self, message: dict):
         # produce() only *queues* the record; delivery success/failure is
-        # reported asynchronously via this callback, NOT by an exception.
-        # Without checking it, a broker that goes down after get_backend()
-        # succeeded makes send() return cleanly while the event is never
-        # delivered — which is exactly how uploads end up marked INGESTED
-        # but never processed. Surface it so the caller
-        # (storage/pipeline_submit.py) can tell the image wasn't queued.
+        # reported asynchronously, NOT by an exception. Without checking it,
+        # a broker that goes down after get_backend() succeeded makes send()
+        # return cleanly while the event is never delivered — which is
+        # exactly how uploads end up marked INGESTED but never processed.
+        # Raise so the caller (storage/pipeline_submit.py) can tell the
+        # image wasn't queued.
         from confluent_kafka import KafkaException
-        errors = []
-
-        def _on_delivery(err, _msg):
-            if err is not None:
-                errors.append(err)
-
-        self._producer.produce(
-            self.topic,
-            json.dumps(message).encode("utf-8"),
-            callback=_on_delivery,
-        )
-        remaining = self._producer.flush(timeout=10)
-        if remaining > 0:
-            raise KafkaException(
-                f"Kafka delivery not acknowledged within 10s "
-                f"({remaining} message(s) still queued) — broker unreachable?"
-            )
-        if errors:
-            raise KafkaException(f"Kafka delivery failed: {errors[0]}")
+        if failed := self.send_many([message], timeout=10):
+            raise KafkaException(f"Kafka delivery failed: {failed[0]} — broker unreachable?")
 
     def send_many(self, messages: list, timeout: float = 120) -> dict:
         """Publishes many events with one flush at the end instead of one
@@ -123,9 +125,7 @@ class LocalFileBackend:
         self.path = LOCAL_QUEUE_DIR / f"{topic}.jsonl"
 
     def send(self, message: dict):
-        line = json.dumps(message) + "\n"
-        with _APPEND_LOCK, open(self.path, "a") as f:
-            f.write(line)
+        _append(self.path, json.dumps(message) + "\n")
 
 
 class ResilientBackend:
@@ -238,8 +238,8 @@ class ResilientBackend:
                 print(f"[kafka.producer] Could not read {path.name}: {e}")
                 continue
             if bad:
-                with _APPEND_LOCK, open(self._local.path.with_suffix(".corrupt"), "a") as f:
-                    f.writelines(line if line.endswith("\n") else line + "\n" for line in bad)
+                _append(self._local.path.with_suffix(".corrupt"),
+                        "".join(line if line.endswith("\n") else line + "\n" for line in bad))
                 print(f"[kafka.producer] {len(bad)} unreadable line(s) in {path.name} moved to "
                       f"{self._local.path.with_suffix('.corrupt').name}")
             done = 0

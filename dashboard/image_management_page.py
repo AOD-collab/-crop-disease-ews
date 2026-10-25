@@ -20,6 +20,7 @@ import pandas as pd
 import streamlit as st
 
 from config.localtime import format_local, now_local
+from dashboard.theme import metric_row
 from storage import image_cache, image_catalog, reviews
 from storage.database import SessionLocal, Image, ProcessingStatus
 from storage.pipeline_submit import UPLOAD_REJECTED_PREFIX
@@ -59,24 +60,20 @@ def _summary():
     total_bytes = sum(u["bytes"] for u in usage)
 
     st.markdown("**Database records** (farmer images in PostgreSQL)")
-    c = st.columns(6)
-    c[0].metric("Farmer images", db["total"])
-    c[1].metric("Completed", db["completed"])
-    c[2].metric("Processing", db["processing"], help="Ingested or being processed.")
-    c[3].metric("Failed", db["failed"])
-    c[4].metric("With a prediction", db["with_prediction"])
-    c[5].metric("Awaiting labels", len(image_cache.review_ids()),
-                help="Photos waiting on the Label photos page (files in the review folder).")
+    metric_row(("Farmer images", db["total"]), ("Completed", db["completed"]),
+               ("Processing", db["processing"], "Ingested or being processed."),
+               ("Failed", db["failed"]), ("With a prediction", db["with_prediction"]),
+               ("Awaiting labels", len(image_cache.review_ids()),
+                "Photos waiting on the Label photos page (files in the review folder)."))
     st.markdown("**Files on this laptop**")
-    c = st.columns(4)
-    c[0].metric("Cached original photos", cached, help="Files in the original-photo cache.")
-    c[1].metric("Local storage used", f"{total_bytes / 1e6:,.2f} MB",
-                help="All image categories below; a hard-linked file is counted once.")
-    c[2].metric("Missing or invalid copies", verdicts.get("missing", 0) + verdicts.get("invalid", 0),
-                help="Catalog images without a local copy, or whose copy differs from the original.")
-    c[3].metric("Potentially orphaned files",
+    metric_row(("Cached original photos", cached, "Files in the original-photo cache."),
+               ("Local storage used", f"{total_bytes / 1e6:,.2f} MB",
+                "All image categories below; a hard-linked file is counted once."),
+               ("Missing or invalid copies", verdicts.get("missing", 0) + verdicts.get("invalid", 0),
+                "Catalog images without a local copy, or whose copy differs from the original."),
+               ("Potentially orphaned files",
                 verdicts.get("orphan", 0) + verdicts.get("orphan_duplicate", 0) + verdicts.get("wrong_folder", 0),
-                help="Cached files that no catalog record accounts for. Never deleted automatically.")
+                "Cached files that no catalog record accounts for. Never deleted automatically."))
 
 
 # --------------------------------------------------------------- filters + gallery
@@ -102,8 +99,7 @@ def _filters(opts) -> tuple:
             st.rerun()
     dates = tuple(dates) if dates else ()
     f = CatalogFilters(image_id=image_id, farmer=farmer, location=location,
-                       uploaded_from=dates[0] if len(dates) >= 1 else None,
-                       uploaded_to=dates[1] if len(dates) == 2 else (dates[0] if len(dates) == 1 else None),
+                       uploaded_from=dates[0] if dates else None, uploaded_to=dates[-1] if dates else None,
                        statuses=statuses, predicted_classes=classes, risk_levels=risks)
     return f, REVIEW_FILTERS[review], CACHE_FILTERS[cache]
 

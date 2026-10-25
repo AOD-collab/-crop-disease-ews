@@ -184,10 +184,7 @@ def scan_once(backend=None) -> list:
     if last is not None:
         created_after = (last - OVERLAP).astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
 
-    user_folders = {
-        f["id"]: f["name"]
-        for f in drive_client.list_subfolders(drive_client.images_folder_id())
-    }
+    user_folders = drive_client.user_image_folders()
     if not user_folders:
         return []
     files = drive_client.list_files_in_folders(list(user_folders), created_after=created_after)
@@ -250,7 +247,7 @@ def start_change_feed(backend=None) -> dict:
         state["changes_page_token"] = drive_client.get_start_page_token()
         _save_state(state)
     scan_once(backend=backend)
-    return {f["id"]: f["name"] for f in drive_client.list_subfolders(drive_client.images_folder_id())}
+    return drive_client.user_image_folders()
 
 
 def next_interval(current: float, found_new: bool) -> float:

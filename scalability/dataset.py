@@ -82,12 +82,12 @@ def _problem(meta: dict, folder_email: str, users: dict) -> str | None:
         return "file name does not match its image_id"
     if (meta.get("mimeType") or "").lower() not in ALLOWED_IMAGE_CONTENT_TYPES:
         return f"unsupported type {meta.get('mimeType')}"
-    size = int(meta.get("size") or 0)
-    if size <= 0:
-        return "empty file"
-    if size > MAX_IMAGE_SIZE:
-        return "larger than MAX_IMAGE_SIZE"
-    return None
+    return _size_problem(int(meta.get("size") or 0))
+
+
+def _size_problem(size: int):
+    """Why a photo of `size` bytes can't be used, or None."""
+    return "empty file" if size <= 0 else "larger than MAX_IMAGE_SIZE" if size > MAX_IMAGE_SIZE else None
 
 
 def enumerate_collection() -> Collection:
@@ -244,11 +244,8 @@ def _folder_candidate(path, root, staging_root):
     try:
         if staging_root is not None and path.resolve().is_relative_to(staging_root):
             return None, "already a staged test image"
-        size = path.stat().st_size
-        if size <= 0:
-            return None, "empty file"
-        if size > MAX_IMAGE_SIZE:
-            return None, "larger than MAX_IMAGE_SIZE"
+        if problem := _size_problem(size := path.stat().st_size):
+            return None, problem
         data = path.read_bytes()
     except OSError as e:
         return None, f"unreadable ({type(e).__name__})"

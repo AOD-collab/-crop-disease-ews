@@ -38,6 +38,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from config.settings import BASE_DIR, IMAGE_MODEL, TRAINING_PROJECT_DIR
+from dashboard.theme import metric_row
 
 TRAINING_DIR = TRAINING_PROJECT_DIR
 TRAINING_PYTHON = Path(os.getenv("TRAINING_PYTHON",
@@ -316,11 +317,10 @@ def _progress_section(run: dict, parsed: dict, running: bool):
 
     if epochs:
         best = max(epochs, key=lambda e: e["val_acc"])
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Epochs done", f"{epochs[-1]['epoch']}" + (f" / {total}" if total else ""))
-        c2.metric("Latest validation accuracy", f"{epochs[-1]['val_acc']:.2f}%")
-        c3.metric("Best validation accuracy", f"{best['val_acc']:.2f}%", help=f"Epoch {best['epoch']}")
-        c4.metric("Latest training accuracy", f"{epochs[-1].get('train_acc', 0):.2f}%")
+        metric_row(("Epochs done", f"{epochs[-1]['epoch']}" + (f" / {total}" if total else "")),
+                   ("Latest validation accuracy", f"{epochs[-1]['val_acc']:.2f}%"),
+                   ("Best validation accuracy", f"{best['val_acc']:.2f}%", f"Epoch {best['epoch']}"),
+                   ("Latest training accuracy", f"{epochs[-1].get('train_acc', 0):.2f}%"))
         left, right = st.columns(2)
         with left:
             _history_chart(epochs, "acc", "Accuracy", "%")
@@ -384,28 +384,26 @@ def _deploy_section(running: bool, test_metrics: dict):
     deployed = _info(DEPLOYED_MODEL)
     candidate = _info(BEST_CHECKPOINT)
     left, right = st.columns(2)
-    with left:
-        with st.container(border=True):
-            st.markdown("**Model in use now**")
-            for line in _describe_model(deployed):
-                st.caption(line)
-            if deployed and "error" not in deployed and not deployed.get("val_accuracy"):
-                st.caption("No accuracy recorded in this file (it predates this page).")
-    with right:
-        with st.container(border=True):
-            st.markdown("**Best model from training**")
-            if candidate is None:
-                st.caption("None yet — run a training first.")
-            elif "error" in candidate:
-                st.caption(f"Could not read it: {candidate['error']}")
-            else:
-                st.caption(f"Validation accuracy: **{candidate['val_accuracy'] * 100:.2f}%** "
-                           f"(epoch {candidate.get('epoch')})")
-                if test_metrics.get("accuracy") is not None:
-                    st.caption(f"Test accuracy: **{test_metrics['accuracy']:.2f}%**, "
-                               f"F1 {test_metrics.get('f1', 0):.2f}%")
-                st.caption("Classes: " + ", ".join(CLASS_NAME_MAP.get(c, c) for c in candidate["class_names"]))
-                st.caption(f"Saved {datetime.fromtimestamp(BEST_CHECKPOINT.stat().st_mtime):%d/%m/%Y %H:%M}")
+    with left, st.container(border=True):
+        st.markdown("**Model in use now**")
+        for line in _describe_model(deployed):
+            st.caption(line)
+        if deployed and "error" not in deployed and not deployed.get("val_accuracy"):
+            st.caption("No accuracy recorded in this file (it predates this page).")
+    with right, st.container(border=True):
+        st.markdown("**Best model from training**")
+        if candidate is None:
+            st.caption("None yet — run a training first.")
+        elif "error" in candidate:
+            st.caption(f"Could not read it: {candidate['error']}")
+        else:
+            st.caption(f"Validation accuracy: **{candidate['val_accuracy'] * 100:.2f}%** "
+                       f"(epoch {candidate.get('epoch')})")
+            if test_metrics.get("accuracy") is not None:
+                st.caption(f"Test accuracy: **{test_metrics['accuracy']:.2f}%**, "
+                           f"F1 {test_metrics.get('f1', 0):.2f}%")
+            st.caption("Classes: " + ", ".join(CLASS_NAME_MAP.get(c, c) for c in candidate["class_names"]))
+            st.caption(f"Saved {datetime.fromtimestamp(BEST_CHECKPOINT.stat().st_mtime):%d/%m/%Y %H:%M}")
 
     ok_to_deploy = candidate is not None and "error" not in candidate and not running
     if running:

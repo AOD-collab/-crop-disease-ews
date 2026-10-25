@@ -182,10 +182,9 @@ def _setup_section(busy: bool):
 def _comparison(runs: list):
     """The test's one before/after pair: files the run saved while it
     processed that photo (scalability/worker.save_comparison). No labels."""
-    pair = next((json.loads(r.summary_json or "{}").get("comparison") for r in runs
-                 if json.loads(r.summary_json or "{}").get("comparison")), None)
-    owner = next((r for r in runs if json.loads(r.summary_json or "{}").get("comparison") == pair), None)
-    if not pair or owner is None:
+    owner, pair = next(((r, c) for r in runs if (c := json.loads(r.summary_json or "{}").get("comparison"))),
+                       (None, None))
+    if not pair:
         st.caption("No image comparison was saved for this test.")
         return
     folder = runner.run_dir(owner.run_id)
@@ -278,10 +277,9 @@ def _gallery(first_run, df):
     pick_place = f2.multiselect("Municipality", places, key="scale_g_place")
     failed_only = f3.checkbox("Failed only", key="scale_g_failed")
     shown = df
-    if pick_disease:
-        shown = shown[shown["predicted_class"].isin(pick_disease)]
-    if pick_place:
-        shown = shown[shown["location"].isin(pick_place)]
+    for column, picked in (("predicted_class", pick_disease), ("location", pick_place)):
+        if picked:
+            shown = shown[shown[column].isin(picked)]
     if failed_only:
         shown = shown[shown["status"] == "FAILED"]
     if shown.empty:

@@ -240,10 +240,6 @@ def _source_text(source_dir, from_drive, key: str) -> str:
         dir=source_dir, local=dataset.local_photos_dir())
 
 
-def _source_label(source_dir, from_drive=False) -> str:
-    return _source_text(source_dir, from_drive, "label")
-
-
 def _collection(source_dir=None, from_drive=False):
     """The run's photo source (see _source). Only from_drive=True contacts
     Google Drive."""
@@ -433,7 +429,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
                                pid=os.getpid(), requested_size=size, replay_of=replay_of, publish_results=False,
                                config_json=json.dumps(_benchmark_config(source_dir, series, from_drive))))
             s.commit()
-        log(f"{run_id}: started (size {size}, source {_source_label(source_dir, from_drive)}"
+        log(f"{run_id}: started (size {size}, source {_source_text(source_dir, from_drive, "label")}"
             + (f", replay of {replay_of}" if replay_of else "") + ")")
 
         # 1. dataset ---------------------------------------------------------
@@ -981,12 +977,9 @@ def _main(argv=None) -> int:
     if getattr(args, "keep_open", False) and sys.platform == "win32":
         import ctypes
         ctypes.windll.kernel32.SetConsoleTitleW(f"EWS-ScalabilityTest ({args.cmd})")
-    if getattr(args, "live", None):
-        set_live(args.live)
-    if getattr(args, "engine", None):
-        set_engine(args.engine)
-    if getattr(args, "log_file", None):
-        _tee_to(args.log_file)
+    for option, apply in (("live", set_live), ("engine", set_engine), ("log_file", _tee_to)):
+        if value := getattr(args, option, None):
+            apply(value)
 
     init_db()
     try:

@@ -62,7 +62,7 @@ COLOR_CRITICAL = "#D03B3B"    # HIGH risk / diseased
 RISK_COLOR_MAP = {"LOW": COLOR_GOOD, "MEDIUM": COLOR_WARNING, "HIGH": COLOR_CRITICAL}
 # Disease / status colours are shared with the other dashboard pages.
 from dashboard.theme import (STATUS_BADGE_COLOR, CATEGORICAL_HUES, DISEASE_COLOR_MAP,  # noqa: E402
-                             disease_colors, high_risk_table)
+                             disease_colors, high_risk_table, metric_row)
 import importlib  # noqa: E402
 
 
@@ -235,10 +235,6 @@ page = st.session_state["page"]
 # database). In MANUAL the watcher publishes nothing: the photos wait in
 # Drive and Pending Review lists the ones with no database row yet.
 # ------------------------------------------------------------------
-def _switch_to_manual():
-    set_processing_mode(ProcessingMode.MANUAL)
-
-
 def _switch_to_automatic_and_drain():
     """Switch to AUTOMATIC and immediately send every photo still waiting
     in Drive — same as clicking 'Process all'. Returns (released, failed)."""
@@ -277,7 +273,7 @@ if _mode_msg:
 if current_mode == ProcessingMode.AUTOMATIC:
     st.sidebar.caption("Uploads are queued for the CNN pipeline immediately.")
     if st.sidebar.button("Switch to MANUAL", icon="🔀"):
-        _switch_to_manual()
+        set_processing_mode(ProcessingMode.MANUAL)
         st.rerun()
 else:
     st.sidebar.caption("Uploads stay in Google Drive and wait in **Pending Review** until you press "
@@ -308,10 +304,6 @@ _, _title, _subtitle = _PAGES[page]
 st.markdown(f'<div class="ews-page-head"><h1>{_title}</h1><p>{_subtitle}</p></div>', unsafe_allow_html=True)
 
 
-def load_data():
-    return analytics_reader.images_with_predictions()
-
-
 
 # ------------------------------------------------------------------
 # Google Drive helpers (Farmer Management, Images gallery). Cached so
@@ -328,7 +320,7 @@ def _farmer_folder_emails():
     if not drive_client.is_configured():
         return None
     try:
-        return {f["name"].lower() for f in drive_client.list_subfolders(drive_client.images_folder_id())}
+        return {name.lower() for name in drive_client.user_image_folders().values()}
     except Exception:  # noqa: BLE001
         return None
 
@@ -401,7 +393,7 @@ def _system_status() -> dict:
     else:
         try:
             info = drive_client.account_info()
-            n = len(drive_client.list_subfolders(drive_client.images_folder_id()))
+            n = len(drive_client.user_image_folders())
             lines = [f"Connected as **{info['email']}**", f"{n} farmer folder(s) registered"]
             if info["usage_bytes"] is not None:
                 used = info["usage_bytes"] / 1e9
@@ -500,7 +492,7 @@ def _system_status() -> dict:
 
 # Only the pages below use the full images x predictions table; the others
 # no longer load it on every rerun.
-df = load_data() if page in ("Real-Time Monitoring", "Risk Alerts", "Analytics") else None
+df = analytics_reader.images_with_predictions() if page in ("Real-Time Monitoring", "Risk Alerts", "Analytics") else None
 
 if page == "Overview":
     # Real numbers only, computed by Spark (spark/batch_analytics.py). The
@@ -512,21 +504,17 @@ if page == "Overview":
 
     st.subheader("📊 System Performance")
     if kpi is not None:
-        p1, p2, p3 = st.columns(3)
-        p1.metric("Submissions (Last 24h)", kpi["submissions_24h"])
-        p2.metric("Active Farmers (Last 24h)", kpi["active_farmers_24h"])
-        p3.metric("Most Detected Disease", kpi["most_detected_disease"] or "—")
+        metric_row(("Submissions (Last 24h)", kpi["submissions_24h"]),
+                   ("Active Farmers (Last 24h)", kpi["active_farmers_24h"]),
+                   ("Most Detected Disease", kpi["most_detected_disease"] or "—"))
         st.caption(f"{kpi['total_users']} total farmers · {kpi['total_images']} total submissions all-time")
 
         # Explicit healthy/diseased/uncertain/unclassified breakdown so
         # "unclassified" (not yet processed, or failed) is a labeled bucket
         # instead of a silent gap where healthy+diseased looked like "0 and 0"
         # with no explanation.
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Healthy", kpi["total_healthy"])
-        c2.metric("Diseased", kpi["total_diseased"])
-        c3.metric("Uncertain (low confidence)", kpi["total_uncertain"])
-        c4.metric("Unclassified", kpi["total_unclassified"])
+        metric_row(("Healthy", kpi["total_healthy"]), ("Diseased", kpi["total_diseased"]),
+                   ("Uncertain (low confidence)", kpi["total_uncertain"]), ("Unclassified", kpi["total_unclassified"]))
         if kpi["total_unclassified"] and kpi["total_images"]:
             st.caption(
                 "Unclassified submissions have no disease classification yet — they are still "
@@ -915,10 +903,9 @@ elif page == "Risk Alerts":
                     st.badge("HIGH RISK", icon="🚨", color="red")
                 with title_col:
                     st.markdown(f"**{row['location'] or 'Unknown location'}**")
-                cols = st.columns(3)
-                cols[0].metric("Disease", row["predicted_class"] or "—")
-                cols[1].metric("Confidence", f"{(row['prediction_confidence'] or 0)*100:.2f}%")
-                cols[2].metric("Risk Score", f"{row['risk_score']:.2f}" if pd.notna(row["risk_score"]) else "—")
+                metric_row(("Disease", row["predicted_class"] or "—"),
+                           ("Confidence", f"{(row['prediction_confidence'] or 0)*100:.2f}%"),
+                           ("Risk Score", f"{row['risk_score']:.2f}" if pd.notna(row["risk_score"]) else "—"))
                 st.caption(
                     f"Captured: {format_local(row['captured_at']) or '—'}  •  "
                     f"Uploaded: {format_local(row['uploaded_at'])}  •  "
@@ -928,12 +915,14 @@ elif page == "Risk Alerts":
                 )
 
 elif page == "Analytics":
+    # The colour settings every disease bar chart shares.
+    disease_bars = dict(color="predicted_class", color_discrete_map=DISEASE_COLOR_MAP,
+                        color_discrete_sequence=CATEGORICAL_HUES)
     dist = analytics_reader.disease_distribution()
     if not dist.empty:
         st.subheader("🦠 Disease Distribution")
         st.plotly_chart(
-            px.bar(dist, x="predicted_class", y="count", color="predicted_class",
-                   color_discrete_map=DISEASE_COLOR_MAP, color_discrete_sequence=CATEGORICAL_HUES),
+            px.bar(dist, x="predicted_class", y="count", **disease_bars),
             width="stretch",
         )
         with st.expander("All predictions (table)"):
@@ -952,9 +941,8 @@ elif page == "Analytics":
         st.caption(f"Photos per disease per day (Timor-Leste Time) in each of the {len(places)} "
                    f"municipalit{'y' if len(places) == 1 else 'ies'}, most photos first. Each panel has its "
                    "own scale so small municipalities stay readable — compare panels by their numbers.")
-        fig = px.bar(rt, x="day", y="photos", color="predicted_class", facet_col="location",
+        fig = px.bar(rt, x="day", y="photos", facet_col="location", **disease_bars,
                      facet_col_wrap=3, category_orders={"location": places},
-                     color_discrete_map=DISEASE_COLOR_MAP, color_discrete_sequence=CATEGORICAL_HUES,
                      labels={"day": "Day", "photos": "Photos", "predicted_class": "Disease"},
                      height=max(320, 260 * -(-len(places) // 3)), facet_row_spacing=0.12)
         fig.for_each_annotation(lambda a: a.update(text=a.text.split("=", 1)[-1]))   # "location=Dili" -> "Dili"
@@ -973,8 +961,7 @@ elif page == "Analytics":
     dt = analytics_reader.disease_daily()
     if not dt.empty:
         st.subheader("🦠 Disease Trend")
-        fig = px.bar(dt, x="day", y="photos", color="predicted_class",
-                     color_discrete_map=DISEASE_COLOR_MAP, color_discrete_sequence=CATEGORICAL_HUES,
+        fig = px.bar(dt, x="day", y="photos", **disease_bars,
                      labels={"day": "Day (Timor-Leste Time)", "photos": "Photos", "predicted_class": "Disease"})
         fig.update_xaxes(tickformat="%d/%m")
         fig.update_layout(barmode="stack", legend_title_text="Disease")

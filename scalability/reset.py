@@ -40,6 +40,12 @@ TEST_COMMANDS = ("start", "prepare")
 RUN_PREFIX = "scale-"
 REPORT_FILES = ("_prepare_status.json", "_lock.json")
 REPORT_DIRS = ("logs",)
+LEGACY_STAGING = Path(settings.IMAGE_STORAGE_PATH) / "scalability"     # the test's old staging folder
+
+
+def _is_test_entry(entry) -> bool:
+    """A file or folder in the reports folder that belongs to the test."""
+    return entry.name.startswith(RUN_PREFIX) or entry.name in REPORT_FILES or entry.name in REPORT_DIRS
 
 
 class UnsafeReset(Exception):
@@ -226,14 +232,11 @@ def clear_files() -> str:
     failures = []
     removed = 0
     if root.exists():
-        for entry in root.iterdir():
-            if (entry.name.startswith(RUN_PREFIX) or entry.name in REPORT_FILES
-                    or entry.name in REPORT_DIRS):
-                _remove(entry, root, failures)
-                removed += 1
-    legacy = Path(settings.IMAGE_STORAGE_PATH) / "scalability"
-    if legacy.exists():
-        _remove(legacy, Path(settings.IMAGE_STORAGE_PATH).resolve(), failures)
+        for entry in filter(_is_test_entry, root.iterdir()):
+            _remove(entry, root, failures)
+            removed += 1
+    if LEGACY_STAGING.exists():
+        _remove(LEGACY_STAGING, LEGACY_STAGING.parent.resolve(), failures)
         removed += 1
     if failures:
         raise RuntimeError(f"{len(failures)} file(s) could not be deleted, e.g. {failures[0]}")
@@ -250,10 +253,9 @@ def leftovers() -> list:
         if s.query(Image).filter(Image.source == SCALE_TEST_SOURCE).count():
             left.append("legacy test image rows")
     root = reports_dir()
-    if root.exists() and any(e.name.startswith(RUN_PREFIX) or e.name in REPORT_FILES or e.name in REPORT_DIRS
-                             for e in root.iterdir()):
+    if root.exists() and any(map(_is_test_entry, root.iterdir())):
         left.append(f"test files in {root}")
-    if (Path(settings.IMAGE_STORAGE_PATH) / "scalability").exists():
+    if LEGACY_STAGING.exists():
         left.append("the legacy test staging folder")
     if test_processes():
         left.append("a running test process")

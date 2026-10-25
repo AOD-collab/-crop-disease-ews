@@ -44,15 +44,9 @@ def live_processing_active() -> bool:
     with SessionLocal() as s:
         rows = (s.query(Image.ingested_at, Image.uploaded_at)
                 .filter(Image.source != SCALE_TEST_SOURCE, Image.status.in_(LIVE_STATUSES)).all())
-    for ingested, uploaded in rows:
-        t = ingested or uploaded
-        if t is None:
-            continue
-        if t.tzinfo is None:              # SQLite returns naive UTC
-            t = t.replace(tzinfo=timezone.utc)
-        if t >= cutoff:
-            return True
-    return False
+    times = (ingested or uploaded for ingested, uploaded in rows)
+    # SQLite returns naive UTC
+    return any((t if t.tzinfo else t.replace(tzinfo=timezone.utc)) >= cutoff for t in times if t is not None)
 
 
 class LiveGate:
