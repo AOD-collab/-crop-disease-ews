@@ -269,7 +269,4 @@ class ResilientBackend:
 
 
 def get_backend(topic: str):
-    if KAFKA_USE_LOCAL_FALLBACK:
-        return ResilientBackend(topic)
-    else:
-        return KafkaBackend(topic)
+    return (ResilientBackend if KAFKA_USE_LOCAL_FALLBACK else KafkaBackend)(topic)

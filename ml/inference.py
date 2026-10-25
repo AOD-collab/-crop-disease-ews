@@ -231,8 +231,6 @@ def _forward(loaded, batch, precision: str = None, pin_memory: bool = None):
     device = loaded["device"]
     if device.type == "cuda" and pin_memory:
         batch = batch.pin_memory().to(device, non_blocking=True)
-    elif device.type == "cuda":
-        batch = batch.to(device)
     else:
         batch = batch.to(device)
     with torch.inference_mode():

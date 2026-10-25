@@ -28,6 +28,7 @@ from collections import Counter
 from datetime import datetime
 
 from config.settings import SCALABILITY_KAFKA_TOPIC, SCALABILITY_CONSUMER_GROUP, SCALABILITY_ENGINE
+from config.localtime import format_local
 from kafka.config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC, broker_reachable
 
 GROUP_ID = "ews-kafka-monitor"          # never used by Spark or the scalability test
@@ -45,12 +46,7 @@ def describe(value: bytes, partition: int, offset: int) -> str:
     except (TypeError, ValueError):
         return f"p{partition} offset {offset}: unreadable message ({len(value or b'')} bytes)"
     from spark.live_log import farmer_label
-    uploaded = event.get("uploaded_at") or ""
-    try:
-        from config.localtime import format_local
-        uploaded = format_local(datetime.fromisoformat(uploaded.replace("Z", "+00:00"))) or uploaded
-    except (ValueError, ImportError):
-        pass
+    uploaded = format_local(event.get("uploaded_at")) or event.get("uploaded_at") or ""
     source = "Drive file" if event.get("drive_file_id") else "local file"
     # A new upload names its farmer by Google account (Spark resolves the
     # user_id); a re-sent photo already has its user_id.

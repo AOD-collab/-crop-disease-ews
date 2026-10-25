@@ -32,11 +32,13 @@ Examples
 
 import argparse
 import json
+import os
 import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
+from shutil import which
 
 ROOT = Path(__file__).resolve().parent
 PID_FILE = ROOT / ".run_all.pids.json"
@@ -73,7 +75,6 @@ def pid_alive(pid: int) -> bool:
         ).stdout
         return str(pid) in out
     try:
-        import os
         os.kill(pid, 0)
         return True
     except OSError:
@@ -85,7 +86,6 @@ def stop_pid(pid: int) -> None:
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                        capture_output=True)
     else:
-        import os
         import signal
         try:
             os.killpg(os.getpgid(pid), signal.SIGTERM)
@@ -172,11 +172,6 @@ def wait_for_port(port: int, timeout: int) -> bool:
     return False
 
 
-def which(cmd: str) -> bool:
-    from shutil import which as _which
-    return _which(cmd) is not None
-
-
 # ---------------------------------------------------------------------------
 # main
 # ---------------------------------------------------------------------------
@@ -256,7 +251,8 @@ def main() -> int:
     # ---- 1b. PostgreSQL — only when .env's DATABASE_URL uses it ------
     # (With the default SQLite file there's nothing to start or download.)
     from config.settings import DATABASE_URL
-    if DATABASE_URL.startswith("postgresql"):
+    use_pg = DATABASE_URL.startswith("postgresql")
+    if use_pg:
         if port_in_use(5432):
             print("PostgreSQL already reachable on localhost:5432.")
         elif not which("docker"):
@@ -300,8 +296,7 @@ def main() -> int:
         services.append(start_service("EWS-Spark", ["python", "-m", "spark.streaming_job"]))
 
     if not (args.no_spark or args.no_analytics):
-        from config.settings import DATABASE_URL
-        if DATABASE_URL.startswith("postgresql"):
+        if use_pg:
             # keeps the dashboard's analytics tables current (spark/batch_analytics.py)
             services.append(start_service("EWS-SparkAnalytics", ["python", "-m", "spark.batch_analytics", "--watch"]))
         else:

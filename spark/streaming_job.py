@@ -47,6 +47,7 @@ has not been exercised.
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -300,31 +301,23 @@ def _process_one(event: dict):
     if image_id:
         mark_processing(image_id)
     spark_started_at = datetime.now(timezone.utc)
+    save = partial(persist_result, event, kafka_received_at=kafka_received_at, spark_started_at=spark_started_at)
     result, status, error = None, ProcessingStatus.FAILED, None
     try:
         if rejected_reason:
             raise InvalidEvent(rejected_reason)
         result = process_event(event)
-        persist_result(
-            event, result, ProcessingStatus.COMPLETED,
-            kafka_received_at=kafka_received_at, spark_started_at=spark_started_at,
-        )
+        save(result, ProcessingStatus.COMPLETED)
         status = ProcessingStatus.COMPLETED
     except InvalidEvent as e:
         print(f"[streaming_job] Invalid event, skipping: {e}")
         error = str(e)
-        persist_result(
-            event, None, ProcessingStatus.FAILED, error_message=str(e),
-            kafka_received_at=kafka_received_at, spark_started_at=spark_started_at,
-        )
+        save(None, ProcessingStatus.FAILED, error_message=error)
     except Exception as e:
         print(f"[streaming_job] Processing failed for {event.get('image_id')}: {e}")
         error = str(e)
         try:
-            persist_result(
-                event, None, ProcessingStatus.FAILED, error_message=str(e),
-                kafka_received_at=kafka_received_at, spark_started_at=spark_started_at,
-            )
+            save(None, ProcessingStatus.FAILED, error_message=error)
         except Exception as db_error:  # noqa: BLE001 - don't take the other photos down with it
             print(f"[streaming_job] Could not record the failure for {image_id}: {db_error}")
 

@@ -28,7 +28,10 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
+
+from PIL import Image as PILImage, ImageOps
 
 from config.settings import (
     RISK_THRESHOLDS, IMAGE_STORAGE_PATH, REVIEW_DIR, SAVE_PHOTOS_FOR_REVIEW,
@@ -63,11 +66,7 @@ def _as_aware_utc(dt):
     codebase IS already UTC (config/settings.now_utc / datetime.now(utc)),
     so a naive value read back is safely re-attached as UTC rather than
     assumed to be local time."""
-    if dt is None:
-        return None
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-    return dt
+    return dt.replace(tzinfo=timezone.utc) if dt is not None and dt.tzinfo is None else dt
 
 
 def _parse_timestamp(value, field_name: str):
@@ -260,6 +259,10 @@ def _registered_from_drive(event: dict) -> bool:
 
 
 _GPS_COLUMNS = ("gps_latitude", "gps_longitude", "gps_altitude_m")
+# The CNN's image features, and every Prediction column a result carries.
+_FEATURE_FIELDS = ("lesion_score", "discoloration_pct", "texture_irregularity", "leaf_area_affected_pct")
+_PREDICTION_FIELDS = ("predicted_class", "prediction_confidence", *_FEATURE_FIELDS,
+                      "risk_score", "risk_level", "model_version", "predicted_at")
 _METADATA_COLUMNS = ("camera_make", "camera_model", "image_width", "image_height")
 
 
@@ -363,8 +366,6 @@ def heatmap_on_photo(cam, prepared_bytes: bytes):
 
 def _prepared_rgb(original_bytes, prepared_bytes=None):
     """prepare_image()'s copy of the photo, decoded as upright RGB."""
-    from io import BytesIO
-    from PIL import Image as PILImage, ImageOps
     data = prepared_bytes if prepared_bytes is not None else prepare_image(original_bytes)
     return ImageOps.exif_transpose(PILImage.open(BytesIO(data)).convert("RGB"))
 
@@ -378,8 +379,6 @@ def prepare_image(image_bytes: bytes) -> bytes:
     scale, so even this one decode is cheap. Run extract_metadata() on the
     ORIGINAL bytes first. An unreadable image is passed through unchanged
     for the later steps to reject."""
-    from io import BytesIO
-    from PIL import Image as PILImage, ImageOps
     try:
         img = PILImage.open(BytesIO(image_bytes))
         img.draft("RGB", (ANALYSIS_MAX_PX, ANALYSIS_MAX_PX))
@@ -493,10 +492,7 @@ def process_event(event: dict) -> dict:
         "image_id": event["image_id"],
         "predicted_class": features.get("predicted_class"),
         "prediction_confidence": features.get("predicted_class_confidence"),
-        "lesion_score": features.get("lesion_score"),
-        "discoloration_pct": features.get("discoloration_pct"),
-        "texture_irregularity": features.get("texture_irregularity"),
-        "leaf_area_affected_pct": features.get("leaf_area_affected_pct"),
+        **{k: features.get(k) for k in _FEATURE_FIELDS},
         "risk_score": risk_score,
         "risk_level": risk_level,
         "is_uncertain": is_uncertain,
@@ -559,9 +555,7 @@ def save_for_review(image_id: str, image_bytes: bytes) -> None:
     if not SAVE_PHOTOS_FOR_REVIEW:
         return
     try:
-        from io import BytesIO
-        from PIL import Image as PILImage, ImageOps
-        img = ImageOps.exif_transpose(PILImage.open(BytesIO(image_bytes))).convert("RGB")
+        img = _prepared_rgb(None, image_bytes)       # already upright and EXIF-free
         REVIEW_DIR.mkdir(parents=True, exist_ok=True)
         tmp = REVIEW_DIR / f"{image_id}.jpg.tmp"
         img.save(tmp, format="JPEG", quality=95)
@@ -665,31 +659,15 @@ def persist_result(
         image.error_message = error_message
 
         if result is not None:
-            latency_ms = None
             ingested_at = _as_aware_utc(image.ingested_at)
-            if ingested_at:
-                latency_ms = int((result["predicted_at"] - ingested_at).total_seconds() * 1000)
+            latency_ms = int((result["predicted_at"] - ingested_at).total_seconds() * 1000) if ingested_at else None
 
             # Delete-then-insert: makes a replayed event idempotent instead
             # of piling up a second Prediction row for the same image.
             session.query(Prediction).filter(Prediction.image_id == image_id).delete()
 
-            prediction = Prediction(
-                image_id=image_id,
-                predicted_class=result["predicted_class"],
-                prediction_confidence=result["prediction_confidence"],
-                lesion_score=result["lesion_score"],
-                discoloration_pct=result["discoloration_pct"],
-                texture_irregularity=result["texture_irregularity"],
-                leaf_area_affected_pct=result["leaf_area_affected_pct"],
-                risk_score=result["risk_score"],
-                risk_level=result["risk_level"],
-                is_uncertain=result.get("is_uncertain", False),
-                model_version=result["model_version"],
-                predicted_at=result["predicted_at"],
-                processing_latency_ms=latency_ms,
-            )
-            session.add(prediction)
+            session.add(Prediction(image_id=image_id, is_uncertain=result.get("is_uncertain", False),
+                                   processing_latency_ms=latency_ms, **{k: result[k] for k in _PREDICTION_FIELDS}))
             if result["risk_level"] == "HIGH":
                 print(f"[ALERT] image={image_id} location={event.get('location')} "
                       f"risk={result['risk_score']} class={result['predicted_class']}")
@@ -719,14 +697,10 @@ def _prediction_to_dict(p: Prediction) -> dict:
     app parses (DriveRest.kt)."""
     return {
         "prediction_id": p.prediction_id, "image_id": p.image_id,
-        "predicted_class": p.predicted_class, "prediction_confidence": p.prediction_confidence,
-        "lesion_score": p.lesion_score, "discoloration_pct": p.discoloration_pct,
-        "texture_irregularity": p.texture_irregularity, "leaf_area_affected_pct": p.leaf_area_affected_pct,
-        "risk_score": p.risk_score, "risk_level": p.risk_level.value if p.risk_level else None,
-        "is_uncertain": p.is_uncertain,
-        "model_version": p.model_version,
+        **{k: getattr(p, k) for k in _PREDICTION_FIELDS},
+        "risk_level": p.risk_level.value if p.risk_level else None,
         "predicted_at": p.predicted_at.isoformat() if p.predicted_at else None,
-        "processing_latency_ms": p.processing_latency_ms,
+        "is_uncertain": p.is_uncertain, "processing_latency_ms": p.processing_latency_ms,
     }
 
 
@@ -778,12 +752,7 @@ def publish_result_to_drive(event: dict, status: ProcessingStatus, error_message
             # same two times, ready to show (Timor-Leste Time)
             "captured_at_local": format_local(image.captured_at) or None,
             "uploaded_at_local": format_local(image.uploaded_at) or None,
-            "gps_latitude": image.gps_latitude,
-            "gps_longitude": image.gps_longitude,
-            "gps_altitude_m": image.gps_altitude_m,
-            "gps_source": image.gps_source,
-            "camera_make": image.camera_make,
-            "camera_model": image.camera_model,
+            **{c: getattr(image, c) for c in _GPS_COLUMNS + ("gps_source", "camera_make", "camera_model")},
             "status": status.value,
             "error_message": error_message,
             "prediction": _prediction_to_dict(prediction) if (prediction and status == ProcessingStatus.COMPLETED) else None,
@@ -795,11 +764,10 @@ def publish_result_to_drive(event: dict, status: ProcessingStatus, error_message
     )
     if processed_image and status == ProcessingStatus.COMPLETED:
         name = f"{image_id}_processed.jpg"
-        payload["processed_file_id"] = _RESULT_FILES.remember(folder, name, drive_client.upload_bytes(
+        payload["processed_file_id"] = _RESULT_FILES.upload(folder, name, lambda existing: drive_client.upload_bytes(
             name, processed_image, "image/jpeg", folder,
             {"image_id": image_id, "user_email": owner_email, "kind": "processed"},
-            may_exist=False, existing_id=_RESULT_FILES.existing(folder, name),
-        ))
+            may_exist=False, existing_id=existing))
     pred = payload["prediction"] or {}
     # Short summary in Drive appProperties: lets the Android app list all
     # of its results (Home / History) with ONE Drive request, without
@@ -821,8 +789,8 @@ def publish_result_to_drive(event: dict, status: ProcessingStatus, error_message
         "error_message": (error_message or "")[:80],
     }
     name = f"{image_id}.json"
-    file_id = _RESULT_FILES.remember(folder, name, drive_client.upload_json(
-        name, payload, folder, summary, may_exist=False, existing_id=_RESULT_FILES.existing(folder, name)))
+    file_id = _RESULT_FILES.upload(folder, name, lambda existing: drive_client.upload_json(
+        name, payload, folder, summary, may_exist=False, existing_id=existing))
     _mark_result_published(image_id)
     return file_id
 
@@ -869,6 +837,11 @@ class _ResultFolderIndex:
         with self._lock:
             self._folders.setdefault(folder, {})[name] = file_id
         return file_id
+
+    def upload(self, folder: str, name: str, send) -> str:
+        """send(existing_id) writes `name` into `folder` (in place when the
+        folder already has it); the file id it returns is remembered."""
+        return self.remember(folder, name, send(self.existing(folder, name)))
 
     def clear(self):
         with self._lock:
