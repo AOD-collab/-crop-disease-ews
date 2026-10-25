@@ -1,34 +1,6 @@
 """
-Data Storage layer — SQLAlchemy models + engine/session.
-
-Backend is selected purely by DATABASE_URL (config/settings.py):
-    postgresql+psycopg2://user:pass@host:5432/dbname   -> production
-    sqlite:///storage/app.db                            -> local dev/test
-
-Nothing else in the codebase branches on which database is active — every
-other module goes through the ORM session here, so moving from SQLite to
-PostgreSQL is a one-line env var change, not a rewrite (DIT manual, section
-13).
-
-Tables (see storage/schema.sql for the equivalent raw PostgreSQL DDL,
-including indexes):
-    users        — login accounts, USER or ADMIN role
-    images       — uploaded photo metadata (captured_at, uploaded_at,
-                   free-text `location`, ...)
-    predictions  — CNN classification + rule-based risk assessment output
-    processing_events — per-image pipeline timing, for performance evaluation
-    scale_test_runs / scale_test_items — scalability test runs and their
-                   per-photo measurements (scalability/run.py)
-    image_reviews — the administrator's confirmed label (or discard) per image
-    storage_audit_log — destructive storage actions from the dashboard
-    v_admin_image_catalog (view) — images + farmer + latest prediction + review
-
-NOTE: the `fields`/`field_users` tables and the per-user field-assignment
-access control they implemented have been removed in favor of a simple
-free-text `location` string carried directly on each image (see
-`_drop_field_feature()` below for the migration off any pre-existing
-database, and README section 5a/6 for what replaced it and why the access-
-control implication of that removal matters).
+Database layer: SQLAlchemy models, engine and session. DATABASE_URL picks
+PostgreSQL (normal) or SQLite (local tests); nothing else changes.
 """
 
 import enum
@@ -62,8 +34,7 @@ class Role(str, enum.Enum):
 
 
 class UserStatus(str, enum.Enum):
-    # PENDING_VERIFICATION: self-registered through the removed REST API,
-    # Gmail never confirmed. Kept so existing rows stay valid.
+    # PENDING_VERIFICATION: only on old rows (self-registration was removed)
     PENDING_VERIFICATION = "PENDING_VERIFICATION"
     ACTIVE = "ACTIVE"
     INACTIVE = "INACTIVE"
@@ -77,10 +48,7 @@ class RiskLevel(str, enum.Enum):
 
 
 class ProcessingStatus(str, enum.Enum):
-    # A row only exists once Spark has registered the photo
-    # (storage/uploads.register_upload); a photo waiting in MANUAL mode is
-    # still only a file in Drive. (The PostgreSQL enum type also keeps the
-    # old UPLOADED / PENDING_REVIEW labels; no row uses them.)
+    # a row exists only once Spark registered the photo
     INGESTED = "INGESTED"          # registered by Spark (or sent again by Reprocess)
     PROCESSING = "PROCESSING"      # Spark/CNN picked it up
     COMPLETED = "COMPLETED"        # prediction stored
@@ -99,23 +67,16 @@ class User(Base):
     email = Column(String, unique=True, nullable=False)
     password_hash = Column(String, nullable=False)
     role = Column(Enum(Role), nullable=False, default=Role.USER)
-    # Default stays ACTIVE so every existing/programmatic user-creation path
-    # (bootstrap admin, ORM-created test fixtures, etc.) keeps working
-    # unchanged. (Self-registration through the removed REST API set
-    # PENDING_VERIFICATION instead.)
     status = Column(Enum(UserStatus), nullable=False, default=UserStatus.ACTIVE)
 
-    # --- Gmail verification (the removed REST API's self-registration;
-    # columns kept so the schema and existing rows stay unchanged) ---
+    # --- Gmail verification (old self-registration; columns kept) ---
     email_verified = Column(Boolean, nullable=False, default=False)
-    # Only a hash of the verification code was ever stored, never the code.
     verification_code_hash = Column(String, nullable=True)
     verification_code_expires_at = Column(DateTime(timezone=True), nullable=True)
     verification_attempts = Column(Integer, nullable=False, default=0)
     last_verification_sent_at = Column(DateTime(timezone=True), nullable=True)
 
-    # --- Soft delete (section 9: "Prefer soft deletion if the existing
-    # system architecture supports it") ---
+    # --- soft delete ---
     is_deleted = Column(Boolean, nullable=False, default=False)
     deleted_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -132,40 +93,29 @@ class Image(Base):
     __tablename__ = "images"
 
     image_id = Column(String, primary_key=True, default=new_uuid)
-    # Free-text place name chosen on the upload form (e.g. a municipality) —
-    # replaces the old `field_id` FK + fields/field_users tables. Nullable:
-    # a location is a label for filtering/display, not an access-control
-    # boundary (see the README note on what this removal means for
-    # per-user upload restrictions, which no longer exist).
+    # free-text place name from the upload form (e.g. a municipality)
     location = Column(String, nullable=True)
     user_id = Column(String, ForeignKey("users.user_id"), nullable=False)
     original_filename = Column(String, nullable=True)
     image_path = Column(String, nullable=False)   # storage/images/YYYY/MM/DD/<uuid>.jpg
     source = Column(String, nullable=False, default="android_upload")
-    # SHA-256 of the uploaded bytes — identifies repeat uploads of the same
-    # photo (same content re-submitted, possibly under a new filename).
+    # SHA-256 of the photo bytes, to spot the same photo sent twice
     content_hash = Column(String, nullable=True)
 
-    # --- timestamp pipeline (see README "Timestamp pipeline") ---
+    # --- timestamps ---
     captured_at = Column(DateTime(timezone=True), nullable=True)   # EXIF DateTimeOriginal, or NULL
     captured_at_source = Column(String, nullable=True)             # "exif" | "client_trusted" | None
     uploaded_at = Column(DateTime(timezone=True), nullable=False, default=now_utc)  # server-generated, never client-trusted
     ingested_at = Column(DateTime(timezone=True), nullable=True)   # Kafka publish/consume time
     processed_at = Column(DateTime(timezone=True), nullable=True)  # Spark processing completion
-    # When the result last reached the farmer's Drive /results folder. NULL
-    # for a COMPLETED Drive photo = the phone hasn't got it yet (e.g. Spark
-    # stopped mid-upload); a replayed batch then uploads it instead of skipping.
+    # when the result reached the farmer's Drive; NULL = the phone doesn't have it yet
     result_published_at = Column(DateTime(timezone=True), nullable=True)
 
-    # --- photo metadata read from the file's EXIF by Spark
-    # (spark/preprocessing.extract_metadata); NULL when the photo has none ---
+    # --- EXIF metadata (spark/preprocessing.extract_metadata); NULL when missing ---
     gps_latitude = Column(Float, nullable=True)
     gps_longitude = Column(Float, nullable=True)
     gps_altitude_m = Column(Float, nullable=True)
-    # Where the coordinates came from: "exif" (the photo's own GPS tags —
-    # where it was taken, always preferred) or "device" (the phone's position
-    # when the in-app camera took it, sent by the app as a fallback). NULL
-    # when there are no coordinates.
+    # "exif" (the photo's GPS, preferred) or "device" (the phone's position)
     gps_source = Column(String, nullable=True)
     camera_make = Column(String, nullable=True)
     camera_model = Column(String, nullable=True)
@@ -199,23 +149,19 @@ class Prediction(Base):
     prediction_id = Column(String, primary_key=True, default=new_uuid)
     image_id = Column(String, ForeignKey("images.image_id"), nullable=False)
 
-    # --- CNN classification output (section 26: kept separate from risk) ---
+    # --- CNN classification ---
     predicted_class = Column(String, nullable=True)
     prediction_confidence = Column(Float, nullable=True)
-    # True when prediction_confidence fell below IMAGE_MODEL["confidence_threshold"]
-    # — predicted_class is then the literal string "uncertain" rather than a
-    # disease name, and risk_level is capped below HIGH (see
-    # spark/preprocessing.py compute_risk()).
+    # confidence below the threshold: predicted_class is "uncertain", risk capped below HIGH
     is_uncertain = Column(Boolean, nullable=False, default=False)
 
-    # --- CV features feeding the rule-based risk assessment ---
+    # --- image features (now only lesion_score is filled) ---
     lesion_score = Column(Float, nullable=True)
     discoloration_pct = Column(Float, nullable=True)
     texture_irregularity = Column(Float, nullable=True)
     leaf_area_affected_pct = Column(Float, nullable=True)
 
-    # --- rule-based risk assessment (documented as a risk INDICATOR, not a
-    # disease probability — see spark/preprocessing.py compute_risk()) ---
+    # --- risk level (ml/risk.py) ---
     risk_score = Column(Float, nullable=True)
     risk_level = Column(Enum(RiskLevel), nullable=True)
 
@@ -235,18 +181,14 @@ class Prediction(Base):
 
 
 # ----------------------------------------------------------------------
-# processing_events (optional, performance evaluation — section 19/44)
+# processing_events: per-photo pipeline timings
 # ----------------------------------------------------------------------
 class ProcessingEvent(Base):
     __tablename__ = "processing_events"
 
     event_id = Column(String, primary_key=True, default=new_uuid)
     image_id = Column(String, ForeignKey("images.image_id"), nullable=False)
-    # When the event was published to Kafka — the image's ingested_at (was
-    # misleadingly stored in kafka_received_at before; see persist_result()).
-    api_published_at = Column(DateTime(timezone=True), nullable=True)
-    # When Spark's foreachBatch sink actually received/started handling this
-    # event — genuinely Spark-side, not the publish time.
+    api_published_at = Column(DateTime(timezone=True), nullable=True)   # sent to Kafka
     kafka_received_at = Column(DateTime(timezone=True), nullable=True)
     spark_started_at = Column(DateTime(timezone=True), nullable=True)
     spark_completed_at = Column(DateTime(timezone=True), nullable=True)
@@ -261,10 +203,7 @@ class ProcessingEvent(Base):
 
 
 # ----------------------------------------------------------------------
-# rejected_events — malformed/invalid Kafka events that clean_event() (or
-# persist_result()'s unknown-image_id guard) rejected before they became a
-# ProcessingEvent row (e.g. because image_id didn't match any Image at all).
-# Without this table those events vanished with only a stdout print().
+# rejected_events: Kafka events too broken to process (dead-letter table)
 # ----------------------------------------------------------------------
 class RejectedEvent(Base):
     __tablename__ = "rejected_events"
@@ -277,12 +216,8 @@ class RejectedEvent(Base):
 
 
 # ----------------------------------------------------------------------
-# Scalability tests (scalability/run.py, dashboard "Scalability test" page).
-# A run re-processes photos from the Drive collection through the normal
-# Kafka -> Spark -> CNN pipeline. Each photo gets a NEW Image row with
-# source = SCALE_TEST_SOURCE (never the farmer's own row), owned by the
-# SCALE_TEST_USERNAME system account. No foreign keys to `images`, so the
-# measurements survive a factory reset or a run clean-up.
+# scalability tests: test photos get their own rows; no foreign keys, so the
+# results survive a factory reset
 # ----------------------------------------------------------------------
 SCALE_TEST_SOURCE = "scalability_test"
 SCALE_TEST_USERNAME = "scalability-test"
@@ -292,8 +227,7 @@ class ScaleTestRun(Base):
     __tablename__ = "scale_test_runs"
 
     run_id = Column(String, primary_key=True)
-    # PREPARING -> RUNNING -> COMPLETED | INCOMPLETE (some photos never
-    # finished) | FAILED (the run itself broke) | ABORTED (runner died)
+    # PREPARING -> RUNNING -> COMPLETED | INCOMPLETE | FAILED | ABORTED
     status = Column(String, nullable=False, default="PREPARING")
     phase = Column(String, nullable=True)            # human-readable current step
     pid = Column(Integer, nullable=True)             # runner process, to detect a dead run
@@ -330,16 +264,12 @@ class ScaleTestItem(Base):
     pipeline_seconds = Column(Float, nullable=True)  # whole Spark handling of this photo
     db_write_seconds = Column(Float, nullable=True)
     drive_publish_seconds = Column(Float, nullable=True)
-    # The CNN's result for the test photo, kept ONLY here for the test page's
-    # "where the disease is" charts — never an Image/Prediction row, never
-    # sent to a farmer (scalability/worker.py).
+    # the CNN result, kept only here (never sent to a farmer)
     predicted_class = Column(String, nullable=True)
     prediction_confidence = Column(Float, nullable=True)
     is_uncertain = Column(Boolean, nullable=True)
     risk_level = Column(String, nullable=True)
-    # Where the source photo was taken: its municipality (the farmer's upload
-    # form, Drive appProperties) and GPS (the photo's EXIF, else the phone's
-    # position the app sent). Read while staging, before the timer starts.
+    # where the source photo was taken
     location = Column(String, nullable=True)
     gps_latitude = Column(Float, nullable=True)
     gps_longitude = Column(Float, nullable=True)
@@ -348,12 +278,8 @@ class ScaleTestItem(Base):
 
 
 # ----------------------------------------------------------------------
-# image_reviews — the administrator's decision on the "Label photos" page
-# (dashboard/labelling_page.py): a CONFIRMED disease label, or "discarded".
-# Kept apart from predictions on purpose: a model prediction is never a
-# confirmed label. No foreign key to `images`, so the decision (and the
-# training photo it produced) outlives a factory reset, like
-# LABELLED_TRAIN_DIR/labels_log.csv, which is still written too.
+# image_reviews: the admin's label (or "discarded") from the Label photos page;
+# kept apart from predictions and survives a factory reset
 # ----------------------------------------------------------------------
 class ImageReview(Base):
     __tablename__ = "image_reviews"
@@ -367,9 +293,7 @@ class ImageReview(Base):
 
 
 # ----------------------------------------------------------------------
-# storage_audit_log — every destructive storage action from the dashboard
-# (cache clean-up, cache repair, factory reset): what, why, the outcome and
-# who. Never cleared by the factory reset.
+# storage_audit_log: every destructive storage action from the dashboard
 # ----------------------------------------------------------------------
 class StorageAuditLog(Base):
     __tablename__ = "storage_audit_log"
@@ -388,10 +312,7 @@ class StorageAuditLog(Base):
 
 
 # ----------------------------------------------------------------------
-# Analytics computed by Spark (spark/batch_analytics.py) and shown by the
-# dashboard. Spark replaces the rows of every table on each run; nothing
-# else writes them. Scalability-test images are left out; each image counts
-# once, with its latest prediction; days are Timor-Leste days.
+# Analytics tables, filled only by Spark (spark/batch_analytics.py)
 # ----------------------------------------------------------------------
 class _SparkOutput:
     """When Spark computed the row (every analytics table ends with it)."""
@@ -484,9 +405,7 @@ ANALYTICS_TABLES = (
 )
 
 
-# The scalability test page's disease figures, one set per test run, from
-# the CNN results kept in scale_test_items (COMPLETED photos only). Kept
-# apart from the farmer analytics above and not shared with Tableau.
+# scalability-test figures, per test run (not shared with Tableau)
 class AnalyticsScaleTestDiseaseByLocation(_SparkOutput, Base):
     """Test photos per run, municipality and disease."""
     __tablename__ = "analytics_scale_test_disease_by_location"
@@ -521,29 +440,20 @@ class AnalyticsScaleTestHighRiskByLocation(_SparkOutput, Base):
 # Engine / session
 # ----------------------------------------------------------------------
 _connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
-# pool_pre_ping (PostgreSQL): Spark, the Drive watcher and the dashboard run for
-# days; after the Postgres container restarts, every pooled connection is dead
-# and its next use failed — a photo was marked FAILED, a watcher scan aborted.
-# The ping (one round trip on checkout) replaces a dead connection instead.
+# pool_pre_ping replaces connections that died when PostgreSQL restarted
 engine = create_engine(DATABASE_URL, connect_args=_connect_args, future=True,
                        pool_pre_ping=not DATABASE_URL.startswith("sqlite"))
 
 if DATABASE_URL.startswith("sqlite"):
     @event.listens_for(engine, "connect")
     def _sqlite_wal(dbapi_conn, _record):
-        # WAL lets outside readers (a live Tableau connection, DB Browser)
-        # read while Spark/the dashboard write, instead of a reader's lock making
-        # writers fail with "database is locked". Persistent on the file.
+        # WAL: outside readers don't block writers
         dbapi_conn.execute("PRAGMA journal_mode=WAL")
 
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, future=True)
 
 
-# Columns added by the Gmail-registration feature. `Base.metadata.create_all`
-# only creates missing TABLES, not missing COLUMNS on a table that already
-# exists — so a database created before this feature shipped needs these
-# added explicitly. (SQLite and PostgreSQL both support plain
-# `ALTER TABLE ... ADD COLUMN`, which is all this needs.)
+# columns added after the first release (create_all doesn't add columns)
 _USERS_MIGRATION_COLUMNS = [
     ("full_name", "VARCHAR"),
     ("email_verified", "BOOLEAN NOT NULL DEFAULT 0"),
@@ -603,13 +513,7 @@ def _add_missing_columns(table_name: str, columns: list[tuple[str, str]]):
 
 
 def _drop_field_feature(conn):
-    """One-time migration off the removed fields/field_users tables and
-    Image.field_id column. Both SQLite (3.35+) and PostgreSQL support
-    plain `ALTER TABLE ... DROP COLUMN`, and both support plain `DROP
-    TABLE ... [CASCADE]`, so no dialect branching is needed here beyond
-    CASCADE, which PostgreSQL requires to also drop the FK-dependent index/
-    constraint and SQLite doesn't understand at all.
-    """
+    """One-time migration: drops the removed fields tables and Image.field_id."""
     inspector = inspect(engine)
     is_postgres = engine.dialect.name == "postgresql"
 
@@ -626,15 +530,11 @@ def _drop_field_feature(conn):
 
 
 def _drop_system_settings(conn):
-    """system_settings held only the image-processing mode, which now lives
-    in storage/processing_mode.json (the Drive watcher reads it without a
-    database)."""
+    """Drops system_settings (the mode now lives in processing_mode.json)."""
     conn.execute(sql_text("DROP TABLE IF EXISTS system_settings"))
 
 
-# Each image's latest prediction (newest predicted_at, ties broken by the
-# larger prediction_id — the rule of spark/batch_analytics.py) as `latest`,
-# row number rn = 1; used by both views and the dashboard's photo list.
+# each image's latest prediction (newest predicted_at, then prediction_id) as rn = 1
 LATEST_PREDICTION_CTE = """WITH latest AS (
             SELECT p.*, ROW_NUMBER() OVER (PARTITION BY p.image_id
                        ORDER BY p.predicted_at DESC NULLS LAST, p.prediction_id DESC) AS rn
@@ -647,18 +547,13 @@ TABLEAU_TABLES = ("images", "predictions") + ANALYTICS_TABLES
 
 
 def _create_tableau_view(conn):
-    """Read-only view a live Tableau connection reads instead of the raw
-    tables: one row per image with its LATEST prediction (mirrors
-    spark/analytics_reader.images_with_predictions, which drops replayed
-    at-least-once predictions) and timestamps shifted from stored UTC to
-    Timor-Leste Time, so Tableau shows the same numbers as the dashboard.
-    Dropped and recreated on every init_db() so it tracks schema changes."""
+    """Tableau's read-only view: one row per image with its latest prediction,
+    times in Timor-Leste Time. Recreated by every init_db()."""
     is_postgres = engine.dialect.name == "postgresql"
 
     def local(col):
         if is_postgres:
-            # timestamptz -> naive UTC wall time -> naive TLT wall time, so
-            # Tableau shows local time whatever its session time zone is
+            # UTC -> Timor-Leste wall time, whatever Tableau's time zone
             return f"({col} AT TIME ZONE 'UTC') + INTERVAL '{LOCAL_TZ_OFFSET_HOURS} hours'"
         return f"datetime({col}, '{LOCAL_TZ_OFFSET_HOURS:+d} hours')"
 
@@ -690,9 +585,7 @@ def _create_tableau_view(conn):
 
 
 def _ensure_tableau_reader(conn):
-    """Create (or re-password) the read-only BI login and grant it SELECT on
-    the view alone. Re-run on every init_db() because DROP VIEW above also
-    drops the view's grants."""
+    """Creates or updates the read-only Tableau login and its grants."""
     role = TABLEAU_DB_USER.replace('"', "")
     password = TABLEAU_DB_PASSWORD.replace("'", "''")
     exists = conn.execute(sql_text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": role}).scalar()
@@ -703,8 +596,7 @@ def _ensure_tableau_reader(conn):
     conn.execute(sql_text(f'GRANT CONNECT ON DATABASE "{db_name}" TO "{role}"'))
     conn.execute(sql_text(f'GRANT USAGE ON SCHEMA public TO "{role}"'))
     conn.execute(sql_text(f'GRANT SELECT ON {TABLEAU_VIEW} TO "{role}"'))
-    # The raw tables too, so Tableau can model images -> predictions
-    # (image_id) itself. Never `users`: it holds password hashes and emails.
+    # raw tables too, never `users` (password hashes, emails)
     for table in TABLEAU_TABLES:
         conn.execute(sql_text(f'GRANT SELECT ON {table} TO "{role}"'))
 
@@ -713,13 +605,8 @@ ADMIN_CATALOG_VIEW = "v_admin_image_catalog"
 
 
 def _create_admin_catalog_view(conn):
-    """The administrator's image catalog (dashboard Image management page,
-    storage/image_catalog.py): one row per FARMER image — never a
-    scalability-test image — with its farmer, its latest prediction (newest
-    predicted_at, ties broken by prediction_id, the same rule as the Tableau
-    view) and the administrator's review decision. An image without a
-    prediction or review still appears (LEFT JOINs). Times stay UTC; the
-    dashboard converts them. Dropped and recreated on every init_db()."""
+    """The admin image catalog: one row per farmer image with its farmer,
+    latest prediction and review decision. Recreated by every init_db()."""
     conn.execute(sql_text(f"DROP VIEW IF EXISTS {ADMIN_CATALOG_VIEW}"))
     conn.execute(sql_text(f"""
         CREATE VIEW {ADMIN_CATALOG_VIEW} AS
@@ -745,9 +632,7 @@ def _create_admin_catalog_view(conn):
 
 
 def init_db():
-    """Create all tables if they don't exist yet, then migrate any that
-    already existed before this feature added new columns. Safe to call
-    repeatedly."""
+    """Creates missing tables and columns. Safe to run again."""
     Base.metadata.create_all(engine)
     had_published_column = "result_published_at" in {
         c["name"] for c in inspect(engine).get_columns("images")}
@@ -757,8 +642,7 @@ def init_db():
                            ("scale_test_items", _SCALE_TEST_ITEMS_MIGRATION_COLUMNS)):
         _add_missing_columns(table, columns)
     if not had_published_column:
-        # Photos finished before the column existed already had their result
-        # uploaded at the time: don't treat them as "not in Drive yet".
+        # photos finished before this column existed already got their result
         with engine.begin() as conn:
             conn.execute(sql_text("UPDATE images SET result_published_at = processed_at "
                                   "WHERE status = 'COMPLETED' AND result_published_at IS NULL"))

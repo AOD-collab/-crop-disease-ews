@@ -1,33 +1,15 @@
 """
-One-shot launcher for the Crop Disease Early Warning System (image system).
+Starts the whole image system, each part in its own window: Kafka (Docker),
+the Spark streaming job, Spark analytics, the dashboard and the Drive watcher.
+Settings come from .env.
 
-Initializes the database, then starts these long-running components, each in
-its own console window:
-    * Kafka broker        docker compose up -d             localhost:9092
-    * Spark streaming job  python -m spark.streaming_job
-    * Spark analytics      python -m spark.batch_analytics --watch  (the dashboard's figures; PostgreSQL)
-    * Admin dashboard      streamlit run dashboard/app.py   http://localhost:8501
-    * Drive watcher        python -m kafka.drive_watcher    (Google Drive /images -> Kafka)
-
-The Android app talks only to Google Drive; the Drive watcher is what
-brings its uploads into Kafka. It is skipped (with a message) until
-`python scripts/drive_authorize.py` has been run once — see README "Google Drive setup".
-
-There is no server of ours for the phone to reach, so no public address,
-ngrok or port forwarding is needed.
-
-Config (BOOTSTRAP_ADMIN_PASSWORD, PYSPARK_PYTHON, ...) is read from the
-.env file in this folder by config/settings.py — edit that, not this.
-
-Examples
---------
-    python run_all.py                     # DB init + Kafka + Spark + dashboard + Drive watcher
-    python run_all.py --no-kafka          # skip starting a broker (one already running / started elsewhere)
-    python run_all.py --no-spark          # skip the Spark streaming job (and the Spark analytics)
-    python run_all.py --no-analytics      # skip only the Spark analytics service
-    python run_all.py --no-drive          # skip the Google Drive watcher
-    python run_all.py --reset             # factory-reset pipeline data + Kafka messages first (keeps users/admins)
-    python run_all.py --stop              # stop everything this script started
+    python run_all.py                  # start everything
+    python run_all.py --no-kafka       # a broker is already running
+    python run_all.py --no-spark       # skip Spark (and its analytics)
+    python run_all.py --no-analytics   # skip only the Spark analytics
+    python run_all.py --no-drive       # skip the Drive watcher
+    python run_all.py --reset          # factory reset first (keeps users)
+    python run_all.py --stop           # stop everything it started
 """
 
 import argparse
@@ -49,12 +31,9 @@ IS_WINDOWS = sys.platform == "win32"
 # process helpers
 # ---------------------------------------------------------------------------
 def start_service(name: str, argv: list[str]) -> dict:
-    """Launch `argv` in its own console window and return {name, pid}."""
+    """Starts `argv` in its own console window; returns {name, pid}."""
     if IS_WINDOWS:
-        # `cmd /k "title <name> && <argv...>"` gives each service a labelled
-        # window that stays open after the process exits (so a crash is
-        # readable). The recorded pid is cmd.exe; `taskkill /T` on it later
-        # takes the python child with it.
+        # a titled window that stays open after a crash; taskkill /T later stops the child too
         inner = " ".join(argv)
         proc = subprocess.Popen(
             f'cmd /k "title {name} && {inner}"',
@@ -94,8 +73,7 @@ def stop_pid(pid: int) -> None:
 
 
 def read_pid_file() -> dict | None:
-    """The saved {kafka, services} record, or None when the file is empty
-    or damaged (e.g. a start that was interrupted, or a hand edit)."""
+    """The saved {kafka, services} record, or None if missing or damaged."""
     try:
         saved = json.loads(PID_FILE.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
@@ -104,8 +82,7 @@ def read_pid_file() -> dict | None:
 
 
 def find_service_windows() -> list[dict]:
-    """Windows only: the "EWS-<name>" cmd windows start_service() opens,
-    found by their title, for when the pid file can't be read."""
+    """Windows: the "EWS-<name>" windows, found by title (when the pid file is unreadable)."""
     if not IS_WINDOWS:
         return []
     out = subprocess.run(
@@ -125,29 +102,16 @@ def find_service_windows() -> list[dict]:
 
 
 def spark_streaming_alive() -> bool:
-    """Best-effort: is a real `python -m spark.streaming_job` process running?
-
-    start_service() launches Spark inside a `cmd /k` wrapper so a crash
-    stays readable, which means the recorded pid is cmd.exe — it stays
-    "alive" even after the Python streaming job under it has died. This
-    looks for the actual child so run_all.py can warn when the consumer
-    side of the pipeline is down (the exact condition that leaves uploads
-    stuck at INGESTED). Same check as the factory reset's
-    (storage/reset.spark_job_running, PowerShell CIM on Windows: `wmic`,
-    used here before, is gone from current Windows 11, so this always
-    answered "running").
-    """
+    """Is the Spark job's Python process really running? (The saved pid is
+    its cmd window, which stays alive after a crash.)"""
     from storage.reset import spark_job_running
     running = spark_job_running()
     return True if running is None else running  # can't tell — don't cry wolf
 
 
 def count_stuck_images() -> dict | None:
-    """{"waiting": photos the pipeline still owes a result (INGESTED /
-    PROCESSING), "undelivered": COMPLETED Drive photos whose result
-    never reached Drive} — both older than 2 minutes, i.e. what
-    storage.requeue_stuck re-sends. Returns None if the DB can't be read for
-    any reason (don't let a reporting nicety break the launcher)."""
+    """{"waiting", "undelivered"} photos older than 2 minutes, or None if the
+    database can't be read."""
     try:
         from storage.database import SessionLocal
         from storage.requeue_stuck import count_owed
@@ -248,8 +212,7 @@ def main() -> int:
         print("Note: --no-kafka set but Spark is on. The Spark job needs a broker at")
         print("      KAFKA_BOOTSTRAP_SERVERS or it will error out.")
 
-    # ---- 1b. PostgreSQL — only when .env's DATABASE_URL uses it ------
-    # (With the default SQLite file there's nothing to start or download.)
+    # ---- 1b. PostgreSQL (only when DATABASE_URL uses it) --------------
     from config.settings import DATABASE_URL
     use_pg = DATABASE_URL.startswith("postgresql")
     if use_pg:
@@ -279,8 +242,7 @@ def main() -> int:
         return 1
     if args.reset:
         print("Factory-resetting pipeline data (keeps users/admins)...")
-        # Also empty the Kafka topic: the reset clears Spark's checkpoints and
-        # Spark reads from "earliest", so otherwise it replays every old message.
+        # also empty the Kafka topic, or Spark replays every old message
         reset_cmd = [sys.executable, "-m", "storage.reset", "--yes"]
         if not args.no_kafka:
             reset_cmd.append("--kafka")
@@ -297,14 +259,12 @@ def main() -> int:
 
     if not (args.no_spark or args.no_analytics):
         if use_pg:
-            # keeps the dashboard's analytics tables current (spark/batch_analytics.py)
             services.append(start_service("EWS-SparkAnalytics", ["python", "-m", "spark.batch_analytics", "--watch"]))
         else:
             print("  skipped Spark analytics - it reads the database over JDBC, which needs PostgreSQL "
                   "(DATABASE_URL); the dashboard's charts stay empty on SQLite")
 
     if not args.no_kafka_monitor:
-        # read-only window: each farmer-photo event as it reaches Kafka (kafka/monitor.py)
         services.append(start_service("EWS-KafkaMonitor", ["python", "-m", "kafka.monitor"]))
 
     if not args.no_dashboard:
@@ -329,8 +289,7 @@ def main() -> int:
     PID_FILE.write_text(json.dumps({"kafka": started_kafka, "services": services}, indent=2))
 
     # ---- 3b. verify the Spark consumer actually came up ----------------
-    # A dead consumer is what silently leaves uploads stuck at INGESTED,
-    # so surface it here instead of letting it be discovered hours later.
+    # a dead consumer leaves uploads stuck at INGESTED, so say so now
     if not args.no_spark:
         print("\nWaiting for the Spark streaming job to come up...")
         alive = False

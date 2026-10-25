@@ -1,16 +1,7 @@
 """
-Publishes real image-upload events to the Kafka topic `maize-disease-images`
-(DIT manual section 21).
-
-Uses confluent-kafka (NOT kafka-python) deliberately: this project's own
-package is named `kafka/`, which would shadow kafka-python's `kafka` import
-on sys.path. confluent-kafka imports as `confluent_kafka`, so there's no
-collision.
-
-Falls back to a local JSON-lines file queue ONLY when a broker genuinely
-isn't reachable — this is an infrastructure fallback (so the pipeline is
-runnable without installing a Kafka cluster) not a data simulation; the
-events themselves are always real upload events, never fabricated.
+Sends upload events to Kafka (confluent-kafka: kafka-python would clash with
+this project's kafka/ package). When the broker is down, events wait in a
+local file queue and are forwarded when it is back.
 """
 
 import json
@@ -23,16 +14,12 @@ from kafka.config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_USE_LOCAL_FALLBACK, LOCA
 
 LOCAL_QUEUE_DIR.mkdir(parents=True, exist_ok=True)
 
-# One append at a time within this process: a publisher may send from
-# several threads, and two threads appending to the queue file at once could
-# interleave their lines.
+# one append at a time within this process (several threads may send)
 _APPEND_LOCK = threading.Lock()
 
 
 def _append(path, text: str) -> None:
-    """Appends `text` to a queue file, one writer at a time across PROCESSES
-    too (the Drive watcher and the dashboard share the file): an OS lock on
-    its first byte while writing."""
+    """Appends to a queue file under an OS lock, so two processes can't mix their lines."""
     with _APPEND_LOCK, open(path, "a") as f:
         if os.name == "nt":
             import msvcrt
@@ -49,9 +36,7 @@ def _append(path, text: str) -> None:
 
 
 def _parse_lines(lines):
-    """(messages, bad_lines) of a JSON-lines queue. A line that isn't valid
-    JSON (a process killed half-way through an append) is returned apart
-    instead of making the whole file unreadable."""
+    """(messages, bad_lines) of a JSON-lines queue."""
     messages, bad = [], []
     for line in lines:
         if not line.strip():
@@ -68,26 +53,17 @@ class KafkaBackend:
         from confluent_kafka import Producer
         self.topic = topic
         self._producer = Producer({"bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS})
-        # Fail fast if the broker is unreachable rather than silently
-        # queuing forever — lets get_backend() fall back cleanly.
+        # fail fast when the broker is down
         self._producer.list_topics(timeout=3)
 
     def send(self, message: dict):
-        # produce() only *queues* the record; delivery success/failure is
-        # reported asynchronously, NOT by an exception. Without checking it,
-        # a broker that goes down after get_backend() succeeded makes send()
-        # return cleanly while the event is never delivered — which is
-        # exactly how uploads end up marked INGESTED but never processed.
-        # Raise so the caller (storage/pipeline_submit.py) can tell the
-        # image wasn't queued.
+        # raise if Kafka didn't confirm delivery, so the caller knows
         from confluent_kafka import KafkaException
         if failed := self.send_many([message], timeout=10):
             raise KafkaException(f"Kafka delivery failed: {failed[0]} — broker unreachable?")
 
     def send_many(self, messages: list, timeout: float = 120) -> dict:
-        """Publishes many events with one flush at the end instead of one
-        per event (scalability/run.py). Returns {index: error text} for the
-        events Kafka did not acknowledge; an empty dict means all delivered."""
+        """Sends many events with one flush. Returns {index: error} for those not delivered."""
         failed = {}
         acked = set()
 
@@ -105,7 +81,7 @@ class KafkaBackend:
                 try:
                     self._producer.produce(self.topic, payload, callback=_callback(index))
                     break
-                except BufferError:          # local send queue full: let it drain
+                except BufferError:          # send buffer full: let it drain
                     self._producer.poll(0.5)
             self._producer.poll(0)
         self._producer.flush(timeout=timeout)
@@ -116,10 +92,7 @@ class KafkaBackend:
 
 
 class LocalFileBackend:
-    """Infrastructure fallback for environments without a Kafka broker
-    installed: an append-only JSON-lines file that stands in for the topic
-    so uploads are still durably recorded; ResilientBackend drains it into
-    Kafka once the broker is back."""
+    """The local file queue used while Kafka is down."""
 
     def __init__(self, topic: str):
         self.path = LOCAL_QUEUE_DIR / f"{topic}.jsonl"
@@ -129,17 +102,8 @@ class LocalFileBackend:
 
 
 class ResilientBackend:
-    """Kafka when the broker is reachable, the local file queue when it is
-    not — decided on EVERY send, not once at process start.
-
-    Long-running publishers (kafka/drive_watcher, the dashboard)
-    used to call get_backend() once at startup. If Kafka happened to be down
-    at that moment they stayed on LocalFileBackend for their whole lifetime:
-    every later upload was appended to storage/local_queue/*.jsonl and marked
-    INGESTED, but Spark only reads Kafka, so those images were never
-    analysed. This class keeps retrying the broker (at most every
-    RETRY_SECONDS) and, once it is back, drains the file backlog into Kafka
-    before sending anything new, so fallback events are delayed, not lost."""
+    """Kafka when it is up, the local file queue when it is down (checked on
+    every send). Once Kafka is back the queue is forwarded first."""
 
     RETRY_SECONDS = 30
 
@@ -174,9 +138,6 @@ class ResilientBackend:
         kafka = self._connect()
         if kafka is not None:
             self.drain()  # older queued events go first
-            # drain() gives up on the broker when it can't deliver; then the
-            # new event goes straight to the file instead of waiting out a
-            # second delivery timeout on the same dead connection.
             if self._kafka is kafka:
                 try:
                     kafka.send(message)
@@ -185,16 +146,12 @@ class ResilientBackend:
                     self._lost_kafka(e)
         self._local.send(message)
 
-    # A claimed file still there after this long belongs to a process that
-    # died while draining it (its claim time is set when it is claimed).
+    # a claimed file older than this was left by a process that died
     ORPHAN_CLAIM_SECONDS = 600
 
     def _claim_files(self) -> list:
-        """Claims the queue file plus any orphaned claim, each by renaming it
-        to a fresh .draining-<uuid> name. The rename is the lock: the Drive watcher
-        and the dashboard (separate processes sharing the file) never both
-        forward the same backlog; a rename that fails means someone else
-        holds that file — it is skipped."""
+        """Claims the queue file (and orphaned claims) by renaming it; the
+        rename is the lock between processes."""
         path = self._local.path
         sources = [path] if path.exists() else []
         cutoff = time.time() - self.ORPHAN_CLAIM_SECONDS
@@ -209,22 +166,15 @@ class ResilientBackend:
             dst = path.with_name(f"{path.name}.draining-{uuid.uuid4().hex}")
             try:
                 os.replace(src, dst)
-                os.utime(dst)          # claim time, for the orphan check above
+                os.utime(dst)          # claim time
             except OSError:
                 continue
             claimed.append(dst)
         return claimed
 
     def drain(self) -> int:
-        """Forward every event sitting in the local file queue to Kafka.
-        Returns how many were forwarded. Safe to call often: it is a no-op
-        when Kafka is down or the queue file is absent.
-
-        A claimed file is deleted only after its events were delivered or
-        put back in the queue, so a crash part-way never loses them (at
-        worst some are delivered twice, which Spark tolerates: a COMPLETED
-        image is skipped). A line that isn't valid JSON is moved to
-        <queue>.corrupt instead of blocking the rest."""
+        """Forwards the local queue to Kafka; returns how many were sent.
+        Unreadable lines go to <queue>.corrupt."""
         kafka = self._connect()
         if kafka is None:
             return 0
@@ -248,8 +198,7 @@ class ResilientBackend:
                     kafka.send(m)
                     done += 1
             except Exception as e:
-                # Put the unsent remainder back so nothing is lost; claims not
-                # read yet go back as they are.
+                # put everything not sent back in the queue
                 for m in messages[done:]:
                     self._local.send(m)
                 for rest in claimed[i + 1:]:

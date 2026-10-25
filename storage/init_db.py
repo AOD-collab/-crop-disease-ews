@@ -1,11 +1,8 @@
 """
-Creates all tables (if missing) and, only if the users table is completely
-empty, bootstraps a single ADMIN account from BOOTSTRAP_ADMIN_USERNAME /
-BOOTSTRAP_ADMIN_PASSWORD (config/settings.py / env vars) so there is a way
-to log in and create further users/fields.
+Creates the tables and, if there are no users at all, the first ADMIN account
+from BOOTSTRAP_ADMIN_USERNAME / BOOTSTRAP_ADMIN_PASSWORD.
 
-Run:
-    python -m storage.init_db
+Run: python -m storage.init_db
 """
 
 import sys
@@ -41,10 +38,7 @@ def run():
             password_hash=hash_password(BOOTSTRAP_ADMIN_PASSWORD),
             role=Role.ADMIN,
             status=UserStatus.ACTIVE,
-            # This is a deliberate, config-driven administrative account —
-            # not an arbitrary self-registered Gmail address — so marking
-            # it pre-verified here doesn't conflict with the "never
-            # auto-verify an arbitrary address" rule.
+            # a configured admin account, so it is marked verified
             email_verified=True,
         )
         session.add(admin)

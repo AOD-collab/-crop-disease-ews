@@ -1,31 +1,8 @@
 """
-Local storage as a MANAGED CACHE of the farmers' photos.
-
-Google Drive keeps the originals (images/<email>/) and the results the phones
-read (results/<email>/); PostgreSQL is the catalog (storage/image_catalog.py)
-and records each photo's Drive file id (images.image_path "gdrive:<id>")
-and the SHA-256 of its bytes (images.content_hash). This laptop keeps:
-
-  original_cache  DOWNLOADED_PHOTOS_DIR/<user_id>/<image_id>.jpg|.png
-                  byte-for-byte copies of Drive originals, written when Spark
-                  first reads a photo (storage/image_storage.store_downloaded_photo)
-  review          REVIEW_DIR/<image_id>.jpg — EXIF-stripped copies waiting on
-                  the Label photos page (protected here)
-  training        LABELLED_TRAIN_DIR/<class>/<image_id>.jpg — confirmed
-                  training data (protected here)
-  scalability     SCALABILITY_REPORTS_DIR/<run_id>/images/ — staged copies of
-                  scalability-test runs (their measurements live in PostgreSQL)
-  legacy_uploads  IMAGE_STORAGE_PATH — photos from the previous design
-  temporary       *.tmp files left by an interrupted write
-
-Processed (marked-up) images are not kept locally: they live in Drive only.
-
-A cached copy is trusted only after its SHA-256 matches content_hash. A
-missing or wrong copy is fetched from Drive again, checked, and only then
-stored. Nothing here deletes a file on its own: cleanup() works from a
-preview the administrator confirmed, re-checks every file, never touches
-review or training data or a photo that is being processed, and writes each
-outcome to storage_audit_log.
+The laptop's copies of farmer photos, managed as a cache. Drive keeps the
+originals; a local copy is trusted only when its SHA-256 matches. Nothing is
+deleted on its own: cleanup() removes only what the admin confirmed (never
+review or training photos) and logs every outcome.
 """
 
 import hashlib
@@ -60,7 +37,7 @@ TEMP_MIN_AGE_SECONDS = 3600                      # a .tmp younger than this may 
 
 
 def roots() -> dict:
-    """Category -> folder, read at call time (tests point them elsewhere)."""
+    """Category -> folder."""
     return {
         "original_cache": Path(settings.DOWNLOADED_PHOTOS_DIR),
         "review": Path(settings.REVIEW_DIR),
@@ -76,8 +53,7 @@ _memo_lock = threading.Lock()
 
 
 def file_sha256(path: Path) -> str:
-    """SHA-256 of a file, remembered per (path, size, modification time) so
-    an unchanged file is read once; any change is hashed again."""
+    """SHA-256 of a file, cached until the file changes."""
     st = path.stat()
     key = (str(path), st.st_size, st.st_mtime_ns)
     with _memo_lock:
@@ -106,7 +82,7 @@ class CacheCheck:
 
 
 def check_cached(user_id, image_id, content_hash) -> CacheCheck:
-    """Is there a local copy of this image, and is it the right content?"""
+    """Is there a correct local copy of this image?"""
     path = downloaded_photo_path(user_id, image_id)
     if path is None:
         return CacheCheck("missing", None)
@@ -144,10 +120,8 @@ class Original:
 
 
 def original_for_display(row: dict, performed_by=None, download=None) -> Original | None:
-    """The original photo of a catalog row: the verified local copy when
-    there is one (no download); otherwise from Google Drive, checked against
-    content_hash and, when it matches, stored as the local copy (a wrong copy
-    is replaced, and that is audited). None when it can't be found."""
+    """The original photo: the verified local copy, else from Drive (checked
+    and stored locally). None if it can't be found."""
     check = check_cached(row["user_id"], row["image_id"], row.get("content_hash"))
     if check.status in ("valid", "unverified"):
         return Original(str(check.path), "Local copy" + (" (verified)" if check.status == "valid" else ""))
@@ -185,8 +159,7 @@ _thumb_memo: dict = {}
 
 
 def thumbnail(source, max_px: int = 320) -> bytes | None:
-    """A small JPEG preview made in memory; the original file is only read.
-    `source` is a file path or the photo's bytes."""
+    """A small JPEG preview; `source` is a path or bytes."""
     from PIL import Image, ImageOps
     try:
         if isinstance(source, (bytes, bytearray)):
@@ -214,9 +187,7 @@ def thumbnail(source, max_px: int = 320) -> bytes | None:
 
 # --------------------------------------------------------------- review state
 def review_state(image_id: str, decision: str | None) -> str:
-    """awaiting_label | labelled | discarded | not_in_review. A photo back in
-    the review folder (analysed again) is waiting again, whatever was
-    decided before; the earlier decision stays in image_reviews."""
+    """awaiting_label | labelled | discarded | not_in_review."""
     if _SAFE_ID_RE.match(image_id or "") and (Path(settings.REVIEW_DIR) / f"{image_id}.jpg").is_file():
         return "awaiting_label"
     return decision or "not_in_review"
@@ -236,9 +207,7 @@ def _walk(root: Path):
 
 
 def usage() -> list[dict]:
-    """Files and bytes per category. A hard-linked file (scalability runs
-    link the cached originals) is counted under the first category that
-    holds it, so the total is real disk use."""
+    """Files and bytes per category (a hard-linked file counted once)."""
     seen = set()
     rows = []
     r = roots()
@@ -310,9 +279,8 @@ VERDICTS = {
 
 
 def reconcile(catalog_ids: dict | None = None, reviews: set | None = None, training: set | None = None) -> list:
-    """Every file in the original-photo cache matched against the catalog
-    (image_id from the file name, owner from its folder, content by SHA-256),
-    plus every Drive-stored catalog image that has no local copy. Read-only."""
+    """Matches every cached file against the catalog, plus catalog images with
+    no local copy. Read-only."""
     from storage import image_catalog
     ids = catalog_ids if catalog_ids is not None else image_catalog.all_ids()
     by_hash = {}
@@ -410,9 +378,7 @@ class Candidate:
 
 
 def cleanup_preview(kinds) -> list:
-    """Exactly the files a clean-up of `kinds` would remove, and why.
-    Deletes nothing. Never offers review or training data, a photo whose
-    processing is under way, or files of a scalability test that is running."""
+    """The files a clean-up of `kinds` would remove, and why. Deletes nothing."""
     kinds = set(kinds)
     out = []
     if kinds & {"temporary", "invalid_cache", "orphan_cache"}:
@@ -460,12 +426,7 @@ def _scalability_candidates() -> list:
 
 
 def cleanup(kinds, confirmed: list, performed_by=None, dry_run: bool = False) -> dict:
-    """Removes the files the administrator confirmed (`confirmed`: Candidate.rel
-    values from a preview). The preview is computed again first and a file
-    is removed only if it is still a candidate for the same reason — so a
-    file that became in use, was repaired or changed meanwhile is skipped.
-    dry_run: report what would happen and delete nothing. Every real outcome
-    is written to storage_audit_log."""
+    """Removes the confirmed files that are still candidates; logs each outcome."""
     fresh = {(c.category, c.rel): c for c in cleanup_preview(kinds)}
     wanted = set(confirmed)
     report = {"deleted": 0, "bytes": 0, "skipped": [], "failed": [], "dry_run": dry_run}

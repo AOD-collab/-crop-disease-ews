@@ -1,5 +1,4 @@
-"""Kafka configuration — re-exported from config.settings so every Kafka-
-touching module (producer, Spark streaming job) reads from one place."""
+"""Kafka settings, from config.settings."""
 
 from config.settings import (  # noqa: F401 - re-exported
     KAFKA_BOOTSTRAP_SERVERS,
@@ -10,9 +9,7 @@ from config.settings import (  # noqa: F401 - re-exported
 
 
 def bootstrap_address() -> tuple:
-    """(host, port) of the first broker in KAFKA_BOOTSTRAP_SERVERS, for a
-    quick "is the broker up?" socket check. Status checks used to try
-    localhost:9092 whatever KAFKA_BOOTSTRAP_SERVERS said."""
+    """(host, port) of the first broker."""
     first = KAFKA_BOOTSTRAP_SERVERS.split(",")[0].strip()
     first = first.split("://", 1)[-1]                       # PLAINTEXT://host:port
     host, _, port = first.rpartition(":")

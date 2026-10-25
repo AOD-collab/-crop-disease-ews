@@ -1,31 +1,10 @@
 """
-Replace the Android app's old leaf logo with your own logo — everywhere —
-in one command (no Android Studio clicking needed).
+Puts your logo in the Android app (all icon sizes, login screen) and
+removes the old leaf logo. Backs up every changed file first.
 
-    python scripts\\set_app_logo.py A:\\final\\app_logo.jpg
-    python scripts\\set_app_logo.py A:\\final\\app_logo.jpg --background FFFFFF
+    python scripts\\set_app_logo.py A:\\final\\app_logo.jpg [--background FFFFFF] [--size 0.9] [--no-trim]
 
-What it does:
-  1. Backs up every file it will change to backup\\logo_<date-time>\\
-  2. App icon (phone home screen): creates the launcher icon in all sizes
-     (mipmap-mdpi ... mipmap-xxxhdpi, round version, Android 8+ adaptive
-     icon) from your logo on a background colour.
-  3. Login screen: shows your logo instead of the leaf badge.
-  4. Home screen: removes the leaf icon from the "Scan" button (a button
-     icon is painted one colour, so a picture can't be shown there).
-  5. Deletes the old leaf logo files.
-
---background : colour behind the logo, as 6 hex digits (FFFFFF = white).
-               If left out, it is taken from the corners of your logo, so a
-               JPG's own background blends in with no visible box.
---size       : how much of the icon's safe area the logo fills (0.5-1.0,
-               default 0.9). Lower it if the logo looks cut off.
---no-trim    : keep the empty border around the logo (by default it is cut
-               away, like Android Studio's "Trim: Yes").
-
-Running it again with another logo is fine: it simply replaces the logo.
-Afterwards: Build > Clean Project, Build > Make Project, uninstall the app
-from the phone, then Run.
+Afterwards in Android Studio: Clean, Make Project, uninstall the app, Run.
 """
 import argparse
 import re
@@ -93,9 +72,7 @@ def corner_color(img):
 
 
 def trim(img, bg):
-    """Cuts away empty border around the logo: pixels (almost) the same as
-    the background colour, or fully transparent. Like Android Studio's
-    "Trim: Yes"."""
+    """Cuts away the empty border around the logo."""
     rgb = img.convert("RGB")
     diff = ImageChops.difference(rgb, Image.new("RGB", rgb.size, bg)).convert("L")
     diff = diff.point(lambda v: 255 if v > 24 else 0)            # ignore JPG noise
@@ -170,8 +147,7 @@ def main():
     for d, scale in DENSITIES.items():
         folder = RES / f"mipmap-{d}"
         folder.mkdir(exist_ok=True)
-        # Android 8+ adaptive icon foreground: 108dp canvas, logo inside the
-        # 66dp safe zone (the part never cut off by circle/square masks).
+        # adaptive icon: 108dp canvas, logo inside the 66dp safe zone
         canvas = round(108 * scale)
         fg = Image.new("RGBA", (canvas, canvas), (0, 0, 0, 0))
         centered(fg, fit(logo, round(66 * scale * size)))
@@ -228,8 +204,7 @@ def main():
         try:
             (RES / "mipmap").rmdir()
         except OSError:
-            # Windows refuses while another program (e.g. Android Studio)
-            # has the folder open. An empty folder is harmless for the build.
+            # still open in another program; an empty folder is harmless
             print("   (the now-empty res\\mipmap folder could not be removed - harmless, you may delete it later)")
     print("5. Old logo files deleted: " + (", ".join(removed) if removed else "none left"))
 

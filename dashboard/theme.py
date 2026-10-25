@@ -1,15 +1,8 @@
-"""Chart colours shared by every dashboard page (dashboard/app.py and the
-pages it imports), so a disease has the same colour everywhere — and the
-HIGH-risk-by-municipality table two pages show."""
+"""Shared dashboard colours (one colour per disease everywhere) and small widgets."""
 
-# Fixed-order categorical hues for open-ended series (disease classes,
-# locations) — assigned in order, never cycled past what a chart actually
-# needs.
-# Maize-field hues (greens, kernel yellows, earth browns, one teal/blue for
-# separation) — distinct from each other, in harmony with the green/yellow UI.
+# categorical hues in fixed order (maize-field greens, yellows, browns)
 CATEGORICAL_HUES = ["#2E7D32", "#E0A800", "#8D5A2B", "#1F7A8C", "#9BBF3B", "#C8541B", "#5B3A29", "#6A994E"]
-# Fixed colour per disease, the same in every chart: healthy = leaf green,
-# each disease an earthy tone that recalls how it looks on the leaf.
+# one fixed colour per disease, the same in every chart
 DISEASE_COLOR_MAP = {
     "healthy": "#2E7D32",
     "common_rust": "#C8541B",            # rust orange
@@ -23,8 +16,7 @@ STATUS_BADGE_COLOR = {
 
 
 def disease_colors(classes) -> dict:
-    """{class: colour} for the classes a chart actually shows: the fixed
-    disease colour when there is one, otherwise the next categorical hue."""
+    """{class: colour}: the disease colour, else the next categorical hue."""
     out, i = {}, 0
     for cls in classes:
         if str(cls).lower() in DISEASE_COLOR_MAP:
@@ -36,8 +28,7 @@ def disease_colors(classes) -> dict:
 
 
 def high_risk_table(df, summary: list, summary_label: str) -> None:
-    """The per-municipality HIGH-risk table (location, high, total, high_pct)
-    with `summary` ("n of N ...") as its middle column."""
+    """The per-municipality HIGH-risk table with `summary` as its middle column."""
     import streamlit as st
     st.dataframe(
         df.assign(summary=summary),
@@ -52,8 +43,7 @@ def high_risk_table(df, summary: list, summary_label: str) -> None:
 
 
 def metric_row(*specs) -> None:
-    """One row of st.metric cards, side by side: each spec is
-    (label, value) or (label, value, help)."""
+    """One row of st.metric cards; each spec is (label, value[, help])."""
     import streamlit as st
     for col, (label, value, *help_text) in zip(st.columns(len(specs)), specs):
         col.metric(label, value, help=help_text[0] if help_text else None)

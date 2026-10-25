@@ -1,9 +1,6 @@
 """
-Timor-Leste Time (TLT, UTC+9) for DISPLAY only.
-
-Every timestamp is stored in UTC (storage/database.now_utc). SQLite hands
-them back naive, so a naive value is treated as UTC, never as local time.
-Timor-Leste has no daylight saving, so a fixed UTC+9 offset is exact.
+Timor-Leste Time (UTC+9, no daylight saving) for display only; everything is
+stored in UTC.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -40,8 +37,7 @@ def now_local():
 
 
 def series_to_local(series):
-    """pandas datetime Series (UTC or naive-UTC) -> Timor-Leste tz-aware.
-    Comparisons and differences are unchanged; only the display is local."""
+    """pandas UTC Series -> Timor-Leste time."""
     import pandas as pd
     s = pd.to_datetime(series, utc=True, errors="coerce")
     return s.dt.tz_convert(LOCAL_TZ)

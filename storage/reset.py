@@ -1,40 +1,10 @@
 """
-Factory reset — wipe all pipeline data and history back to a clean slate,
-while KEEPING every user and admin account intact.
+Factory reset: clears photos, predictions, queues, checkpoints and history,
+keeping every user account. Optionally empties the Kafka topic and the
+farmers' Drive folders. Keeps downloaded photos, labels, the audit log and
+scalability-test results. Stop Spark and the Drive watcher first.
 
-What it clears:
-  * DB rows in `predictions`, `processing_events`, `images`, `rejected_events`
-    (the `users` table is never touched)
-  * uploaded photo files under IMAGE_STORAGE_PATH (storage/images/)
-  * the Kafka local file-queue under LOCAL_QUEUE_DIR (storage/local_queue/)
-  * Spark Structured Streaming checkpoints under storage/spark_checkpoints/
-  * optionally the Kafka topic's messages (topic deleted + recreated empty).
-    Without this, Spark — whose checkpoints were just cleared and which reads
-    from "earliest" — replays every old message and recreates the history.
-  * optionally every farmer's photos and results in Google Drive (moved to
-    the central account's trash, recoverable for 30 days; the per-farmer
-    folders and their sharing are kept so the app keeps working), plus a
-    reset marker that makes each phone clear its saved history copy
-  * the Drive watcher's bookmark (storage/drive_watcher_state.json): after
-    the restart every photo still in Drive is published, registered by
-    Spark and processed again, from its local copy (no new download)
-
-What it never touches: the local copies of downloaded Drive photos under
-DOWNLOADED_PHOTOS_DIR (storage/downloaded_photos/), the review and training
-images, the administrator's label decisions (image_reviews), the storage
-audit log, and the scalability-test measurements (scale_test_runs /
-scale_test_items, storage/scalability_reports/). reset_preview() counts
-both sides before the reset; afterwards the retained cached photos are
-reconciled (storage/image_cache.reconcile) and reported, never deleted, and
-the reset is written to storage_audit_log.
-
-Stop the Spark job and drive watcher before resetting, then start them again.
-
-Used by the Admin dashboard's "Factory reset" button (dashboard/app.py) and
-runnable on its own:
-
-    python -m storage.reset --yes                    # DB + local files only
-    python -m storage.reset --yes --kafka --drive    # full clean start
+    python -m storage.reset --yes [--kafka] [--drive]
 """
 
 import argparse
@@ -53,8 +23,7 @@ SPARK_CHECKPOINT_DIR = SPARK_CHECKPOINT_ROOT
 
 
 def _empty_dir(path) -> int:
-    """Delete everything inside `path` (keeping the directory itself).
-    Returns the number of top-level entries removed."""
+    """Deletes everything inside `path`; returns how many entries."""
     if not path.exists():
         path.mkdir(parents=True, exist_ok=True)
         return 0
@@ -69,32 +38,24 @@ def _empty_dir(path) -> int:
 
 
 def spark_job_running():
-    """True if a `spark.streaming_job` process is running on this machine,
-    None if that can't be checked. Resetting under a live job corrupts its
-    checkpoint: the job keeps writing batch N into the emptied folder, and
-    the next start fails with "batch N-1 doesn't exist"."""
+    """True if the Spark job is running (None if unknown). Resetting under
+    it corrupts its checkpoint."""
     return _process_running("spark.streaming_job", "streaming_job.py")
 
 
 def drive_watcher_running():
-    """True if the Drive watcher (kafka.drive_watcher) is running, None if
-    that can't be checked. A watcher running during the reset can register a
-    new upload after the tables are emptied and publish it just before the
-    Kafka topic is cleared — in AUTOMATIC mode that photo then stays
-    INGESTED for good."""
+    """True if the Drive watcher is running (None if unknown)."""
     return _process_running("kafka.drive_watcher", "drive_watcher.py")
 
 
 def _process_running(*names):
-    """True if a Python command line names any of `names`, None if that
-    can't be checked."""
+    """True if a Python command line names any of `names` (None if unknown)."""
     out = _python_command_lines()
     return None if out is None else any(n in out for n in names)
 
 
 def _python_command_lines():
-    """Command lines of the running Python processes, or None if they can't
-    be read. Also used by the dashboard's System Status checks."""
+    """Command lines of running Python processes, or None."""
     import subprocess
     try:
         if sys.platform == "win32":
@@ -109,9 +70,7 @@ def _python_command_lines():
 
 
 def clear_kafka_topic(timeout: float = 30.0) -> str:
-    """Delete the image topic and recreate it empty with the same partition
-    count. Returns a short status string; never raises (the broker may
-    simply not be running, which shouldn't block the rest of the reset)."""
+    """Deletes and recreates the image topic empty. Never raises."""
     try:
         from confluent_kafka.admin import AdminClient, NewTopic
         from confluent_kafka import KafkaException
@@ -123,8 +82,7 @@ def clear_kafka_topic(timeout: float = 30.0) -> str:
         if topic is not None:
             admin.delete_topics([KAFKA_TOPIC], operation_timeout=timeout)[KAFKA_TOPIC].result()
 
-        # Deletion finishes asynchronously; creating too early fails with
-        # "marked for deletion", so retry until the broker lets it through.
+        # deletion is asynchronous: retry until the topic can be created
         deadline = time.monotonic() + timeout
         while True:
             try:
@@ -139,13 +97,9 @@ def clear_kafka_topic(timeout: float = 30.0) -> str:
 
 
 def clear_drive_files() -> dict:
-    """Remove every file inside each farmer's Drive images/<email>/ and
-    results/<email>/ folder. Files the central account owns (results) go to
-    its trash; photos the FARMER owns can't be trashed by anyone else, so
-    they're taken out of the folder instead — the watcher and the app no
-    longer see them. Then leaves a RESET_MARKER_NAME file in every
-    results/<email>/ folder, so each phone drops its saved history copy.
-    Never raises; errors are reported in the summary."""
+    """Empties every farmer's Drive images and results folders (farmer-owned
+    photos are removed from the folder) and leaves a reset marker so each
+    phone clears its history. Never raises."""
     from storage import drive_client
 
     summary = {"trashed": 0, "removed_from_folder": 0, "reset_markers": 0, "errors": []}
@@ -180,9 +134,7 @@ def clear_drive_files() -> dict:
     return summary
 
 
-# Read by the Android app (DriveRest.resetMarker): a reset_at it hasn't seen
-# yet makes the phone delete its saved history and reload it from Drive.
-# No image_id appProperty, so the app's result listings skip it.
+# the app sees a new reset_at and reloads its history from Drive
 RESET_MARKER_NAME = "_reset_marker.json"
 
 
@@ -193,7 +145,6 @@ def write_reset_markers(result_folders: list, summary: dict) -> None:
     reset_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
     for folder_id in result_folders:
         try:
-            # may_exist: an old marker whose trashing failed is overwritten.
             drive_client.upload_json(RESET_MARKER_NAME, {"reset_at": reset_at}, folder_id,
                                      {"kind": "reset_marker", "reset_at": reset_at})
             summary["reset_markers"] += 1
@@ -206,8 +157,7 @@ def _count_files(path) -> int:
 
 
 def reset_preview() -> dict:
-    """What a factory reset WILL delete and what it KEEPS, counted now.
-    Changes nothing. Shown on the dashboard before the reset is confirmed."""
+    """What a reset will delete and keep, counted now. Changes nothing."""
     from storage.database import User, ImageReview, StorageAuditLog, ScaleTestItem
     from storage import image_cache
     init_db()
@@ -233,24 +183,16 @@ def reset_preview() -> dict:
 
 def factory_reset(clear_kafka: bool = False, clear_drive: bool = False,
                   performed_by: str = None) -> dict:
-    """Perform the reset. Returns a summary of what was removed.
-
-    Users and admins are intentionally left untouched — only pipeline
-    data and its on-disk/queue/checkpoint history is cleared (plus, when
-    asked, the Kafka topic and the farmers' Drive files).
-    """
+    """Performs the reset; returns a summary. Users are never touched."""
     init_db()  # make sure the tables exist before we DELETE from them
 
-    # Closing without a commit rolls back, so a failed delete leaves nothing half done.
+    # no commit on error: nothing is half done
     with SessionLocal() as session:
-        # Order matters: predictions and processing_events both FK to images.
+        # predictions and processing_events reference images, so they go first
         predictions_deleted = session.query(Prediction).delete(synchronize_session=False)
         events_deleted = session.query(ProcessingEvent).delete(synchronize_session=False)
         rejected_deleted = session.query(RejectedEvent).delete(synchronize_session=False)
         images_deleted = session.query(Image).delete(synchronize_session=False)
-        # Images of scalability runs from before the isolation went with
-        # them; all test measurements (scale_test_runs/items) are kept, and
-        # Spark skips every test event left in its topic (run_id set).
         session.query(ScaleTestRun).filter(ScaleTestRun.data_cleaned_at.is_(None)).update(
             {ScaleTestRun.data_cleaned_at: now_utc()}, synchronize_session=False)
         session.commit()
@@ -267,9 +209,7 @@ def factory_reset(clear_kafka: bool = False, clear_drive: bool = False,
         "drive_files": clear_drive_files() if clear_drive else None,
         "drive_watcher_bookmark": _clear_watcher_bookmark(),
     }
-    # What stayed on disk, matched against the now-empty catalog: every
-    # cached original is reported (unmatched until re-registered), nothing
-    # of it is deleted.
+    # report what stayed on disk; nothing is deleted
     from storage import image_cache
     try:
         records = image_cache.reconcile()
@@ -285,13 +225,7 @@ def factory_reset(clear_kafka: bool = False, clear_drive: bool = False,
 
 
 def _clear_watcher_bookmark() -> str:
-    """Deletes the Drive watcher's bookmark, so that after the reset it
-    publishes EVERY photo still in the farmers' Drive folders again (with its
-    original upload time, location and phone GPS from Drive) and Spark
-    registers and processes them from their local copies (in MANUAL mode
-    they wait on Pending Review instead). Without this, only the photos
-    in the watcher's 2-minute look-back window came back. With --drive the
-    photos are gone from Drive, so nothing comes back."""
+    """Deletes the watcher's bookmark so every photo still in Drive is sent again."""
     from kafka import drive_watcher
     path = drive_watcher.STATE_FILE
     if not path.exists():

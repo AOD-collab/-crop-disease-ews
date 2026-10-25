@@ -1,17 +1,7 @@
 """
-"Label photos" page of the ADMIN dashboard (dashboard/app.py).
-
-Every farmer photo the pipeline analyses is copied to REVIEW_DIR
-(spark/preprocessing.save_for_review). When the admin wants to retrain,
-they label those photos here: each one is moved to
-LABELLED_TRAIN_DIR/<class>/, which the training project's train.py adds to
-its training split (never val/test) on the next "Start training". Labels
-are only for training — the farmer's result in the app never changes.
-
-Every decision is appended to LABELLED_TRAIN_DIR/labels_log.csv (who, when,
-the AI's prediction), since moved files don't carry that themselves, and
-stored in the image_reviews table (storage/reviews.py) so the Image
-management page can show and filter confirmed labels.
+"Label photos" page: the admin labels analysed farmer photos (REVIEW_DIR);
+each moves to LABELLED_TRAIN_DIR/<class>/ for the next training. Decisions
+go to labels_log.csv and image_reviews. A farmer's result never changes.
 """
 
 import csv
@@ -24,8 +14,7 @@ import config.settings as settings
 from storage import reviews
 from storage.database import SessionLocal, Prediction
 
-# Folder name (what the training project's dataset.py CLASS_ALIASES
-# understands) -> label shown on the button.
+# training folder name -> button label
 CLASSES = {
     "healthy": "Healthy",
     "common_rust": "Common rust",
@@ -79,8 +68,7 @@ def discard_photo(photo: Path, ai_class: str | None = None, admin: str | None = 
 
 
 def discard_all(admin: str | None = None) -> int:
-    """Discard every photo waiting in REVIEW_DIR. Labelled photos already in
-    the training folders are not touched. Returns how many were deleted."""
+    """Discards every photo waiting in REVIEW_DIR; returns how many."""
     photos = pending_photos()
     classes = {p.image_id: p.predicted_class for p in _ai_predictions([p.stem for p in photos]).values()}
     for photo in photos:

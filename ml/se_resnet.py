@@ -1,15 +1,6 @@
 """
-SE-ResNet18 — the architecture trained by the separate crop_disease_ews
-training project (its model.py). Kept here so ml/inference.py can load a
-checkpoint whose "architecture" is "se_resnet18" without importing anything
-from the training project.
-
-The state_dict keys must stay identical to the training project's model.py:
-a torchvision ResNet-18 whose residual blocks each carry a squeeze-and-
-excitation module at `block.se`, applied after bn2 and before the residual
-add. The top-level attribute names (conv1, bn1, relu, maxpool, layer1-4,
-avgpool, fc) are the same as torchvision's ResNet, so the hand-run Grad-CAM
-in ml/inference.py's disease_heatmap() works on this model unchanged.
+SE-ResNet18, the model the training project trains. Its layer names must
+match the training project's model.py so saved weights load.
 """
 
 import torch

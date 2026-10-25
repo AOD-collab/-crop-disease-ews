@@ -1,11 +1,6 @@
 """
-Persistent image storage per DIT manual section 12.
-
-- Legacy local-disk photos (storage/images/YYYY/MM/DD/<uuid>.<ext>, written
-  by the removed REST API) are still found through resolve_image_path().
-- Google Drive photos are recorded as "gdrive:<file id>" and downloaded on
-  demand; Spark keeps a permanent byte-for-byte copy of each one under
-  DOWNLOADED_PHOTOS_DIR.
+Where photo bytes live: Drive photos ("gdrive:<file id>") with a local copy
+in DOWNLOADED_PHOTOS_DIR, and old local-disk photos.
 """
 
 import re
@@ -15,21 +10,8 @@ from config.settings import BASE_DIR, IMAGE_STORAGE_PATH, DOWNLOADED_PHOTOS_DIR
 
 
 def resolve_image_path(stored: str) -> Path:
-    """Turn whatever is in images.image_path into a real path on THIS host.
-
-    Historically the upload code stored an absolute path, so a DB carried across
-    machines / moved project folders (e.g. OneDrive -> A:\\final) pointed at
-    files that no longer exist there even though the bytes came along under
-    storage/images/. This resolver is the single place that copes with it:
-
-      1. stored path exists as-is                 -> use it
-      2. relative path                            -> resolve under BASE_DIR
-      3. stale absolute path with an `images/`
-         segment                                  -> rebase that tail under
-                                                     the current
-                                                     IMAGE_STORAGE_PATH
-    Raises FileNotFoundError only when none of those find the file.
-    """
+    """images.image_path -> a real path on this machine (also fixes paths
+    stored on another machine). Raises FileNotFoundError if not found."""
     p = Path(stored)
     if p.exists():
         return p
@@ -50,8 +32,7 @@ def resolve_image_path(stored: str) -> Path:
 
 
 def to_stored_path(file_path: Path) -> str:
-    """The portable form written to images.image_path: relative to the
-    project root with forward slashes, so it survives a host/folder move."""
+    """The project-relative form stored in images.image_path."""
     try:
         rel = Path(file_path).resolve().relative_to(BASE_DIR.resolve())
         return rel.as_posix()
@@ -63,9 +44,7 @@ def to_stored_path(file_path: Path) -> str:
 # ---------------------------------------------------------------------------
 # Google Drive storage (new uploads from the Android app)
 # ---------------------------------------------------------------------------
-# A Drive-stored image is recorded in the SAME images.image_path column as
-# "gdrive:<drive_file_id>", so no database schema change is needed and old
-# local-disk rows keep working exactly as before.
+# a Drive photo is stored as "gdrive:<drive_file_id>" in images.image_path
 DRIVE_PATH_PREFIX = "gdrive:"
 
 
@@ -84,9 +63,7 @@ def drive_file_id_from_path(stored: str) -> str:
 
 
 def load_image_bytes(stored: str) -> bytes:
-    """Reads an image's bytes wherever it lives: Google Drive for
-    "gdrive:<id>" paths, local disk (resolve_image_path) otherwise.
-    Raises FileNotFoundError if the file can't be found in either place."""
+    """An image's bytes, from Drive or local disk. Raises FileNotFoundError."""
     if is_drive_path(stored):
         from storage import drive_client
         try:
@@ -96,10 +73,7 @@ def load_image_bytes(stored: str) -> bytes:
     return resolve_image_path(stored).read_bytes()
 
 
-# user_id / image_id are uuids; anything else (separators, "..") could point
-# outside DOWNLOADED_PHOTOS_DIR. A plain name check, not Path.resolve():
-# resolve() on Windows can return a different form of the same folder while
-# another thread is creating it, which made valid copies look unsafe.
+# ids must be plain uuids, so a path can't point outside DOWNLOADED_PHOTOS_DIR
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
@@ -110,9 +84,7 @@ def _local_copy_base(user_id, image_id):
 
 
 def downloaded_photo_path(user_id, image_id):
-    """The saved local copy of a Drive photo,
-    DOWNLOADED_PHOTOS_DIR/<user_id>/<image_id>.jpg (or .png), or None when
-    there is none (or the ids aren't safe file names)."""
+    """The local copy of a Drive photo, or None."""
     base = _local_copy_base(user_id, image_id)
     if base is None:
         return None
@@ -124,10 +96,7 @@ def downloaded_photo_path(user_id, image_id):
 
 
 def store_downloaded_photo(user_id: str, image_id: str, original_bytes: bytes) -> Path:
-    """Writes the bytes downloaded from Drive to
-    DOWNLOADED_PHOTOS_DIR/<user_id>/<image_id>.jpg (.png for PNGs), unchanged
-    (EXIF included), via a temp file so a half-written copy never looks
-    valid. Nothing in the app deletes these files. Raises on failure."""
+    """Saves the downloaded Drive photo unchanged (via a temp file). Raises on failure."""
     ext = ".png" if original_bytes.startswith(b"\x89PNG") else ".jpg"
     base = _local_copy_base(user_id, image_id)
     if base is None:

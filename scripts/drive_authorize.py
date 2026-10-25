@@ -1,26 +1,12 @@
 """
-ONE-TIME Google Drive setup, run on the laptop/server (never on Android).
+One-time Google Drive setup on the laptop (never on Android):
 
   python scripts/drive_authorize.py
 
-What it does:
-  1. Opens a browser for the normal Google OAuth consent screen. Sign in with
-     the CENTRAL Google account that should store all images and results.
-  2. Saves the resulting refresh token to GOOGLE_DRIVE_TOKEN_FILE
-     (default storage/google_drive_token.json). Keep this file private:
-     it is listed in .gitignore and must never go into the Android app.
-  3. Creates (or finds) the folders
-         CropDiseaseEWS/images    <- holds one private folder per farmer
-         CropDiseaseEWS/results   <- holds one private folder per farmer
-     (the per-farmer folders are made by scripts/drive_share_user.py)
-     and saves their IDs to GOOGLE_DRIVE_FOLDERS_FILE
-     (default storage/google_drive_folders.json), which config/settings.py
-     reads automatically.
-
-Prerequisite (see README "Google Drive setup"): a Google Cloud project with the Google
-Drive API enabled and an OAuth client of type "Desktop app"; download its
-JSON to GOOGLE_DRIVE_CLIENT_SECRET_FILE (default
-storage/google_client_secret.json).
+Sign in with the central Google account; the token is saved to
+GOOGLE_DRIVE_TOKEN_FILE (keep it private) and the CropDiseaseEWS/images and
+/results folders are created. Needs an OAuth "Desktop app" client JSON at
+GOOGLE_DRIVE_CLIENT_SECRET_FILE (see README "Google Drive setup").
 """
 import json
 import sys

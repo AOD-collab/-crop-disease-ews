@@ -1,23 +1,8 @@
 """
-CNN inference benchmark (ml/inference.py) on this laptop's real hardware.
-
-Uses the verified local copies of the Google Drive photo collection
-(storage/downloaded_photos, prepared by `python -m scalability.run prepare`),
-each put through the exact Spark preprocessing for the CNN (spark/
-preprocessing.model_input), then measures:
-
-  1. startup     model load + warm-up, reported apart from everything else
-  2. cnn-only    forward passes on already-prepared tensors, batch sizes
-                 1/8/16/32 x FP32/FP16 (CUDA-synchronised, model load and
-                 warm-up excluded), peak GPU memory
-  3. spark-like  N threads calling predict() at once, as the Spark job's
-                 photo threads do: the original one-by-one path vs the shared
-                 GPU batcher (MODEL_BATCH_SIZE), with CPU/GPU sampling
-  4. agreement   every configuration against the ORIGINAL code path
-                 (FP32, batch of 1, torch.no_grad, no pinned memory): class,
-                 uncertain flag, risk level, confidence differences
-  5. accuracy    optional, on a labelled folder (--labelled-dir with one
-                 sub-folder per class)
+CNN inference benchmark on this laptop, using the local photo copies:
+start-up time, forward passes per batch size and precision, Spark-like
+threaded use, agreement with the original FP32 path, and (optionally)
+accuracy on a labelled folder.
 
 Usage (PowerShell, from the project folder):
     python scripts\\benchmark_inference.py
@@ -64,8 +49,7 @@ def load_photos(n: int) -> list:
 
 
 def legacy_forward(loaded, tensor):
-    """The ORIGINAL predict() forward pass, kept here verbatim as the
-    baseline: one photo, FP32, torch.no_grad, plain .to(device)."""
+    """The original forward pass (one photo, FP32), as the baseline."""
     with torch.no_grad():
         logits = loaded["model"](tensor.unsqueeze(0).to(loaded["device"]))
         return torch.softmax(logits, dim=1)[0].cpu()
@@ -128,8 +112,7 @@ def cnn_only(loaded, tensors, batch_size, precision, repeats, pin=True):
 
 
 def spark_like(prepped, threads, batch_size, precision, legacy=False):
-    """`threads` workers each run predict() on their photos, like the Spark
-    job's photo threads; returns (results in input order, stats)."""
+    """`threads` workers calling predict() like Spark's threads; returns (results, stats)."""
     from scalability.monitor import ResourceMonitor, summarize
     IMAGE_MODEL["batch_size"], IMAGE_MODEL["precision"] = batch_size, precision
     loaded = inference._load_trained_model()

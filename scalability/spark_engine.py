@@ -1,25 +1,8 @@
 """
-The scalability test's own Apache Spark Structured Streaming job.
-
-    Kafka (the TEST topic, SCALABILITY_KAFKA_TOPIC)
-      -> Spark readStream (maxOffsetsPerTrigger = SPARK_MAX_EVENTS_PER_BATCH,
-                           trigger = SPARK_TRIGGER_SECONDS, as the live job)
-      -> Parse JSON + keep only this run's events   (Spark SQL, parse_test_events)
-      -> foreachBatch: dedupe the micro-batch, then preprocessing + CNN for each
-         photo, SCALABILITY_WORKERS at a time (scalability/worker.process_photo,
-         the live pipeline's own functions); the batch commits once every
-         photo in it is done, like spark/streaming_job.foreach_batch_sink
-
-It runs inside the test runner's process (scalability/run.py), in its own
-SparkSession with its own checkpoint folder per run, and is a SEPARATE query
-from the live job: it never reads the production topic, and it never writes
-images, predictions or Drive results. spark/streaming_job.py is not imported
-or changed by this module.
-
-Started and warmed up (JVM, Kafka connection, a first micro-batch carrying
-one warm-up event) BEFORE the test's timer starts, the same way the CNN is
-warmed up: start-up is not image processing. Every later micro-batch's own
-overhead (Kafka read, parse, dedupe, commit) is inside the timer.
+The scalability test's own Spark Structured Streaming query: reads the TEST
+topic with the live job's settings, keeps this run's events, and runs
+preprocessing + CNN for each photo. Separate from the live job; started and
+warmed up before the timer.
 """
 
 import json
@@ -41,17 +24,14 @@ def event_schema():
 
 
 def build_spark():
-    """The test's SparkSession: the live job's settings (spark/session.py),
-    its own application name."""
+    """The test's SparkSession (the live job's settings, its own name)."""
     spark = kafka_session("ImageSystem-ScalabilityTest", console_progress=False)
     spark.sparkContext.setLogLevel("WARN")
     return spark
 
 
 def parse_test_events(raw, run_id: str):
-    """Kafka record value (JSON) -> one row per test photo of THIS run, as
-    Spark SQL transformations: events of other runs and rows without an
-    item_id are dropped here, before foreachBatch sees them."""
+    """Kafka JSON -> one row per photo of THIS run (others dropped)."""
     from pyspark.sql.functions import col, from_json, lit
     return (
         raw.select(from_json(col("value").cast("string"), event_schema()).alias("e"))
@@ -61,9 +41,7 @@ def parse_test_events(raw, run_id: str):
 
 
 def topic_end_offsets(topic: str) -> str:
-    """startingOffsets JSON = the topic's current end, read before anything
-    of this run is published: the query reads exactly this run's events and
-    never earlier runs' leftovers."""
+    """The topic's current end, so the query reads only this run's events."""
     from confluent_kafka import Consumer, TopicPartition
     c = Consumer({"bootstrap.servers": settings.KAFKA_BOOTSTRAP_SERVERS,
                   "group.id": f"{settings.SCALABILITY_CONSUMER_GROUP}-spark-offsets",
@@ -79,11 +57,7 @@ def topic_end_offsets(topic: str) -> str:
 
 
 class SparkTestStream:
-    """One run's streaming query. `handle(item_id, received_at)` processes
-    one photo and returns (item_id, outcome) without raising; `on_done` gets
-    that tuple. The runner's loop reads newly received ids with
-    take_received() and calls raise_if_failed() so a dead query is not
-    mistaken for a slow one."""
+    """One run's streaming query; `handle` processes a photo, `on_done` gets the result."""
 
     def __init__(self, run_id: str, item_ids, handle, on_done, checkpoint_dir, workers: int = None):
         self.run_id = run_id
@@ -114,8 +88,7 @@ class SparkTestStream:
         def one(item_id):
             self._on_done(self._handle(item_id, received_at))
 
-        # the micro-batch (and its Kafka offsets) commits only after every
-        # photo in it is processed, as in the live job
+        # the batch commits only after every photo in it is processed
         with ThreadPoolExecutor(max_workers=min(self._workers, len(ids)), thread_name_prefix="spark-test") as pool:
             list(pool.map(one, ids))
 
@@ -150,8 +123,7 @@ class SparkTestStream:
         )
 
     def _wait_ready(self):
-        """Blocks until the query has finished its first (empty) trigger, so
-        the timer never includes Spark or Kafka start-up."""
+        """Waits for the first (empty) trigger, so start-up isn't timed."""
         deadline = time.monotonic() + START_TIMEOUT_S
         while time.monotonic() < deadline:
             self.raise_if_failed()
@@ -163,11 +135,8 @@ class SparkTestStream:
         raise TimeoutError(f"the scalability Spark query was not ready within {START_TIMEOUT_S} s")
 
     def warm_up(self, send) -> None:
-        """Sends one event of this run that is not a photo (WARM_UP_ID) and
-        waits until a micro-batch has read it: Spark's first job on real data
-        (the Kafka reader, code generation for the parse/filter/dedupe plan)
-        takes several seconds once, and that is start-up, not image
-        processing. The sink sees the event and skips it (not a staged id)."""
+        """Sends one warm-up event and waits until Spark has read it (Spark's
+        first real batch is slow once; that is start-up, not processing)."""
         before = self.batches
         failures = send([{"run_id": self.run_id, "item_id": WARM_UP_ID}])
         if failures:

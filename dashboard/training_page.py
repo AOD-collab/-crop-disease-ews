@@ -1,27 +1,8 @@
 """
-"Model training" page of the ADMIN dashboard (dashboard/app.py).
-
-Training does NOT happen in this project. It runs in the separate
-crop_disease_ews training project (its own venv with CUDA torch, its
-dataset and train.py) on this same laptop. This page only:
-
-  * starts `train.py` there as a detached background process (so a
-    Streamlit rerun, a closed browser tab or a dashboard restart doesn't
-    kill a 10-minute GPU run), and remembers which run it started in
-    storage/model_training/run.json;
-  * shows live progress by reading that run's log file;
-  * shows the training project's test results when it finishes;
-  * deploys the best checkpoint into ml/trained_model/saved_model_cnn.pt
-    in the format ml/inference.py reads (architecture "se_resnet18"),
-    after backing up the model in use — automatically when a run finishes,
-    but only if it scores better than the model in use (a new run can be
-    worse; dashboard/model_ops.py train_and_deploy), or by hand with the
-    Deploy button. ml/inference.py reloads the file when it changes, so
-    Spark uses the new model without a restart.
-
-Where the training project lives (.env):
-    TRAINING_PROJECT_DIR   default C:\\Users\\user\\OneDrive\\Pictures\\crop_disease_ews
-    TRAINING_PYTHON        default <TRAINING_PROJECT_DIR>\\crop_classifier_env\\Scripts\\python.exe
+"Model training" page. Training runs in the separate training project
+(TRAINING_PROJECT_DIR, TRAINING_PYTHON in .env) as a background process.
+This page starts it, shows progress and test results, and deploys the best
+model (automatically when it beats the current one, or with Deploy).
 """
 
 import json
@@ -78,9 +59,7 @@ def _write_run(run: dict) -> None:
 
 
 def _process(run: dict | None):
-    """The live psutil.Process of `run`, or None. Matches on create_time too,
-    so a recycled PID belonging to some other program is never mistaken for
-    (or killed as) the training run."""
+    """The running training process, or None (create_time check: a reused PID is never it)."""
     if not run or run.get("pid", 0) <= 0:
         return None
     import psutil
@@ -94,8 +73,7 @@ def _process(run: dict | None):
 
 
 def _start_training(resume: bool) -> str | None:
-    """Launch train.py in the training project. Returns an error message,
-    or None on success."""
+    """Starts train.py; returns an error message, or None."""
     if _process(_read_run()):
         return "A training run is already in progress."
     if not TRAINING_PYTHON.exists():
@@ -109,8 +87,7 @@ def _start_training(resume: bool) -> str | None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     started = datetime.now()
     log_path = LOG_DIR / f"train_{started:%Y%m%d_%H%M%S}.log"
-    # dashboard.model_ops runs train.py and, when it finishes, deploys the
-    # best checkpoint if it beats the model in use (see train_and_deploy).
+    # model_ops runs train.py, then deploys the result if it beats the current model
     cfg = {"python": str(TRAINING_PYTHON), "script": str(TRAIN_SCRIPT), "cwd": str(TRAINING_DIR),
            "resume": resume, "log": str(log_path), "best": str(BEST_CHECKPOINT),
            "deployed": str(DEPLOYED_MODEL), "backup_dir": str(BACKUP_DIR)}
@@ -197,9 +174,7 @@ def _run_outcome(run: dict, parsed: dict) -> tuple[str, str]:
 # Models: what's deployed, what training produced, deploy / restore
 # ------------------------------------------------------------------
 def _model_ops(*args: str) -> dict:
-    """Run dashboard/model_ops.py in its own process — torch can't be
-    imported into the dashboard process once pandas/pyarrow are loaded
-    (see that module's docstring)."""
+    """Runs dashboard/model_ops.py in its own process (torch can't load after pyarrow)."""
     result = subprocess.run([sys.executable, "-m", "dashboard.model_ops", *args], cwd=BASE_DIR,
                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=300)
     if result.returncode != 0:
@@ -209,8 +184,7 @@ def _model_ops(*args: str) -> dict:
 
 @st.cache_data(show_spinner=False)
 def _checkpoint_info(path: str, mtime: float) -> dict:
-    """Everything in a checkpoint except the weights. `mtime` is only part
-    of the cache key, so a replaced file is re-read."""
+    """A checkpoint's details (not the weights); `mtime` refreshes the cache."""
     return _model_ops("info", path)
 
 
@@ -224,10 +198,7 @@ def _info(path: Path) -> dict | None:
 
 
 def _deploy_best(test_metrics: dict) -> str:
-    """Export the training project's best checkpoint into the format
-    ml/inference.py loads, check that it loads and runs, back up the model in
-    use, then swap the new file in (dashboard/model_ops.py deploy). Returns
-    the backup path ("" if there was no model to back up)."""
+    """Deploys the best checkpoint (model_ops deploy); returns the backup path or ""."""
     extra = {"test_metrics": test_metrics or None,
              "deployed_by": st.session_state.get("admin_user", {}).get("username")}
     result = _model_ops("deploy", str(BEST_CHECKPOINT), str(DEPLOYED_MODEL), str(BACKUP_DIR), json.dumps(extra))
@@ -447,8 +418,7 @@ def _deploy_section(running: bool, test_metrics: dict):
 # ------------------------------------------------------------------
 @st.fragment(run_every=5)
 def _live_status():
-    """Re-runs on its own every 5 s; triggers a full page rerun when a run
-    starts or ends so the start form and deploy section follow."""
+    """Refreshes every 5 s; reruns the page when a run starts or ends."""
     run = _read_run()
     running = _process(run) is not None
     if st.session_state.get("_training_running") is not None and st.session_state["_training_running"] != running:

@@ -1,13 +1,6 @@
 """
-The image-processing mode (AUTOMATIC / MANUAL), kept in a small JSON file
-so the Drive watcher can read it without a database connection.
-
-    AUTOMATIC  the Drive watcher publishes every new upload to Kafka at once
-    MANUAL     the watcher publishes nothing; the dashboard's Pending Review
-               page lists the Drive photos that have no database row yet and
-               the administrator sends them with "Process"
-
-The dashboard writes the file, the watcher reads it on every check.
+AUTOMATIC / MANUAL processing mode, kept in a JSON file so the Drive watcher
+can read it without a database. MANUAL: photos wait on Pending Review.
 """
 
 import enum
@@ -21,10 +14,9 @@ MODE_FILE = Path(os.getenv("PROCESSING_MODE_FILE", str(BASE_DIR / "storage" / "p
 
 
 class ProcessingMode(str, enum.Enum):
-    # AUTOMATIC: an upload is published to Kafka the moment the watcher sees
-    # it and Spark processes it immediately.
+    # every upload is processed at once
     AUTOMATIC = "AUTOMATIC"
-    # MANUAL: nothing is published until an admin clicks "Process".
+    # nothing is processed until an admin clicks "Process"
     MANUAL = "MANUAL"
 
 
@@ -37,9 +29,7 @@ def get_processing_mode() -> ProcessingMode:
 
 
 def set_processing_mode(mode) -> ProcessingMode:
-    """Persist the mode (a ProcessingMode or its string value; ValueError for
-    anything else). Written to a temp file and renamed, so a reader never
-    sees half a file."""
+    """Saves the mode (temp file + rename, so a reader never sees half a file)."""
     mode = ProcessingMode(mode)
     MODE_FILE.parent.mkdir(parents=True, exist_ok=True)
     tmp = MODE_FILE.with_name(MODE_FILE.name + ".tmp")

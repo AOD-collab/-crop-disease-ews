@@ -1,11 +1,6 @@
-﻿"""
-The administrator's image catalog: PostgreSQL is the source of truth for
-every farmer image's metadata, prediction, processing status and review
-decision. Everything here reads the view v_admin_image_catalog
-(storage/database._create_admin_catalog_view) through SQLAlchemy Core, so
-every filter value is a bound parameter â€” no SQL is built from user input.
-
-Scalability-test images are not in the view, so they never appear here.
+"""
+The admin image catalog: reads the view v_admin_image_catalog with bound
+parameters only (no SQL built from user input). Test images aren't in it.
 """
 
 from dataclasses import dataclass, field
@@ -90,8 +85,7 @@ def _conditions(f: CatalogFilters) -> list:
 
 
 def _in_or_none(column, values, none_choice: str, none_column):
-    """column IN values — and, when `none_choice` ("no prediction" / "no
-    risk") is among them, rows whose none_column IS NULL too."""
+    """column IN values, plus NULL rows when `none_choice` is picked."""
     real = [x for x in values if x != none_choice]
     parts = [column.in_(real)] if real else []
     if none_choice in values:
@@ -109,8 +103,7 @@ def _rows(stmt) -> list[dict]:
 
 
 def query(filters: CatalogFilters | None = None, limit: int | None = None, offset: int = 0) -> list[dict]:
-    """Matching images, newest upload first; image_id breaks ties so the
-    order is the same on every page load."""
+    """Matching images, newest upload first (stable order)."""
     filters = filters or CatalogFilters()
     stmt = (select(catalog).where(and_(true(), *_conditions(filters)))
             .order_by(catalog.c.uploaded_at.desc(), catalog.c.image_id))
@@ -132,8 +125,7 @@ def get(image_id: str) -> dict | None:
 
 
 def same_content(image_id: str, content_hash: str | None) -> list[dict]:
-    """Other farmer images with identical bytes (same SHA-256): the same
-    photo uploaded again, possibly by another farmer. Reported, never merged."""
+    """Other farmer images with the same SHA-256. Reported, never merged."""
     if not content_hash:
         return []
     return _rows(select(catalog.c.image_id, catalog.c.user_id, catalog.c.farmer_email, catalog.c.uploaded_at,
@@ -175,8 +167,7 @@ def options() -> dict:
 
 
 def all_ids() -> dict:
-    """{image_id: (user_id, content_hash, status)} for every farmer image â€”
-    what the cache reconciliation compares the files against."""
+    """{image_id: (user_id, content_hash, status)} for every farmer image."""
     c = catalog.c
     return {r["image_id"]: (r["user_id"], r["content_hash"], getattr(r["status"], "value", r["status"]))
             for r in _rows(select(c.image_id, c.user_id, c.content_hash, c.status))}

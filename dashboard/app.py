@@ -1,13 +1,7 @@
 """
-ADMIN Web Dashboard (Streamlit) — DIT manual sections 27-31, 47.
+Admin dashboard (Streamlit). Admin login required.
 
-This is the ADMIN application. It reads the database directly and the
-central Google Drive through storage/drive_client.py (it's a trusted,
-server-side admin tool; the farmers' Android app talks only to Google
-Drive) and requires an ADMIN login before showing anything.
-
-Run from the project root:
-    streamlit run dashboard/app.py
+Run: streamlit run dashboard/app.py
 """
 
 import re
@@ -49,32 +43,23 @@ st.set_page_config(page_title="Crop Disease EWS — Admin Dashboard", layout="wi
 
 
 # ------------------------------------------------------------------
-# Shared color language (mirrors android_app's colors.xml so the admin
-# dashboard and the mobile app read as one system, not two). Status colors
-# are reserved for verdicts — never reused for an arbitrary chart series.
-# The maize brand colours (green + yellow) live in .streamlit/config.toml
-# and the CSS in _inject_style() below.
-# ------------------------------------------------------------------
+# colours match the Android app; status colours are only for verdicts
 COLOR_GOOD = "#0CA30C"        # healthy / LOW risk
 COLOR_WARNING = "#FAB219"     # MEDIUM risk
 COLOR_CRITICAL = "#D03B3B"    # HIGH risk / diseased
 
 RISK_COLOR_MAP = {"LOW": COLOR_GOOD, "MEDIUM": COLOR_WARNING, "HIGH": COLOR_CRITICAL}
-# Disease / status colours are shared with the other dashboard pages.
 from dashboard.theme import (STATUS_BADGE_COLOR, CATEGORICAL_HUES, DISEASE_COLOR_MAP,  # noqa: E402
                              disease_colors, high_risk_table, metric_row)
 import importlib  # noqa: E402
 
 
-# The app's own logo (set with scripts/set_app_logo.py), reused here so the
-# dashboard and the Android app look like one product.
+# the app's logo, so dashboard and app look like one product
 _LOGO = PROJECT_ROOT / "android_app" / "app" / "src" / "main" / "res" / "drawable" / "app_logo.png"
 
 
 def _inject_style():
-    """Green + yellow maize theme. The sidebar is the one bold element (dark
-    leaf green, menu as buttons, the open page in corn yellow); the rest
-    stays quiet. Colours: see COLOR_* above."""
+    """Green + yellow maize theme; the sidebar is the one bold element."""
     st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700&display=swap');
@@ -127,7 +112,7 @@ h2, h3 { font-family: 'Bricolage Grotesque', system-ui, sans-serif; }
 
 
 # ------------------------------------------------------------------
-# Login gate — ADMIN only (section 27: the web dashboard is the ADMIN app)
+# Login (ADMIN only)
 # ------------------------------------------------------------------
 def login_screen():
     _, mid, _ = st.columns([1, 1.2, 1])
@@ -165,9 +150,7 @@ def _login_form():
 _inject_style()
 
 def _admin_still_allowed(user_id: str) -> bool:
-    """Re-checked on every page load: an admin deleted, deactivated or
-    demoted after signing in loses the open dashboard session too (the
-    login form alone used to be the only check)."""
+    """Checked on every page load: a deleted, inactive or demoted admin is signed out."""
     with SessionLocal() as s:
         user = s.get(User, user_id)
         return (user is not None and not user.is_deleted
@@ -193,9 +176,7 @@ with st.sidebar:
                 unsafe_allow_html=True)
     st.divider()
 
-# Menu as buttons. The page names below are what every `elif page == "..."`
-# compares against; each has its menu icon, its title (the menu label too)
-# and one line under the title.
+# menu: page name -> (icon, title, one line under the title)
 _PAGES = {
     "Overview": ("📊", "Overview", "How many leaves were checked, what was found, and what is still waiting."),
     "Real-Time Monitoring": ("🕒", "Recent submissions", "The latest results, as soon as Spark finishes each photo."),
@@ -215,7 +196,7 @@ _PAGES = {
                                                    "CNN and measure how fast the pipeline is."),
     "Maintenance": ("🛠️", "System settings", "Reset the dashboard's history."),
 }
-# Pages that live in a module of their own (dashboard/<module>.py, render()).
+# pages with a module of their own (dashboard/<module>.py, render())
 _MODULE_PAGES = {"Images": "image_management_page", "Label Photos": "labelling_page",
                  "Model Training": "training_page", "Scalability Test": "scalability_page"}
 if st.session_state.get("page") not in _PAGES:
@@ -230,14 +211,11 @@ page = st.session_state["page"]
 
 
 # ------------------------------------------------------------------
-# Image-processing mode switch (AUTOMATIC / MANUAL). Kept in
-# storage/processing_mode.json, which the Drive watcher reads (it has no
-# database). In MANUAL the watcher publishes nothing: the photos wait in
-# Drive and Pending Review lists the ones with no database row yet.
+# AUTOMATIC / MANUAL mode (storage/processing_mode.json). MANUAL: photos wait
+# in Drive and Pending Review lists them.
 # ------------------------------------------------------------------
 def _switch_to_automatic_and_drain():
-    """Switch to AUTOMATIC and immediately send every photo still waiting
-    in Drive — same as clicking 'Process all'. Returns (released, failed)."""
+    """Switches to AUTOMATIC and sends every photo still waiting. Returns (released, failed)."""
     set_processing_mode(ProcessingMode.AUTOMATIC)
     with SessionLocal() as s:
         waiting = drive_inventory.unprocessed_photos(s)
@@ -248,10 +226,8 @@ def _switch_to_automatic_and_drain():
 
 @st.cache_data(ttl=60, show_spinner="Checking Google Drive…")
 def _pending_drive_photos() -> list:
-    """[(Drive metadata, folder email)] of the farmer photos in Drive that
-    Spark hasn't registered yet (storage/drive_inventory.py), or [] when
-    Drive isn't reachable. Cached for a minute: it lists every farmer folder
-    (~7 s for 650 photos); Process and the mode switch clear it."""
+    """Farmer photos in Drive Spark hasn't registered yet ([] if Drive is
+    unreachable). Cached for a minute (listing takes seconds)."""
     if not drive_client.is_configured():
         return []
     try:
@@ -291,32 +267,27 @@ if st.sidebar.button("Log out", icon="🚪", key="logout"):
     del st.session_state["admin_user"]
     st.rerun()
 
-# DASHBOARD_REFRESH_SECONDS (.env): how often Real-Time Monitoring reloads
-# itself and Pending Review checks for new uploads; 0 turns auto-refresh off.
+# auto-refresh interval for Real-Time Monitoring and Pending Review (0 = off)
 import os
 _REFRESH_SECONDS = int(os.getenv("DASHBOARD_REFRESH_SECONDS", "10") or 0)
 auto_refresh = page == "Real-Time Monitoring" and _REFRESH_SECONDS > 0
 if auto_refresh:
     st.sidebar.caption(f"Real-Time Monitoring auto-refreshes every {_REFRESH_SECONDS}s.")
 
-# One clear title + one line per page, instead of the same long title everywhere.
 _, _title, _subtitle = _PAGES[page]
 st.markdown(f'<div class="ews-page-head"><h1>{_title}</h1><p>{_subtitle}</p></div>', unsafe_allow_html=True)
 
 
 
 # ------------------------------------------------------------------
-# Google Drive helpers (Farmer Management, Images gallery). Cached so
-# pages stay fast; nothing is saved to disk — images are fetched from
-# Drive only to be shown.
+# Google Drive helpers (cached; nothing saved to disk)
 # ------------------------------------------------------------------
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 @st.cache_data(ttl=60, show_spinner=False)
 def _farmer_folder_emails():
-    """Emails that have a private images/<email> folder in Drive, or None if
-    Drive isn't reachable."""
+    """Emails with an images/<email> folder in Drive, or None if unreachable."""
     if not drive_client.is_configured():
         return None
     try:
@@ -349,8 +320,7 @@ def _processed_file_id(image_id: str, email: str):
 
 
 def _original_image(image_path: str, user_id=None, image_id=None):
-    """The original photo for st.image(): the saved local copy of a Drive
-    photo when there is one (same bytes, no download), else Drive (cached)."""
+    """The original photo: the local copy if there is one, else from Drive (cached)."""
     try:
         if is_drive_path(image_path):
             local = downloaded_photo_path(user_id, image_id)
@@ -467,12 +437,12 @@ def _system_status() -> dict:
             stuck = (s_.query(Image)
                      .filter(Image.status.in_([ProcessingStatus.INGESTED, ProcessingStatus.PROCESSING]),
                              Image.uploaded_at < cutoff, Image.source != SCALE_TEST_SOURCE).count())
-            # photos in Drive not sent for processing yet (MANUAL mode, or a lost event)
+            # photos in Drive not sent for processing yet
             pending = len(_pending_drive_photos())
             failed = (s_.query(Image).filter(Image.status == ProcessingStatus.FAILED,
                                              Image.uploaded_at >= now_utc() - timedelta(hours=24)).count())
             undelivered = count_owed(s_)["undelivered"]
-            # Kafka events too broken to name a photo (spark/streaming_job.parse_events)
+            # Kafka events too broken to name a photo
             rejected = (s_.query(RejectedEvent)
                         .filter(RejectedEvent.created_at >= now_utc() - timedelta(hours=24)).count())
         lines = [f"{stuck} photo(s) waiting longer than 2 minutes",
@@ -490,15 +460,10 @@ def _system_status() -> dict:
     return out
 
 
-# Only the pages below use the full images x predictions table; the others
-# no longer load it on every rerun.
+# only these pages need the full images x predictions table
 df = analytics_reader.images_with_predictions() if page in ("Real-Time Monitoring", "Risk Alerts", "Analytics") else None
 
 if page == "Overview":
-    # Real numbers only, computed by Spark (spark/batch_analytics.py). The
-    # mockup this page's layout follows also shows "Active Remote Devices" —
-    # this system has no device registry, so that metric isn't something we
-    # can honestly report; it's left out rather than faked.
     kpi = analytics_reader.kpi_summary()
     dist = analytics_reader.disease_distribution()
 
@@ -509,10 +474,6 @@ if page == "Overview":
                    ("Most Detected Disease", kpi["most_detected_disease"] or "—"))
         st.caption(f"{kpi['total_users']} total farmers · {kpi['total_images']} total submissions all-time")
 
-        # Explicit healthy/diseased/uncertain/unclassified breakdown so
-        # "unclassified" (not yet processed, or failed) is a labeled bucket
-        # instead of a silent gap where healthy+diseased looked like "0 and 0"
-        # with no explanation.
         metric_row(("Healthy", kpi["total_healthy"]), ("Diseased", kpi["total_diseased"]),
                    ("Uncertain (low confidence)", kpi["total_uncertain"]), ("Unclassified", kpi["total_unclassified"]))
         if kpi["total_unclassified"] and kpi["total_images"]:
@@ -526,9 +487,6 @@ if page == "Overview":
     if dist.empty:
         st.caption("No disease breakdown yet.")
     else:
-        # "Healthy" is a verdict (status color), every other class is an
-        # open-ended identity (fixed categorical order) — never mix the
-        # two into one arbitrary cycling palette.
         st.plotly_chart(
             px.pie(dist, names="predicted_class", values="count", hole=0.55,
                    color="predicted_class", color_discrete_map=disease_colors(dist["predicted_class"])),
@@ -577,7 +535,6 @@ if page == "Overview":
                     with st.expander("View details"):
                         st.write({
                             "image_id": img.image_id, "location": img.location,
-                            # stored UTC, shown in Timor-Leste Time (config/localtime.py)
                             "uploaded_at": format_local(img.uploaded_at),
                             "captured_at": format_local(img.captured_at) or None,
                             "gps": (f"{img.gps_latitude}, {img.gps_longitude}"
@@ -592,11 +549,7 @@ if page == "Overview":
                                 "risk_score": pred.risk_score,
                             },
                         })
-                    # Only offer "Reprocess" where it actually means
-                    # something — there's no "Flag for Review" feature in
-                    # this system, so that mockup action isn't reproduced.
-                    # Not for an upload Spark's ingestion step refused (inactive
-                    # account, someone else's folder, ...): that stays refused.
+                    # Reprocess, except for an upload refused at registration
                     if img.status == ProcessingStatus.FAILED and not is_upload_rejected(img):
                         if st.button("Reprocess", icon="🔄", key=f"reprocess_{img.image_id}"):
                             try:
@@ -627,7 +580,7 @@ elif page == "Pending Review":
         "automatic mode sends — and Spark registers and analyses it."
     )
 
-    # Sent from this page and not registered by Spark yet: hidden until then.
+    # sent from this page but not registered yet: hidden
     sent = st.session_state.setdefault("_sent_pending", set())
 
     def _waiting() -> list:
@@ -643,9 +596,7 @@ elif page == "Pending Review":
         _pending_drive_photos.clear()
         return result
 
-    # Auto refresh: a cheap check every _REFRESH_SECONDS; the whole page (with
-    # its photos) is only redrawn when the waiting list changed — new uploads
-    # arrived, or photos were processed elsewhere.
+    # cheap check every _REFRESH_SECONDS; redraw only when the list changed
     if _REFRESH_SECONDS > 0:
         @st.fragment(run_every=_REFRESH_SECONDS)
         def _watch_waiting(shown: list):
@@ -684,7 +635,6 @@ elif page == "Pending Review":
                         f"{props.get('location') or 'no location'} · {folder_email or 'unknown farmer'} · "
                         f"uploaded {format_local(uploaded) if uploaded else '?'}"
                     )
-                    # Drive's small preview (fetched once, cached)
                     photo = _drive_thumbnail(meta["id"])
                     if photo is not None:
                         st.image(photo, width=180)
@@ -871,8 +821,6 @@ elif page == "Users":
                         st.rerun()
 
 elif page in _MODULE_PAGES:
-    # Pages with a module of their own; Image management (PostgreSQL catalog
-    # + local cache + Google Drive) also shows the marked-up result image.
     importlib.import_module(f"dashboard.{_MODULE_PAGES[page]}").render(
         **({"processed_image": _processed_image} if page == "Images" else {}))
 
@@ -915,7 +863,6 @@ elif page == "Risk Alerts":
                 )
 
 elif page == "Analytics":
-    # The colour settings every disease bar chart shares.
     disease_bars = dict(color="predicted_class", color_discrete_map=DISEASE_COLOR_MAP,
                         color_discrete_sequence=CATEGORICAL_HUES)
     dist = analytics_reader.disease_distribution()
@@ -932,8 +879,7 @@ elif page == "Analytics":
                 ].sort_values("predicted_at", ascending=False),
                 width="stretch", column_config=TIME_COLUMNS,
             )
-    # Disease trend in every municipality (replaced the risk-score trend):
-    # photos per disease per day, one panel per municipality.
+    # photos per disease per day, one panel per municipality
     rt = analytics_reader.disease_trend_by_location()
     if not rt.empty:
         st.subheader("📈 Disease Trend by Municipality")
@@ -1051,7 +997,7 @@ elif page == "Maintenance":
         with st.spinner("Wiping data and history…"):
             summary = factory_reset(clear_kafka=also_kafka, clear_drive=also_drive,
                                     performed_by=st.session_state["admin_user"]["username"])
-        # Shown after the rerun below (which reloads the emptied dashboard).
+        # shown after the rerun
         st.session_state["reset_summary"] = summary
         st.rerun()
     if "reset_summary" in st.session_state:

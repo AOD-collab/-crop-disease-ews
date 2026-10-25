@@ -1,50 +1,10 @@
 """
-The CNN: loads the trained model and classifies a photo that Spark has
-already prepared. It does no image preprocessing of its own.
+The CNN: loads the trained model and classifies a photo Spark already
+prepared (spark/preprocessing.model_input). No preprocessing here.
 
-Spark (spark/preprocessing.model_input) turns a photo into the model's
-input: decode, resize, centre img_size x img_size crop, normalise with
-mean/std. The values it needs come from the checkpoint, through
-input_spec(). predict() and
-disease_heatmap() take that prepared (3, img_size, img_size) array. Every
-result comes from the trained CNN checkpoint at IMAGE_MODEL["weights_path"];
-there is no pixel-math fallback. A missing checkpoint raises
-ModelNotAvailable.
-
---------------------------------------------------------------------------
-TO GO LIVE WITH A NEWLY TRAINED MODEL:
-  Train it in the crop_disease_ews training project (TRAINING_PROJECT_DIR)
-  from the dashboard's Model training page. When it beats the model in
-  use, it is copied to ml/trained_model/saved_model_cnn.pt (or deploy it
-  by hand there), and this module reloads the file by itself.
-
---------------------------------------------------------------------------
-_CHECKPOINT_FORMAT (what the Model training page deploys, and what
-`_load_trained_model()` below reads):
-
-    torch.save({
-        "state_dict": model.state_dict(),
-        "architecture": "resnet18",          # currently the only one supported here
-        "class_names": ["healthy", "common_rust", "gray_leaf_spot", "northern_leaf_blight"],
-        "healthy_class_name": "healthy",     # which entry in class_names means "not diseased"
-        "img_size": 224,
-        "mean": [0.485, 0.456, 0.406],
-        "std": [0.229, 0.224, 0.225],
-    }, "saved_model_cnn.pt")
-
-What predict() returns, all from the model's class probabilities:
-
-    model_confidence          = probability of the predicted (top) class
-    lesion_score               = 1 - P(healthy class)   (i.e. P(any disease))
-    discoloration_pct,
-    texture_irregularity,
-    leaf_area_affected_pct     = None. They used to be pixel math, not the
-                                  model; the database columns stay for old
-                                  rows.
-    predicted_class,
-    predicted_class_confidence = the actual disease name + confidence,
-                                  passed through untouched for the
-                                  dashboard/API to show farmers directly.
+A newly deployed model file (ml/trained_model/saved_model_cnn.pt) is picked
+up automatically. predict() returns predicted_class, its confidence,
+lesion_score (= 1 - P(healthy)) and is_uncertain.
 """
 
 import os
@@ -53,9 +13,7 @@ from pathlib import Path
 
 from config.settings import IMAGE_MODEL
 
-# predicted_class used when the model's top-class confidence falls below
-# IMAGE_MODEL["confidence_threshold"] — an explicit "we don't know" signal
-# instead of confidently naming a disease off a weak read.
+# the class reported when the confidence is below IMAGE_MODEL["confidence_threshold"]
 UNCERTAIN_CLASS = "uncertain"
 
 
@@ -68,12 +26,7 @@ _model_cache_lock = threading.Lock()
 
 
 def _load_trained_model():
-    """The loaded checkpoint, cached per process and reloaded automatically
-    when the file at IMAGE_MODEL["weights_path"] is replaced (a deploy or
-    restore from the dashboard's Model training page swaps it with
-    os.replace) — so Spark switches to a newly deployed model on its
-    next prediction, without a restart. Returns a dict with the torch
-    model + preprocessing metadata; raises ModelNotAvailable without one."""
+    """The loaded model, cached; reloaded when the model file changes."""
     weights_path = IMAGE_MODEL["weights_path"]
     try:
         st = os.stat(weights_path)
@@ -96,10 +49,7 @@ _load_trained_model.cache_clear = _cache_clear
 
 
 def _pick_device(torch):
-    """IMAGE_MODEL["device"]: "auto" (default) uses the NVIDIA GPU when this
-    Python's PyTorch is a CUDA build and sees one, else the CPU; "cuda" or
-    "cpu" forces it (a forced "cuda" without a usable GPU falls back to CPU
-    with a warning rather than failing every prediction)."""
+    """GPU when available (IMAGE_MODEL["device"] = auto/cuda), else CPU."""
     wanted = IMAGE_MODEL.get("device", "auto")
     if wanted in ("auto", "cuda") and torch.cuda.is_available():
         return torch.device("cuda")
@@ -132,8 +82,6 @@ def _load_checkpoint(weights_path: str):
         model = models.resnet18(weights=None)
         model.fc = torch.nn.Linear(model.fc.in_features, len(class_names))
     elif architecture == "se_resnet18":
-        # Exported from the crop_disease_ews training project by the
-        # dashboard's Model training page (dashboard/training_page.py).
         from ml.se_resnet import SEResNet18
         model = SEResNet18(num_classes=len(class_names))
     else:
@@ -147,14 +95,10 @@ def _load_checkpoint(weights_path: str):
     model.to(device).eval()
     threads = int(IMAGE_MODEL.get("torch_threads", 0) or 0)
     if threads > 0 and device.type == "cuda":
-        # Only CPU-side tensor work uses these threads when the CNN is on
-        # the GPU; with Spark's photo threads on top, the default (one per
-        # core, in every thread) oversubscribes the CPU. Elementwise ops give
-        # the same numbers with any thread count.
+        # fewer CPU threads: Spark already runs several photos at once
         torch.set_num_threads(threads)
 
-    # The model's input contract (input_spec): Spark prepares every photo
-    # with these values, as the training project did.
+    # the input the model expects (input_spec)
     img_size = int(checkpoint.get("img_size", 224))
     mean = [float(v) for v in checkpoint.get("mean", [0.485, 0.456, 0.406])]
     std = [float(v) for v in checkpoint.get("std", [0.229, 0.224, 0.225])]
@@ -170,8 +114,7 @@ def _load_checkpoint(weights_path: str):
     print(f"[ml.inference] Loaded trained model from '{weights_path}' "
           f"(classes: {class_names}) on {_device_name(torch, device)}")
 
-    # Which deploy this is: a deploy keeps the same file name, so the name
-    # alone can't tell two models apart in predictions.model_version.
+    # the deploy time tells two models with the same file name apart
     deployed = checkpoint.get("deployed_at") or checkpoint.get("source_modified_at")
     if not deployed:
         from datetime import datetime
@@ -187,21 +130,13 @@ def _load_checkpoint(weights_path: str):
     }
 
 
-# ---------------------------------------------------------------------------
-# Input contract — what Spark must hand the model
-# ---------------------------------------------------------------------------
 def input_spec() -> dict:
-    """{"img_size", "mean", "std"} of the deployed checkpoint: the input the
-    model was trained on. spark/preprocessing.model_input prepares every
-    photo with these, so a retrained model with other values is followed
-    without code changes. Raises ModelNotAvailable without a checkpoint."""
+    """{"img_size", "mean", "std"} the deployed model expects."""
     return dict(_load_trained_model()["input_spec"])
 
 
 def _as_input(loaded, model_input):
-    """The prepared photo as a float32 CHW tensor on the CPU, after checking
-    it has the shape the model expects — wrongly prepared input is refused,
-    never classified."""
+    """The prepared photo as a tensor; refuses the wrong shape."""
     import torch
     tensor = torch.as_tensor(model_input, dtype=torch.float32)
     size = loaded["input_spec"]["img_size"]
@@ -211,20 +146,14 @@ def _as_input(loaded, model_input):
     return tensor
 
 
-# ---------------------------------------------------------------------------
-# Forward pass (GPU/CPU) — one implementation, used one-by-one or batched
-# ---------------------------------------------------------------------------
 def _precision(loaded) -> str:
-    """"fp16" only on a CUDA device and when IMAGE_MODEL["precision"] asks
-    for it; FP32 everywhere else (the default, and the fallback)."""
+    """"fp16" only on a GPU when configured, else "fp32"."""
     wanted = str(IMAGE_MODEL.get("precision", "fp32")).lower()
     return "fp16" if wanted == "fp16" and loaded["device"].type == "cuda" else "fp32"
 
 
 def _forward(loaded, batch, precision: str = None, pin_memory: bool = None):
-    """Class probabilities (float32, on the CPU) for a stacked NCHW batch.
-    inference_mode: no autograd bookkeeping. FP16 runs under autocast with
-    the unchanged FP32 weights; softmax is always computed in FP32."""
+    """Class probabilities for a batch (softmax always in FP32)."""
     import torch
     precision = precision or _precision(loaded)
     pin_memory = IMAGE_MODEL.get("pin_memory", True) if pin_memory is None else pin_memory
@@ -241,9 +170,7 @@ def _forward(loaded, batch, precision: str = None, pin_memory: bool = None):
 
 
 def _forward_safely(loaded, tensors: list, precision: str = None) -> list:
-    """_forward over a list of CHW tensors, splitting the batch in halves on
-    a CUDA out-of-memory error (down to one photo; then the error is raised).
-    Returns one probability vector per input, in input order."""
+    """_forward, halving the batch on a GPU out-of-memory error."""
     import torch
     try:
         probs = _forward(loaded, torch.stack(tensors), precision)
@@ -257,17 +184,8 @@ def _forward_safely(loaded, tensors: list, precision: str = None) -> list:
         return _forward_safely(loaded, tensors[:half], precision) + _forward_safely(loaded, tensors[half:], precision)
 
 
-# ---------------------------------------------------------------------------
-# GPU batcher — one thread owns the GPU forward pass
-# ---------------------------------------------------------------------------
-# Spark runs SPARK_PARALLEL_PHOTOS photos at once in threads. Each of them
-# calling the model itself means up to 8 batch-of-1 forward passes fighting
-# over one GPU (and the GIL): measured 128 ms per forward with 8 threads vs
-# 18 ms alone. With IMAGE_MODEL["batch_size"] > 1, threads instead hand their
-# prepared tensor to this worker, which stacks whatever is waiting (up to
-# batch_size, waiting at most batch_wait_ms for more) into ONE forward pass
-# and gives each caller back its own row — so every photo still gets exactly
-# its own prediction.
+# One thread runs the GPU: photos from Spark's threads are stacked into one
+# batch (faster than many small passes); each photo still gets its own result.
 class _GpuBatcher:
     def __init__(self, loaded, max_batch: int, wait_ms: float):
         import queue
@@ -310,8 +228,7 @@ _batcher_lock = threading.Lock()
 
 
 def _batcher_note_oom(loaded, size: int) -> None:
-    """After an out-of-memory error, later batches are kept below the size
-    that failed (logged once per reduction)."""
+    """After an out-of-memory error, keeps later batches smaller."""
     with _batcher_lock:
         b = loaded.get("batcher")
         if b is not None and b.max_batch >= size:
@@ -321,8 +238,7 @@ def _batcher_note_oom(loaded, size: int) -> None:
 
 
 def _batcher(loaded):
-    """The batcher for this loaded model, or None when batching is off
-    (IMAGE_MODEL["batch_size"] <= 1). A redeployed model gets a new one."""
+    """The batcher for this model, or None when batching is off."""
     size = int(IMAGE_MODEL.get("batch_size", 1) or 1)
     if size <= 1:
         return None
@@ -333,9 +249,7 @@ def _batcher(loaded):
 
 
 def _probabilities(loaded, model_input, timings: dict = None):
-    """(probability vector, batch size it ran in) for one prepared photo.
-    `timings`, when given, gets input_s (checking and wrapping the prepared
-    input) and forward_s (waiting for and running the forward pass)."""
+    """(probabilities, batch size) for one photo; fills timings if given."""
     import time
     t0 = time.perf_counter()
     tensor = _as_input(loaded, model_input)
@@ -351,10 +265,7 @@ def _probabilities(loaded, model_input, timings: dict = None):
 
 
 def predict(model_input) -> dict:
-    """The trained CNN's result for one photo, given the input Spark
-    prepared for it (spark/preprocessing.model_input) — see the module
-    docstring for the keys. Raises ModelNotAvailable when there is no
-    checkpoint, ValueError when the input doesn't have the model's shape."""
+    """Classifies one prepared photo."""
     loaded = _load_trained_model()
     timings = {}
     probs, batch_size = _probabilities(loaded, model_input, timings)
@@ -364,8 +275,7 @@ def predict(model_input) -> dict:
 
 
 def _result_from_probs(loaded, probs) -> dict:
-    """The prediction dict for one photo's class probabilities (unchanged
-    rules: top class, P(healthy) -> lesion_score, confidence threshold)."""
+    """Probabilities -> class, confidence, lesion_score, is_uncertain."""
     import torch
     class_names = loaded["class_names"]
     healthy_class_name = loaded["healthy_class_name"]
@@ -380,10 +290,7 @@ def _result_from_probs(loaded, probs) -> dict:
         p_healthy = float(probs[top_idx]) if predicted_class == healthy_class_name else 0.0
     lesion_score = round(max(0.0, min(1.0, 1.0 - p_healthy)), 3)
 
-    # Below the configured confidence threshold, don't confidently name a
-    # disease off a weak softmax read — report "uncertain" instead and flag
-    # it so compute_risk() (spark/preprocessing.py) keeps the risk level
-    # from escalating to an alert-worthy HIGH on an unreliable prediction.
+    # too unsure to name a disease: report "uncertain" (risk is then capped below HIGH)
     confidence_threshold = IMAGE_MODEL.get("confidence_threshold", 0.5)
     is_uncertain = predicted_class_confidence < confidence_threshold
     if is_uncertain:
@@ -402,20 +309,8 @@ def _result_from_probs(loaded, probs) -> dict:
 
 
 def disease_heatmap(model_input):
-    """Grad-CAM for the trained ResNet-18: WHERE in its input the model saw
-    the disease it predicted, for the same prepared input predict() got
-    (spark/preprocessing.model_input). Returns the raw map over that input
-    (a small 2-D float array, >= 0, e.g. 7 x 7 for a 224 input), or None
-    when there is nothing honest to show — the model's top class is healthy
-    (a "healthy" heatmap would just highlight healthy tissue and read as
-    disease on the processed image). Spark places it on the photo
-    (ml/render.heatmap_on_photo), since only Spark knows which
-    part of the photo the input was cut from.
-
-    Grad-CAM is computed by running the ResNet stages by hand and asking
-    autograd for d(class score)/d(layer4 activations) — no forward/backward
-    hooks, so concurrent callers sharing the cached model can't clobber
-    each other's hook state."""
+    """Grad-CAM: where in the input the model saw the disease (a small 2-D map),
+    or None for a healthy leaf. Computed without hooks, so it is thread-safe."""
     loaded = _load_trained_model()
 
     import torch
@@ -446,13 +341,7 @@ def disease_heatmap(model_input):
 
 
 def model_version() -> str:
-    """A short string identifying which model produced a prediction, stored
-    in predictions.model_version for traceability/reproducibility:
-    "cnn-<architecture>:<file name>@<deployed_at>", from the checkpoint that
-    is actually loaded. It used to be the hard-coded "cnn-resnet18:<file
-    name>", wrong for the deployed SE-ResNet-18 and the same for every
-    deploy. Without a usable checkpoint, the old form is returned (no
-    prediction can be made then anyway)."""
+    """Which model made a prediction: "cnn-<architecture>:<file>@<deployed_at>"."""
     try:
         return _load_trained_model()["version"]
     except Exception:  # noqa: BLE001 - e.g. ModelNotAvailable, or a stub model in a test

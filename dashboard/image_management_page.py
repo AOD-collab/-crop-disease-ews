@@ -1,19 +1,7 @@
 """
-"Image management" page of the ADMIN dashboard (dashboard/app.py; the whole
-dashboard is behind the ADMIN login).
-
-PostgreSQL is the catalog (storage/image_catalog.py: the view
-v_admin_image_catalog), Google Drive the repository of originals and
-results, local storage a managed cache (storage/image_cache.py). The page
-shows database record counts and file counts side by side, a filterable
-gallery (newest upload first), one image's details with its original and
-processed image side by side, and storage management: usage per category,
-reconciliation of the cached files against the catalog, a dry-run clean-up
-preview and a confirmed, audited clean-up.
-
-No filesystem path above a category folder, Drive link or credential is
-shown; images reach the browser through Streamlit only after this
-server-side code has read them.
+"Image management" page: record and file counts, a filterable gallery, one
+image's original and marked-up result, and storage clean-up (preview first,
+then confirmed and logged). No file paths, Drive links or credentials shown.
 """
 
 import pandas as pd
@@ -111,8 +99,7 @@ def _gallery(filters, review_wanted, cache_wanted):
         page = int(st.number_input("Page", 1, n_pages, 1, key="im_page")) if n_pages > 1 else 1
         rows = image_catalog.query(filters, limit=PAGE_SIZE, offset=(page - 1) * PAGE_SIZE)
     else:
-        # review and cache status live on disk, so those two filters run on
-        # the (database-filtered) metadata rows, never on full images
+        # review and cache status are on disk: filter the database rows here
         rows = [r for r in image_catalog.query(filters)
                 if (review_wanted is None or image_cache.review_state(r["image_id"], r["review_decision"])
                     == review_wanted)
@@ -237,8 +224,7 @@ def _details(image_id: str, processed_image):
 
 
 def _retry(image_id: str):
-    """Send a FAILED image through the existing pipeline again — only while
-    it is still FAILED (the state is re-read, not taken from the page)."""
+    """Sends a FAILED image through the pipeline again (only if it is still FAILED)."""
     from storage.pipeline_submit import submit_image_for_processing
     with SessionLocal() as s:
         img = s.get(Image, image_id)
@@ -314,8 +300,7 @@ def _storage():
 
 
 def render(processed_image=None):
-    """`processed_image(image_id, email)` -> bytes or None (dashboard/app.py
-    finds the marked-up image in the farmer's Drive results folder)."""
+    """`processed_image(image_id, email)` returns the marked-up image bytes or None."""
     if not st.session_state.get("im_reviews_imported"):
         reviews.import_labels_log()          # one-way backfill of earlier label decisions
         st.session_state["im_reviews_imported"] = True

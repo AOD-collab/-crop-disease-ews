@@ -1,16 +1,7 @@
 """
-Which farmer photos in Google Drive have not been sent for processing yet.
-
-The database only holds photos Spark has registered (storage/uploads.py), so
-"pending" is simply: every photo in a farmer's images/<email>/ folder whose
-image_id has no `images` row. Used by
-
-    dashboard Pending Review   MANUAL mode: what the administrator can send
-    switch to AUTOMATIC        sends everything still pending
-    requeue_stuck --from-drive a photo whose Kafka event never reached Spark
-
-Files without the app's image_id tag are left out: they were not uploaded by
-the app and would never get a row.
+Farmer photos in Drive not sent for processing yet: photos with the app's
+image_id tag and no `images` row (Pending Review, switch to AUTOMATIC,
+requeue_stuck --from-drive).
 """
 
 from kafka.drive_watcher import _UUID_RE, build_drive_event
@@ -21,8 +12,7 @@ _CHUNK = 500
 
 
 def farmer_photos() -> list:
-    """(Drive metadata, folder email) for every file in every farmer's
-    images/<email>/ folder, oldest upload first."""
+    """(metadata, folder email) of every farmer photo in Drive, oldest first."""
     folders = drive_client.user_image_folders()
     if not folders:
         return []
@@ -34,7 +24,7 @@ def farmer_photos() -> list:
 
 
 def uploaded_at(meta: dict):
-    """Drive's createdTime of a file as an aware datetime, or None."""
+    """Drive's createdTime as a datetime, or None."""
     from datetime import datetime
     try:
         return datetime.fromisoformat(str(meta.get("createdTime")).replace("Z", "+00:00"))
@@ -47,8 +37,7 @@ def _image_id(meta: dict) -> str:
 
 
 def unprocessed_photos(session) -> list:
-    """(Drive metadata, folder email) of the app's photos that have no
-    `images` row yet — not registered by Spark."""
+    """The app's photos in Drive that have no `images` row yet."""
     photos = [(m, f) for m, f in farmer_photos() if _UUID_RE.match(_image_id(m))]
     ids = [_image_id(m) for m, _ in photos]
     known = set()
@@ -59,8 +48,7 @@ def unprocessed_photos(session) -> list:
 
 
 def send_for_processing(photos: list, backend) -> tuple:
-    """Publishes a drive_upload event (the Drive watcher's) for each
-    (metadata, folder email). Returns (sent, failed)."""
+    """Publishes a drive_upload event for each; returns (sent, failed)."""
     sent = failed = 0
     for meta, folder_email in photos:
         try:

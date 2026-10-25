@@ -1,10 +1,6 @@
 """
-Extracts the real camera capture time from JPEG EXIF metadata
-(DateTimeOriginal), per DIT manual section 7.
-
-If there is no valid EXIF timestamp, returns (None, None) — the caller
-stores captured_at = NULL. We never invent a capture time and never
-silently substitute the upload time (section 7/42).
+Reads a photo's EXIF: capture time, GPS, camera and size. A missing value is
+None, never guessed.
 """
 
 from datetime import datetime, timezone, timedelta
@@ -24,14 +20,11 @@ _DATETIME_ORIGINAL_TAG = next(
 
 
 def _captured_at(exif) -> Tuple[Optional[datetime], Optional[str]]:
-    """(captured_at, "exif") from a photo's EXIF block, or (None, None) if no
-    valid EXIF DateTimeOriginal is present."""
+    """(captured_at, "exif") from DateTimeOriginal, or (None, None)."""
     if not exif:
         return None, None
 
-    # DateTimeOriginal (36867) lives in the "Exif" sub-IFD (pointer tag
-    # 0x8769 in the base IFD), not the base IFD itself — check there first,
-    # falling back to the base IFD for cameras/tools that write it flat.
+    # DateTimeOriginal is in the Exif sub-IFD; some tools write it flat
     raw_value = None
     try:
         sub_ifd = exif.get_ifd(_EXIF_IFD)
@@ -43,23 +36,19 @@ def _captured_at(exif) -> Tuple[Optional[datetime], Optional[str]]:
     if not raw_value:
         return None, None
 
-    # EXIF datetime format: "YYYY:MM:DD HH:MM:SS", with no timezone info at
-    # all — it's a local wall-clock reading, so attach the configured local
-    # offset (Timor-Leste, UTC+9 by default) rather than let it be stored as
-    # if it were already UTC.
+    # EXIF time has no zone: it is local (Timor-Leste) time
     try:
         dt = datetime.strptime(str(raw_value).strip(), "%Y:%m:%d %H:%M:%S")
     except ValueError:
         return None, None
 
-    # Returned in UTC (same instant): SQLite drops a tz offset on write, so
-    # a +09:00 value stored as-is came back 9 hours off.
+    # returned in UTC (SQLite drops the offset)
     dt = dt.replace(tzinfo=_LOCAL_TZ).astimezone(timezone.utc)
     return dt, "exif"
 
 
 # ---------------------------------------------------------------------------
-# Full photo metadata (run by Spark, spark/preprocessing.extract_metadata)
+# Full photo metadata
 # ---------------------------------------------------------------------------
 _EXIF_IFD = 0x8769
 _GPS_IFD = 0x8825
@@ -95,15 +84,12 @@ def _clean_text(value) -> Optional[str]:
     return text[:100] or None
 
 
-# The Image columns the photo's EXIF GPS fills (extract_gps).
+# the Image columns filled from EXIF GPS
 GPS_COLUMNS = ("gps_latitude", "gps_longitude", "gps_altitude_m")
 
 
 def extract_gps(exif) -> dict:
-    """(latitude, longitude, altitude_m) from the EXIF GPS block, or Nones.
-    Android redacts a photo's location for apps without
-    ACCESS_MEDIA_LOCATION by zeroing it, so exactly 0,0 counts as missing,
-    and anything outside the valid lat/long range is dropped."""
+    """(latitude, longitude, altitude_m) from EXIF, or Nones (0,0 = removed by Android)."""
     out = {"gps_latitude": None, "gps_longitude": None, "gps_altitude_m": None}
     try:
         gps = exif.get_ifd(_GPS_IFD)
@@ -131,18 +117,7 @@ def extract_gps(exif) -> dict:
 
 
 def extract_image_metadata(image_bytes: bytes) -> dict:
-    """Everything useful the photo file itself says about where/when/how it
-    was taken. Missing values are None — never guessed:
-        captured_at, captured_at_source   EXIF DateTimeOriginal read with the
-                                          phone's OffsetTimeOriginal when it
-                                          wrote one, else as Timor-Leste
-                                          time; returned in UTC
-        gps_latitude, gps_longitude,      EXIF GPS block (camera location
-        gps_altitude_m                    tagging must be on)
-        camera_make, camera_model         e.g. "samsung", "SM-A155F"
-        image_width, image_height         pixel size, EXIF-upright
-    Must run on the ORIGINAL bytes: background cleaning re-encodes the photo
-    and drops its EXIF."""
+    """Capture time, GPS, camera and pixel size from the ORIGINAL photo bytes."""
     meta = {
         "captured_at": None, "captured_at_source": None,
         "gps_latitude": None, "gps_longitude": None, "gps_altitude_m": None,

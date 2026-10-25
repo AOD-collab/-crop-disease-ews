@@ -1,8 +1,6 @@
 """
-The processed (marked-up) image the farmer sees in the app: the photo with
-the trained CNN's Grad-CAM (ml.inference.disease_heatmap) drawn on it, plus
-a banner with the predicted class, confidence and risk level. Drawing only:
-nothing here decides anything about the photo.
+The marked-up image the farmer sees: the photo with the CNN's Grad-CAM in
+red and a banner with class, confidence and risk. Drawing only.
 """
 
 from io import BytesIO
@@ -22,11 +20,7 @@ def _banner_font(size: int):
 
 
 def render_processed_image(image_bytes: bytes, prediction: dict, heatmap=None) -> bytes:
-    """The photo with `heatmap` (the model's Grad-CAM, None when it
-    predicted healthy: then nothing is red) tinted red, under a banner with
-    class, confidence and risk. Returns JPEG bytes (at most
-    PROCESSED_MAX_PX on the longer side, original aspect ratio, quality 75 —
-    about 30-50 KB, so it adds little to Drive storage)."""
+    """The photo with `heatmap` tinted red and the result banner, as a small JPEG."""
     img = ImageOps.exif_transpose(Image.open(BytesIO(image_bytes)).convert("RGB"))
     img.thumbnail((PROCESSED_MAX_PX, PROCESSED_MAX_PX))
     out = np.asarray(img).astype(np.float32)
@@ -67,11 +61,7 @@ def render_processed_image(image_bytes: bytes, prediction: dict, heatmap=None) -
 
 
 def heatmap_on_photo(cam, prepared_bytes: bytes):
-    """Places the CNN's Grad-CAM (ml.inference.disease_heatmap: the map of
-    the S x S square spark/preprocessing.model_input() cut out) on the photo itself: an (H, W)
-    float array in [0, 1] at the photo's size, the map stretched over the
-    centre square the CNN saw and 0 on the cropped-off edges. None stays
-    None (the model saw no disease)."""
+    """Stretches the Grad-CAM over the centre square the CNN saw; 0 elsewhere."""
     if cam is None:
         return None
     import numpy as np

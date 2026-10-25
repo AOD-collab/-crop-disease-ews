@@ -1,16 +1,9 @@
 """
-Checkpoint work for the Model training page (dashboard/training_page.py),
-run as a separate process:
+Model checkpoint work for the Model training page, run as its own process
+(torch can't be imported after pandas/pyarrow on Windows). Prints JSON.
 
     python -m dashboard.model_ops info   <checkpoint>
     python -m dashboard.model_ops deploy <best checkpoint> <deployed model> <backup dir> <extra-metadata json>
-
-Why a separate process: the dashboard imports pandas, which loads pyarrow,
-and on Windows importing torch AFTER pyarrow fails ("WinError 1114 ...
-c10.dll" — the two ship clashing C++ runtime DLLs). This module imports
-torch (only inside its functions, so the page can import CLASS_NAME_MAP
-from here safely) and nothing that pulls in pandas/pyarrow. Prints one JSON
-object on stdout.
 """
 
 import json
@@ -21,8 +14,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Training-project class names -> the names the rest of this system uses
-# (predictions table, DISEASE_COLOR_MAP, Android app).
+# training-project class names -> this system's names
 CLASS_NAME_MAP = {
     "Healthy": "healthy",
     "Blight": "northern_leaf_blight",
@@ -39,9 +31,8 @@ def info(path: str) -> dict:
 
 
 def deploy(best: str, deployed: str, backup_dir: str, extra: dict) -> dict:
-    """Export the training project's best checkpoint into the format
-    ml/inference.py loads, check that it loads and runs, back up the model in
-    use, then swap the new file in."""
+    """Exports the best checkpoint, checks it loads and runs, backs up the
+    current model, then swaps the new one in."""
     import torch
     from ml.se_resnet import SEResNet18
 
@@ -56,7 +47,7 @@ def deploy(best: str, deployed: str, backup_dir: str, extra: dict) -> dict:
         "img_size": ck.get("img_size", 224),
         "mean": [0.485, 0.456, 0.406],
         "std": [0.229, 0.224, 0.225],
-        # traceability only — ml/inference.py ignores these
+        # for traceability only
         "trained_epoch": ck.get("epoch"),
         "val_accuracy": ck.get("val_accuracy"),
         "source_checkpoint": str(best),
@@ -65,7 +56,7 @@ def deploy(best: str, deployed: str, backup_dir: str, extra: dict) -> dict:
         **extra,
     }
 
-    # Refuse to deploy anything that wouldn't load in ml/inference.py.
+    # refuse anything ml/inference.py couldn't load
     model = SEResNet18(num_classes=len(class_names))
     model.load_state_dict(exported["state_dict"])
     model.eval()
@@ -79,8 +70,7 @@ def deploy(best: str, deployed: str, backup_dir: str, extra: dict) -> dict:
 
 
 def swap_in(tmp: Path, deployed: Path, backup_dir: Path) -> str:
-    """Back up the model in use (if any) into backup_dir, then move the
-    finished `tmp` file over it in one step. Returns the backup path, or ""."""
+    """Backs up the current model, then moves `tmp` over it. Returns the backup path."""
     backup = ""
     if deployed.exists():
         backup_dir.mkdir(exist_ok=True)

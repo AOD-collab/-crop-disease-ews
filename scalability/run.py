@@ -15,34 +15,10 @@ test" page as a background process, or by hand:
     python -m scalability.run list
     python -m scalability.run reset      # delete EVERY test (the dashboard's Delete test)
 
-The test is ISOLATED from the live pipeline (scalability/worker.py): it has
-its own Kafka topic, its own Spark query (in this process, separate from the
-live Spark job), and it
-writes only to scale_test_runs / scale_test_items and to
-SCALABILITY_REPORTS_DIR/<run_id>/. No Image, Prediction or Drive result is
-ever created for a test photo, so nothing of a test can reach a farmer, the
-dashboard's farmer pages, Tableau or the labelling folder.
-
-What `start` does:
-  1. Lists the Drive collection (scalability/dataset.py), takes the oldest
-     `size` valid photos (or the photos of the run being replayed). With
-     --source-dir it scans that folder instead and takes the first `size`
-     photos by path.
-  2. Verifies or downloads each photo's local copy (Drive only).
-  3. Stages every ready photo as a hard link in
-     SCALABILITY_REPORTS_DIR/<run_id>/images/<item_id>.<ext> plus one
-     scale_test_items row (a fresh item id, never a farmer's image_id).
-  4. Waits until no farmer photo is being processed (real time first),
-     starts the test's own Spark Structured Streaming query on the TEST topic
-     (scalability/spark_engine.py; JVM + Kafka start-up before the timer),
-     then starts the clock: publishes one event per photo to the TEST topic;
-     Spark reads them in micro-batches and processes each photo with the
-     live pipeline's own preprocessing + CNN code, SCALABILITY_WORKERS at a
-     time. New photos wait while farmer photos are being processed.
-     `--engine python` (SCALABILITY_ENGINE) uses a plain Kafka consumer +
-     thread pool in this process instead of Spark.
-  5. Stops the clock when every photo is COMPLETED or FAILED and writes the
-     summary + CSV files.
+Isolated from the live pipeline: its own Kafka topic and Spark query, and
+results only in scale_test_runs / scale_test_items and its report folder.
+`start`: pick the photos, stage them, wait for farmer photos to finish, then
+time how long Kafka -> Spark -> preprocessing -> CNN takes for all of them.
 """
 
 import argparse
@@ -74,8 +50,7 @@ from scalability.monitor import ResourceMonitor, gpu_name, spark_job_running  # 
 REPORTS_DIR = report.REPORTS_DIR
 LOCK_FILE = REPORTS_DIR / "_lock.json"
 PREPARE_STATUS_FILE = REPORTS_DIR / "_prepare_status.json"
-# Where runs from before the isolation (2026-10-10) staged their photos;
-# only clean-up still looks here.
+# where old test runs staged their photos (only clean-up looks here)
 LEGACY_STAGING_ROOT = IMAGE_STORAGE_PATH / "scalability"
 ACTIVE_STATUSES = ("PREPARING", "RUNNING")
 CHUNK = 500
@@ -89,14 +64,8 @@ def log(msg: str) -> None:
     print(f"[scalability {datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-# Live console output while a test runs (`start --live`), so the test can be
-# watched in a command prompt like the Spark and Kafka windows:
-#   photos   (default) Kafka / gate / progress lines + one line per finished photo
-#   progress Kafka / gate lines + a progress line every 2 s (for big runs)
-#   off      only the start / end lines, as before
-# Lines are collected and written in ONE console write at most every 0.5 s,
-# from the loop that already does the bookkeeping — never from the photo
-# workers — so watching does not slow the measured processing.
+# live console output (`start --live`): photos (a line per photo), progress
+# (every 2 s) or off. Written in batches, so it doesn't slow the test.
 LIVE_MODES = ("photos", "progress", "off")
 _live_mode = "photos"
 PROGRESS_EVERY_S = 2.0
@@ -114,8 +83,7 @@ def set_engine(name: str) -> None:
 
 
 def engine() -> str:
-    """"spark" (the test's own Spark Structured Streaming query) or
-    "python" (Kafka consumer + thread pool), see SCALABILITY_ENGINE."""
+    """"spark" (the test's own Spark query) or "python" (Kafka consumer + threads)."""
     name = _engine_override or settings.SCALABILITY_ENGINE
     if name not in ENGINES:
         raise RunError(f"SCALABILITY_ENGINE must be one of {', '.join(ENGINES)}, not {name!r}")
@@ -153,8 +121,7 @@ def _photo_line(n: int, total: int, item_id: str, outcome) -> str:
 
 
 def run_dir(run_id: str) -> Path:
-    """Everything one run keeps on disk: images/ (its staged photos),
-    the before/after pair, and the CSV files."""
+    """A run's folder: staged photos, the before/after pair and the CSV files."""
     return REPORTS_DIR / run_id
 
 
@@ -167,8 +134,7 @@ def _pid_alive(pid) -> bool:
 
 
 def active_job():
-    """{"pid", "kind", "run_id", "started_at"} of the job holding the lock,
-    or None. A lock left behind by a dead process is ignored."""
+    """The job holding the lock, or None (a dead process's lock is ignored)."""
     try:
         info = json.loads(LOCK_FILE.read_text())
     except (OSError, ValueError):
@@ -214,15 +180,11 @@ def reap_dead_runs() -> int:
 
 # --------------------------------------------------------------- helpers
 def _source(source_dir=None, from_drive=False) -> str:
-    """"folder" (a custom folder), "google_drive" (only when asked for
-    explicitly) or "local" (the default: the farmer photos already on this
-    laptop, no Google Drive)."""
+    """"folder", "google_drive" (only when asked) or "local" (default)."""
     return "folder" if source_dir else "google_drive" if from_drive else dataset.LOCAL_SOURCE
 
 
-# How each photo source is named: in the log (label), the run's config
-# (image_source), its first phase, and the error when it has no valid photo.
-# {dir} = the custom folder, {local} = the farmer photos folder on this laptop.
+# texts per photo source; {dir} = the custom folder, {local} = the local photos folder
 _SOURCE_TEXT = {
     "folder": {"label": "custom folder {dir}", "image_source": "photos in the custom folder {dir}",
                "phase": "Scanning the folder", "empty": "no valid photos in the folder {dir}"},
@@ -241,8 +203,7 @@ def _source_text(source_dir, from_drive, key: str) -> str:
 
 
 def _collection(source_dir=None, from_drive=False):
-    """The run's photo source (see _source). Only from_drive=True contacts
-    Google Drive."""
+    """The run's photos (Drive is contacted only with from_drive=True)."""
     if source_dir:
         try:
             return dataset.enumerate_folder(source_dir, staging_root=REPORTS_DIR)
@@ -276,8 +237,7 @@ def _benchmark_config(source_dir=None, series=None, from_drive=False) -> dict:
 
 
 def _test_queue(consume: bool = True):
-    """The test's own Kafka topic + consumer group (tests replace this).
-    consume=False: producer only, the Spark engine reads the topic."""
+    """The test's own Kafka topic (consume=False: send only, Spark reads it)."""
     try:
         return worker.KafkaTestQueue(consume=consume)
     except Exception as e:  # noqa: BLE001
@@ -286,8 +246,7 @@ def _test_queue(consume: bool = True):
 
 
 def _test_stream(run_id: str, ids: list, handle, on_done):
-    """The test's own Spark Structured Streaming query on the test topic,
-    started and warmed up (tests replace this)."""
+    """The test's own Spark query on the test topic, started and warmed up."""
     from scalability import spark_engine
     checkpoint = run_dir(run_id) / "spark_checkpoint"
     shutil.rmtree(checkpoint, ignore_errors=True)
@@ -298,16 +257,13 @@ def _test_stream(run_id: str, ids: list, handle, on_done):
 
 
 def _live_gate():
-    """Real-time priority (tests replace this)."""
+    """Pauses the test while farmer photos are processed."""
     return worker.LiveGate()
 
 
 def _stage(src: Path, dst: Path) -> Path:
-    """The path the run reads one photo from: a hard link `dst` in the
-    run's own folder (same file, no extra disk space), or, when that is not
-    possible (the photo is on another drive), the original `src` itself,
-    read in place and never written. Photos are never copied: a 7,000-photo
-    folder on C: copied twice filled the A: drive (2026-10-11)."""
+    """A hard link to the photo in the run's folder, or the original itself
+    (another drive). Never a copy: that filled the disk once."""
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
         os.link(src, dst)
@@ -322,8 +278,7 @@ def _chunks(seq, n=CHUNK):
 
 
 def _throttled(every_s: float, report):
-    """A progress(done, total) callback that calls report(done, total) at
-    most every `every_s` seconds, and always for the last one."""
+    """progress(done, total) that reports at most every `every_s` seconds (and at the end)."""
     last = [0.0]
 
     def progress(done, total):
@@ -361,8 +316,7 @@ def _write_prepare_status(**fields) -> None:
 
 
 def prepare(size: int, workers: int = 8) -> dict:
-    """Step 2 on its own: verify/download local copies of the first `size`
-    valid photos, without starting a run."""
+    """Gets local copies of the first `size` photos, without starting a run."""
     _acquire_lock("prepare")
     try:
         _write_prepare_status(phase="Listing the Drive collection", done=0, total=0)
@@ -386,14 +340,9 @@ def prepare(size: int, workers: int = 8) -> dict:
 def start(size: int = None, replay_of: str = None, workers: int = 8, stall_seconds: float = 600,
           run_id: str = None, source_dir: str = None, series: dict = None, _locked: bool = False,
           from_drive: bool = False) -> str:
-    """Runs one complete test iteration and returns its run_id (see module
-    docstring). `source_dir`: take the photos from this folder instead of
-    Google Drive. `series`: {"SERIES_ID", "ITERATION", "ITERATIONS"} when
-    this run is one iteration of start_series(), stored in config_json."""
-    # Total execution time (end_to_end_seconds) starts when Start test was
-    # pressed: the dashboard starts this process at that moment, so a single
-    # test or iteration 1 counts from the process start; a later iteration
-    # from here.
+    """Runs one test iteration; returns its run_id. `series` is set when it is
+    one iteration of start_series()."""
+    # total time counts from pressing Start test (the process start) for iteration 1
     first = not series or series.get("ITERATION", 1) == 1
     started_wall = psutil.Process().create_time() if first else time.time()
     init_db()
@@ -404,9 +353,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
             if old is None:
                 raise RunError(f"unknown run {replay_of}")
             size = s.query(ScaleTestItem).filter(ScaleTestItem.run_id == replay_of).count()
-            # a replay uses the same source as the run it repeats — except that
-            # runs from before the local source (no "SOURCE") were Drive runs:
-            # they are replayed from the same photos' local copies.
+            # a replay uses the same source as the run it repeats
             old_config = json.loads(old.config_json or "{}")
             source_dir = old_config.get("SOURCE_DIR")
             from_drive = old_config.get("SOURCE") == "google_drive"
@@ -439,8 +386,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
             with SessionLocal() as s:
                 wanted = s.query(ScaleTestItem.source_drive_file_id, ScaleTestItem.source_image_id).filter(
                     ScaleTestItem.run_id == replay_of).all()
-            # same file (Drive id / content hash), else the same farmer photo
-            # (image_id): an old Drive run replayed from the local copies
+            # same file, else the same farmer photo
             by_file = {c.drive_file_id: c for c in col.candidates}
             by_image = {c.image_id: c for c in col.candidates}
             chosen = [c for c in (by_file.get(f) or by_image.get(i) for f, i in wanted) if c is not None]
@@ -516,11 +462,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
             timings["contended"] = gate.overlapped(t_start, t_end)
             return item_id, ("COMPLETED", None, {"received_at": received_at, **timings}, prediction)
 
-        # Finished photos arrive on this queue (a done-callback per photo), so
-        # the loop only ever touches photos that just finished. It used to
-        # rescan every submitted photo twice every 50 ms and write the phase
-        # to the database each time — at 10,000 photos that main-thread work
-        # competed with the workers for the GIL inside the measured time.
+        # finished photos arrive on this queue, so the loop only handles those
         finished = stdlib_queue.Queue()
         queue = _test_queue(consume=False) if use_spark else _test_queue()
         if use_spark:
@@ -532,8 +474,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
             _emit([f"[spark]    ready — micro-batches of up to {settings.SPARK_MAX_EVENTS_PER_BATCH} event(s) "
                    f"every {settings.SPARK_TRIGGER_SECONDS:g}s, {settings.SCALABILITY_WORKERS} photo(s) at a time"])
         _set_phase(run_id, "Processing", status="RUNNING")
-        # The live Spark job shares the GPU; recorded so a slow iteration can
-        # be explained (a 7 s stall on 2026-10-10 happened with it running).
+        # the live Spark job shares the GPU: recorded to explain a slow iteration
         spark_running = spark_job_running()
         monitor = ResourceMonitor().start()
         t0 = time.monotonic()
@@ -564,8 +505,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
         with ThreadPoolExecutor(max_workers=max(1, settings.SCALABILITY_WORKERS)) as pool:
             while len(done) < len(ids):
                 if stream is not None:
-                    # Spark consumes and processes on its own threads; the
-                    # loop only books what it received and finished.
+                    # Spark processes on its own threads; the loop only keeps count
                     stream.raise_if_failed()
                     new = stream.take_received()
                     submitted.update(new)
@@ -674,10 +614,8 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
 
 
 def _record(run_id: str, outcomes: dict) -> None:
-    """Stores finished photos' measurements and CNN results (scale_test_items
-    only) in ONE bulk UPDATE, instead of a SELECT + UPDATE per photo.
-    `outcomes`: {item_id: (status, error, timings, prediction)}, item_ids of
-    this run (the caller only ever passes ids it staged for `run_id`)."""
+    """Saves finished photos' measurements and results in one bulk UPDATE.
+    `outcomes`: {item_id: (status, error, timings, prediction)}."""
     completed_at = now_utc()
     rows = []
     for item_id, (status, error, timings, prediction) in outcomes.items():
@@ -697,8 +635,7 @@ def _record(run_id: str, outcomes: dict) -> None:
 
 
 def _error_text(e: Exception) -> str:
-    """str(e), or the exception's type name when even that fails: a Py4J
-    error asks the (possibly stopped) Spark JVM for its text."""
+    """str(e), or the type name if that fails (a Py4J error after Spark stopped)."""
     try:
         return str(e)
     except Exception:  # noqa: BLE001
@@ -706,8 +643,7 @@ def _error_text(e: Exception) -> str:
 
 
 def _save_comparison(run_id: str, ids: list, paths: dict) -> dict:
-    """The run's before/after pair (first photo that completed), made AFTER
-    its timer stopped. Returns the pair, or {}."""
+    """The before/after pair of the first completed photo (after the timer), or {}."""
     with SessionLocal() as s:
         completed = {i for (i,) in s.query(ScaleTestItem.image_id).filter(
             ScaleTestItem.run_id == run_id, ScaleTestItem.status == "COMPLETED")}
@@ -722,12 +658,8 @@ def _save_comparison(run_id: str, ids: list, paths: dict) -> dict:
 
 
 def _save_photo_paths(run_id: str, originals: dict) -> None:
-    """{item_id: original photo path} in the run's folder. The gallery
-    makes each photo's before/after preview from it when that page is
-    viewed (worker.ensure_previews), instead of 2 previews per photo after
-    every run (about 7 minutes for 9,942 photos). The originals, not the
-    hard links in images/, so cleanup() does not break the gallery. With
-    the model's img_size: the dashboard can't load the model (torch)."""
+    """Saves {item_id: original photo path} (and the model's img_size) so the
+    gallery makes previews only when viewed."""
     from ml.inference import input_spec
     out = run_dir(run_id)
     out.mkdir(parents=True, exist_ok=True)
@@ -738,12 +670,8 @@ def _save_photo_paths(run_id: str, originals: dict) -> None:
 
 
 def start_series(size: int, iterations: int = 1, **kwargs) -> list:
-    """Runs the same test `iterations` times and returns the run_ids.
-    Iteration 1 selects `size` unique photos; every later iteration is a
-    replay of it: the same photos, each staged again under a NEW item id in
-    its own run folder, so iterations never share images or measurements.
-    The workload is therefore size x iterations photo processings of `size`
-    unique photos. Stops at the first iteration that fails."""
+    """Runs the test `iterations` times on the same photos (each staged anew);
+    returns the run_ids. Stops at the first failed iteration."""
     if iterations < 1:
         raise RunError("iterations must be at least 1")
     series_id = f"series-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:4]}"
@@ -785,10 +713,7 @@ def finalize(run_id: str, *, samples: list, execution_seconds: float, live_overl
             "not_finished": sum(i.status in ("STAGED", "PUBLISHED") for i in items),
             # timer: first event published to the test topic -> last photo finished
             "execution_seconds": round(execution_seconds, 3),
-            # from pressing Start test (process start; for iteration 2+ the
-            # iteration's start) to the last photo finished: photo staging,
-            # CNN loading, Spark start, Kafka, preprocessing, CNN, saving;
-            # minus any wait for farmer photos before the start
+            # from pressing Start test to the last photo finished (minus waits for farmer photos)
             "end_to_end_seconds": round(end_to_end_seconds, 3) if end_to_end_seconds is not None else None,
             "live_overlap": live_overlap,
             "paused_seconds": round(paused_seconds, 3),
@@ -810,8 +735,7 @@ def finalize(run_id: str, *, samples: list, execution_seconds: float, live_overl
 
 
 def regenerate_report(run_id: str) -> Path:
-    """Rewrites the CSV files from the stored summary + items. Resource
-    samples are read back from the old resources.csv when it still exists."""
+    """Rewrites the CSV files from the stored summary and items."""
     import csv
     with SessionLocal() as s:
         run = s.get(ScaleTestRun, run_id)
@@ -832,12 +756,8 @@ def _is_active(run) -> bool:
 
 
 def cleanup(run_id: str, drive_results: bool = False) -> dict:
-    """Removes a run's staged photos (hard links). For runs from before the
-    isolation, also the Image / Prediction / ProcessingEvent / RejectedEvent
-    rows they created in the production tables and, with drive_results,
-    their result folder in Drive. Keeps the measurements, the before/after
-    pair and the CSV files. Never touches the Drive originals, the local
-    copies, the model, training data or any farmer."""
+    """Removes a run's staged photos (and, for old runs, the rows they made).
+    Keeps its measurements and CSV files. Never touches farmer data."""
     reap_dead_runs()
     with SessionLocal() as s:
         run = s.get(ScaleTestRun, run_id)
@@ -904,8 +824,7 @@ def delete(run_id: str, drive_results: bool = False) -> dict:
 
 # --------------------------------------------------------------- CLI
 class _Tee:
-    """stdout that also goes to a log file — a run shown in a console window
-    keeps the log file it would have had when started in the background."""
+    """stdout that also writes to a log file."""
 
     def __init__(self, *streams):
         self.streams = streams

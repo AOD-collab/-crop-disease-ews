@@ -1,8 +1,6 @@
 """
-Duplicate photos: the same photo (same bytes) sent twice by the same farmer
-is analysed once. Spark's job (spark/streaming_job.process_event) calls
-check_duplicate_by_hash on the downloaded bytes; a copy is recorded FAILED
-with DUPLICATE_OF + the kept photo's image_id.
+The same photo (same bytes) sent twice by the same farmer is analysed once;
+the copy is recorded FAILED as a duplicate.
 """
 
 import hashlib
@@ -13,23 +11,18 @@ from spark.preprocessing import InvalidEvent
 
 
 class DuplicateImage(InvalidEvent):
-    """The photo's bytes are identical to an earlier photo from the same user
-    (already completed, or being processed). A subclass of InvalidEvent, so every existing
-    `except InvalidEvent` handler treats it like any other rejected event."""
+    """Same bytes as an earlier photo from the same farmer."""
 
 
-# Set to False to switch the duplicate check off without touching anything else.
+# False switches the duplicate check off
 SKIP_DUPLICATE_PHOTOS = True
 
 
 DUPLICATE_OF = "Duplicate photo: identical to "      # + the kept photo's image_id
 
 
-# The Spark job checks several photos of a micro-batch at once (streaming_job's
-# thread pool). The lock makes "store the fingerprint + look for a copy" one step,
-# so two copies of the same photo can't both look before either is stored; the set
-# holds the photos that PASSED the check in this process, so a copy that is being
-# processed only counts once it was accepted (two copies can't reject each other).
+# the lock makes "store the fingerprint + look for a copy" one step across Spark's
+# threads; the set holds copies accepted by this process
 _DUPLICATE_LOCK = threading.Lock()
 
 
@@ -37,18 +30,9 @@ _ACCEPTED_IMAGE_IDS = set()
 
 
 def check_duplicate_by_hash(event: dict, original_bytes: bytes) -> None:
-    """Fingerprint (SHA-256) the ORIGINAL photo bytes, store it on the Image
-    row, and raise DuplicateImage when the same user already has a COMPLETED
-    photo with the same fingerprint, or a copy that another thread of this
-    Spark job accepted and is processing right now. Whichever copy is checked
-    first is kept; every later copy is rejected.
-
-    Never breaks a diagnosis by itself: if anything goes wrong in here (for
-    example the database is unreachable), it only logs and lets the photo
-    continue. The one deliberate exception is DuplicateImage.
-
-    It leaves alone (returns without checking) a photo that has no Image row,
-    and a photo that already has a prediction (a Reprocess / model re-run)."""
+    """Stores the photo's SHA-256 and raises DuplicateImage if the same farmer
+    already has it (COMPLETED, or accepted and in progress). Any other error
+    only logs. Skips photos with no row or with a prediction (a Reprocess)."""
     if not SKIP_DUPLICATE_PHOTOS:
         return
     try:
@@ -59,14 +43,12 @@ def check_duplicate_by_hash(event: dict, original_bytes: bytes) -> None:
             if session.query(Prediction.prediction_id).filter(
                     Prediction.image_id == image.image_id).first() is not None:
                 return      # already diagnosed once (a Reprocess / model re-run): never reject it now
-            # A stored hash (older rows) is reused so every row is compared the same way;
-            # a Drive photo gets its hash here, from the bytes Spark just downloaded.
+            # reuse a stored hash; otherwise hash the downloaded bytes
             digest = image.content_hash or hashlib.sha256(original_bytes).hexdigest()
             if not image.content_hash:
                 image.content_hash = digest
                 session.commit()
-            # Same photo, same farmer: already COMPLETED, or accepted by this job and
-            # being processed right now (oldest upload named first).
+            # same photo, same farmer: COMPLETED, or accepted and in progress
             copies = (
                 session.query(Image.image_id, Image.status)
                 .filter(
@@ -90,13 +72,8 @@ def check_duplicate_by_hash(event: dict, original_bytes: bytes) -> None:
 
 
 def resend_duplicates_of(failed_ids: list, backend=None) -> int:
-    """A copy is rejected as a duplicate of a photo that was still being
-    processed. If that photo then FAILED (a model error, say), the copy
-    would stay FAILED as a "duplicate" of a photo without a result — so it
-    is sent through the pipeline again: its duplicate check runs again and
-    keeps one copy (the others become its duplicates). A copy whose send
-    fails is left FAILED with "Kafka publish failed", which
-    requeue_stuck --include-failed retries. Returns how many were sent."""
+    """Re-sends copies rejected as duplicates of a photo that then FAILED,
+    so one of them gets a result. Returns how many were sent."""
     if not failed_ids:
         return 0
     from storage.pipeline_submit import submit_all

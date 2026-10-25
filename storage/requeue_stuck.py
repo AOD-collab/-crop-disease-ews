@@ -1,51 +1,12 @@
 """
-Reconciliation / re-queue tool for images stranded between ingestion and
-processing.
+Finds photos still owed a result (stuck INGESTED/PROCESSING, or COMPLETED
+but not delivered to Drive) and sends them again.
 
-Background
-----------
-`storage/pipeline_submit.py` marks an image `INGESTED` the moment its upload
-event is published to Kafka. Turning that into a prediction (`COMPLETED`) is a
-separate process — `spark/streaming_job.py`. If the Spark consumer is not
-running when the event is published (crash, never started, killed by
-`run_all.py --stop`), or if the Kafka topic is wiped underneath a stale
-Spark checkpoint, the image sits at `INGESTED` forever with no event left
-on the transport to replay.
-
-This tool finds those rows and gets them unstuck. Two modes:
-
-    (default)  re-publish the upload event to Kafka via kafka.producer.
-               Use this when a Spark consumer IS running (or is about to
-               be started with an empty/fresh checkpoint) — the event goes
-               back on the topic and Spark processes it normally.
-
-    --inline   process the image here and now, in-process, using the exact
-               same spark/streaming_job.process_event + persist_result the
-               Spark foreachBatch sink calls. No broker, no Spark JVM, no
-               checkpoint involved. Use this for a one-shot backfill of
-               events that are genuinely gone from Kafka.
-
-Rows touched: non-terminal ones (INGESTED, PROCESSING — the
-last is a photo Spark stopped in the middle of), COMPLETED Google Drive
-photos whose result never reached the farmer's Drive folder
-(result_published_at is empty: the Drive upload failed after the result was
-saved), and — with --include-failed — rows that FAILED specifically at the
-Kafka-publish step or at finding the file. Re-sending any of them is safe:
-saving a prediction again replaces the old one (persist_result), and Spark
-uploads the result to Drive again.
-
-Examples
---------
     python -m storage.requeue_stuck --dry-run
-    python -m storage.requeue_stuck --all --inline        # backfill everything now
-    python -m storage.requeue_stuck --older-than 300        # re-publish rows stuck > 5 min
-    python -m storage.requeue_stuck --all --include-failed  # also retry Kafka-publish failures
-    python -m storage.requeue_stuck --from-drive            # Drive photos Spark never registered
-
-The database only has a row for a photo Spark registered (storage/uploads.py),
-so a photo whose drive_upload event never reached Spark is found by
---from-drive (Drive minus database, storage/drive_inventory.py), not by the
-row-based modes above.
+    python -m storage.requeue_stuck --all --inline        # process here, without Kafka/Spark
+    python -m storage.requeue_stuck --older-than 300      # re-send rows stuck > 5 min
+    python -m storage.requeue_stuck --all --include-failed
+    python -m storage.requeue_stuck --from-drive          # Drive photos Spark never registered
 """
 
 import argparse
@@ -60,14 +21,10 @@ from storage.database import (
 from storage.image_storage import resolve_image_path, to_stored_path, is_drive_path, DRIVE_PATH_PREFIX
 from storage.pipeline_submit import build_upload_event
 
-# Statuses that mean "the pipeline still owes this image a result".
-# PROCESSING: Spark stopped in the middle of the photo; its Kafka event may be
-# gone (topic wiped / checkpoint reset), so nothing would ever finish it.
+# statuses that still owe the farmer a result
 STUCK_STATUSES = {ProcessingStatus.INGESTED, ProcessingStatus.PROCESSING}
 
-# FAILED rows worth retrying with --include-failed: the failure was in the
-# transport or in locating the file, not in the image itself — a retry
-# (plus path rebasing) can legitimately still produce a prediction.
+# FAILED rows worth retrying: the failure was Kafka or finding the file, not the photo
 _RETRYABLE_FAILURE_MARKERS = (
     "Kafka publish failed",
     "Image file not found on disk",
@@ -77,10 +34,7 @@ _RETRYABLE_FAILURE_MARKERS = (
 
 
 def result_not_delivered():
-    """SQL condition: a COMPLETED Google Drive photo whose result never
-    reached the farmer's Drive folder. spark/preprocessing.
-    publish_result_to_drive_safely only logs a Drive failure, so without
-    this the phone would wait for that result forever."""
+    """SQL condition: a COMPLETED Drive photo whose result never reached Drive."""
     return and_(Image.status == ProcessingStatus.COMPLETED,
                 Image.result_published_at.is_(None),
                 Image.image_path.like(DRIVE_PATH_PREFIX + "%"))
@@ -97,14 +51,12 @@ def find_stuck(session, older_than_seconds: int, include_failed: bool, ignore_ag
     if include_failed:
         eligible.append(and_(Image.status == ProcessingStatus.FAILED,
                              or_(*[Image.error_message.like(m + "%") for m in _RETRYABLE_FAILURE_MARKERS])))
-    # Filtered in the database: this used to load every image row and test
-    # each one in Python.
     rows = session.query(Image).filter(_not_scale_test(), or_(*eligible)).all()
     out = []
     for img in rows:
         if not ignore_age:
             if img.status == ProcessingStatus.COMPLETED:
-                # its Drive upload may still be running, or it was just sent again
+                # its Drive upload may still be running
                 stamp = max((t for t in (img.processed_at, img.ingested_at) if t), default=None)
             else:
                 stamp = img.ingested_at or img.uploaded_at or img.created_at
@@ -117,9 +69,7 @@ def find_stuck(session, older_than_seconds: int, include_failed: bool, ignore_ag
 
 
 def count_owed(session, older_than_seconds: int = 120) -> dict:
-    """{"waiting": photos the pipeline still owes a result, "undelivered":
-    COMPLETED Drive photos whose result never reached Drive}, counting only
-    rows older than `older_than_seconds` — what find_stuck would pick up."""
+    """Counts {"waiting", "undelivered"} older than `older_than_seconds`."""
     owed = find_stuck(session, older_than_seconds, include_failed=False, ignore_age=False)
     undelivered = sum(1 for i in owed if i.status == ProcessingStatus.COMPLETED)
     return {"waiting": len(owed) - undelivered, "undelivered": undelivered}
@@ -135,10 +85,7 @@ def _mark_failed(session, image_id: str, message: str):
 
 
 def rebase_paths(session, images, dry_run: bool) -> int:
-    """Heal stale image_path values (project moved between hosts/folders):
-    if the stored path can be resolved to a real file, rewrite it to the
-    portable project-relative form. Returns how many rows were healed.
-    `images` must be live objects on `session`."""
+    """Rewrites stale local image paths to the project-relative form; returns how many."""
     healed = 0
     for img in images:
         if is_drive_path(img.image_path):
@@ -159,8 +106,7 @@ def rebase_paths(session, images, dry_run: bool) -> int:
 
 
 def _listed_only(images, dry_run: bool, verb: str) -> bool:
-    """True when there is nothing to do: no images, or a dry run (which
-    lists what it would `verb`)."""
+    """True when there is nothing to do (no images, or a dry run that lists them)."""
     if dry_run:
         for img in images:
             print(f"  would {verb}  {img.image_id}  ({img.status.value})")
@@ -218,14 +164,9 @@ def process_inline(images, dry_run: bool) -> int:
 
 
 def resend_owed(older_than_seconds: int, limit: int, backend=None) -> int:
-    """What `requeue_stuck --all` would do, for the Spark job to run by
-    itself (spark/streaming_job.py): the photos owed a result for at least
-    `older_than_seconds` — stuck INGESTED/PROCESSING, or COMPLETED with the
-    result not in Drive — sent through the pipeline again, at most `limit`,
-    oldest first. Sending marks each one ingested now, so it waits another
-    `older_than_seconds` before it can be sent again. While Google Drive
-    can't be reached, undelivered results are left for a later round (they
-    would only fail at the upload again). Returns how many were sent."""
+    """Re-sends up to `limit` photos owed a result for `older_than_seconds`
+    (the Spark job runs this by itself). Skips undelivered results while Drive
+    is down. Returns how many were sent."""
     from storage.pipeline_submit import submit_all
     from storage import drive_client
     with SessionLocal() as session:
@@ -240,10 +181,7 @@ def resend_owed(older_than_seconds: int, limit: int, backend=None) -> int:
 
 
 def republish_from_drive(dry_run: bool) -> int:
-    """Photos in a farmer's Drive images/<email>/ folder that Spark never
-    registered (no `images` row): their Kafka event was lost, or they were
-    uploaded in MANUAL mode and not sent. Re-publishes the Drive watcher's
-    drive_upload event for each. Returns how many were sent."""
+    """Re-publishes Drive photos that have no database row yet."""
     from kafka.config import KAFKA_TOPIC
     from kafka.producer import get_backend
     from storage import drive_inventory
@@ -288,7 +226,6 @@ def main() -> int:
         return 0
 
     with SessionLocal() as session:
-        # a lightweight summary, so the session isn't held open during processing
         summary = [(i.image_id, i.status.value + (" (result not in Drive yet)"
                                                   if i.status == ProcessingStatus.COMPLETED else ""))
                    for i in find_stuck(session, args.older_than, args.include_failed, args.all)]

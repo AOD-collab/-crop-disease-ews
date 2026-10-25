@@ -1,40 +1,10 @@
 """
-Spark BATCH processing job: the system's analytics (DIT manual objective 7's
-batch half — spark/streaming_job.py is the continuous streaming half). Reads
-images, predictions and users from PostgreSQL with spark.read.jdbc(...),
-computes every figure the dashboard shows with Spark DataFrame operations,
-and writes them to the analytics tables (storage/database.py
-ANALYTICS_TABLES), which the dashboard reads (spark/analytics_reader.py):
+Spark batch job: computes every figure the dashboard shows from PostgreSQL
+(images, predictions, users) and writes the analytics tables. Each image
+counts once with its latest prediction; test images are left out; days are
+Timor-Leste days. Needs PostgreSQL (Spark reads it over JDBC).
 
-    analytics_summary                 headline counts, last 24 h, pipeline timings
-    analytics_disease_distribution    photos per disease
-    analytics_risk_distribution       photos per risk level
-    analytics_high_risk_by_location   HIGH-risk share per municipality
-    analytics_disease_trend           photos per municipality, day and disease
-    analytics_disease_daily           photos per day and disease
-    batch_location_daily_summary      per municipality and upload day
-
-and, for the scalability test page, one set per test run from the CNN
-results kept in scale_test_items (storage/database.py AnalyticsScaleTest*):
-
-    analytics_scale_test_disease_by_location     test photos per municipality and disease
-    analytics_scale_test_disease_distribution    test photos per disease
-    analytics_scale_test_high_risk_by_location   HIGH-risk share per municipality
-
-Definitions (the same as the dashboard always used): scalability-test images
-are left out; each image counts once, with its latest prediction (newest
-predicted_at, ties broken by prediction_id); a blank location is "Unknown
-location"; days are Timor-Leste days (LOCAL_TZ_OFFSET_HOURS).
-
-Requires PostgreSQL (DATABASE_URL=postgresql+psycopg2://user:pass@host/db):
-Spark's JDBC reader needs a real JDBC driver, and this project doesn't ship
-a SQLite JDBC jar. The PostgreSQL driver is downloaded from Maven Central the
-first time (spark.jars.packages), like the Kafka connector.
-
-Run:
-    python -m spark.batch_analytics            # compute once
-    python -m spark.batch_analytics --watch    # keep the tables up to date
-                                               # (run_all.py's EWS-SparkAnalytics)
+Run: python -m spark.batch_analytics [--watch]
 """
 
 import argparse
@@ -52,10 +22,7 @@ _POSTGRES_URL_RE = re.compile(r"postgresql\+psycopg2://(?:([^:]+):([^@]*)@)?([^/
 
 
 def jdbc_url_and_properties() -> tuple:
-    """Converts the SQLAlchemy DATABASE_URL (config/settings.py) into what
-    spark.read.jdbc/write.jdbc need: a jdbc:postgresql://... URL plus a
-    {driver, user, password} properties dict. Raises a clear error (not a
-    silent SQLite fallback) if DATABASE_URL isn't PostgreSQL."""
+    """DATABASE_URL -> (jdbc URL, properties). Raises if it isn't PostgreSQL."""
     match = _POSTGRES_URL_RE.match(DATABASE_URL)
     if not match:
         raise RuntimeError(
@@ -80,8 +47,7 @@ def build_spark():
         SparkSession.builder
         .appName("ImageSystem-CropDiseaseEWS-Analytics")
         .config("spark.jars.packages", "org.postgresql:postgresql:42.7.3")
-        # Timestamps are instants; days are taken in Timor-Leste Time
-        # explicitly (_local_day), whatever this machine's time zone is.
+        # days are taken in Timor-Leste Time explicitly (_local_day)
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.ui.showConsoleProgress", "false")
         .getOrCreate()
@@ -91,8 +57,7 @@ def build_spark():
 
 
 # ----------------------------------------------------------------- inputs
-# Only the columns the analytics need; never users' e-mails or password
-# hashes. Enum columns are read as text.
+# only the columns needed (never e-mails or password hashes)
 _IMAGES_SQL = f"""(SELECT image_id, user_id, location, CAST(status AS VARCHAR(32)) AS status,
                           captured_at, uploaded_at, ingested_at, processed_at
                    FROM images WHERE source <> '{SCALE_TEST_SOURCE}') AS i"""
@@ -118,18 +83,14 @@ def _local_day(column):
 
 
 def _location():
-    """Location cleaned like the streaming job's (case, spaces), so a row
-    that never got Spark's cleaned value (registered but not finished, or
-    from before the cleaning rule) groups with the rest; blanks are grouped
-    under UNKNOWN_LOCATION."""
+    """Location cleaned like the streaming job's; blank -> UNKNOWN_LOCATION."""
     from pyspark.sql.functions import coalesce, col, initcap, lit, regexp_replace, trim, when
     loc = initcap(regexp_replace(trim(coalesce(col("location"), lit(""))), r"\s+", " "))
     return when(loc == "", lit(UNKNOWN_LOCATION)).otherwise(loc)
 
 
 def photos_with_latest_prediction(images, predictions):
-    """One row per image, with its latest prediction's columns (null when it
-    has none): newest predicted_at, ties broken by the larger prediction_id."""
+    """One row per image with its latest prediction (null if none)."""
     from pyspark.sql import Window
     from pyspark.sql.functions import col, row_number
     newest = Window.partitionBy("image_id").orderBy(col("predicted_at").desc_nulls_last(),
@@ -140,7 +101,7 @@ def photos_with_latest_prediction(images, predictions):
 
 
 def _count_if(cond):
-    """How many rows `cond` is true for (SUM of 1/0), as a long."""
+    """Number of rows where `cond` is true."""
     from pyspark.sql import functions as F
     return F.sum(F.when(cond, 1).otherwise(0)).cast("long")
 
@@ -152,8 +113,7 @@ def _count_photos(df, *keys):
 
 
 def _high_risk_by(df, *keys):
-    """Per `keys`: analysed photos (with a risk level) as total, the HIGH
-    ones as high, and high_pct (0-100, one decimal)."""
+    """Per `keys`: total analysed, high (HIGH risk) and high_pct."""
     from pyspark.sql import functions as F
     return (df.filter(F.col("risk_level").isNotNull()).groupBy(*keys)
             .agg(_count_if(F.col("risk_level") == "HIGH").alias("high"), F.count("*").alias("total"))
@@ -161,16 +121,14 @@ def _high_risk_by(df, *keys):
 
 
 def _stamped(tables: dict) -> dict:
-    """Each table with the generated_at column every analytics table ends with."""
+    """Adds the generated_at column."""
     from pyspark.sql import functions as F
     now = F.current_timestamp()
     return {name: df.withColumn("generated_at", now) for name, df in tables.items()}
 
 
 def compute(photos, users) -> dict:
-    """{table name: DataFrame} for every analytics table, from
-    photos_with_latest_prediction() and the users. Pure DataFrame work, so it
-    can be checked against local data without a database."""
+    """{table name: DataFrame} for every farmer analytics table."""
     from pyspark.sql import functions as F
 
     cls = F.lower(F.col("predicted_class"))
@@ -232,9 +190,7 @@ def compute(photos, users) -> dict:
 
 
 def compute_scale_test(items) -> dict:
-    """{table name: DataFrame} for the scalability test page, per run_id,
-    from scale_test_items: only COMPLETED photos with a CNN result count,
-    and HIGH risk is counted like the farmer figures (_high_risk_by)."""
+    """{table name: DataFrame} for the scalability test page, per run_id."""
     from pyspark.sql import functions as F
     done = (items.filter((F.col("status") == "COMPLETED") & F.col("predicted_class").isNotNull())
             .withColumn("location", _location()))
@@ -247,12 +203,8 @@ def compute_scale_test(items) -> dict:
 
 # ----------------------------------------------------------------- output
 def write_tables(tables: dict, jdbc_url, properties) -> None:
-    """Replaces every table's rows in ONE transaction, so the dashboard never
-    reads a half-written or empty table: Spark writes each result into a
-    <name>_staging copy (same columns and types), then DELETE + INSERT ...
-    SELECT swaps all of them in at once — readers see the old rows until the
-    commit. The tables themselves (types, keys, the Tableau login's grants)
-    stay as init_db() created them."""
+    """Writes into <name>_staging copies, then swaps them all in one
+    transaction, so the dashboard never reads an empty table."""
     from sqlalchemy import text
     from storage.database import engine
     with engine.begin() as conn:
@@ -297,8 +249,7 @@ def run(spark=None) -> float:
 
 # ------------------------------------------------------------------ watch
 def data_signature() -> tuple:
-    """A cheap fingerprint of everything the analytics depend on: it changes
-    when photos, predictions, statuses, users or scalability-test results change."""
+    """Cheap fingerprint of the data; changes when anything the figures use changes."""
     from sqlalchemy import func
     from storage.database import SessionLocal, Image, Prediction, User, ScaleTestItem
     with SessionLocal() as s:
@@ -314,10 +265,8 @@ def data_signature() -> tuple:
 
 
 def watch() -> int:
-    """Keeps the analytics tables current for the dashboard: checks the
-    database every ANALYTICS_CHECK_SECONDS and recomputes when anything
-    changed, or at least every ANALYTICS_MAX_AGE_SECONDS (the "last 24 h"
-    figures move with time). One SparkSession for the whole run."""
+    """Recomputes when the data changes, and at least every
+    ANALYTICS_MAX_AGE_SECONDS ("last 24 h" moves with time)."""
     from storage.database import init_db
     jdbc_url_and_properties()
     init_db()

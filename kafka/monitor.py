@@ -1,23 +1,8 @@
 """
-Watch Kafka live (the EWS-KafkaMonitor window that run_all.py opens):
+The EWS-KafkaMonitor window: one line per farmer-photo event, and a summary
+per second for the scalability-test topic. Read-only: never commits offsets.
 
-* the real-time topic (KAFKA_TOPIC): one line per farmer-photo event as it
-  arrives, with partition/offset, farmer, place and upload time;
-* the scalability test's topic (SCALABILITY_KAFKA_TOPIC): a summary about
-  once a second while a test runs — how many events the test published, and
-  how far the test's own consumer has read them. A per-event line there
-  would flood the window during a 10,000-photo test.
-
-READ-ONLY and harmless to both: its own consumer group, it never commits
-offsets, and it starts at the newest message. Spark does not use
-consumer-group offsets at all — it tracks its own position in its checkpoint
-(spark/streaming_job.py) — and the test's consumer has its own group
-(SCALABILITY_CONSUMER_GROUP), whose position is only looked up, never
-changed. So this window can't move, slow down or take away any event.
-
-    python -m kafka.monitor              # new events from now on
-    python -m kafka.monitor --from-start # also everything still in the topics
-    python -m kafka.monitor --live-only  # only the real-time topic
+    python -m kafka.monitor [--from-start] [--live-only]
 """
 
 import argparse
@@ -48,8 +33,6 @@ def describe(value: bytes, partition: int, offset: int) -> str:
     from spark.live_log import farmer_label
     uploaded = format_local(event.get("uploaded_at")) or event.get("uploaded_at") or ""
     source = "Drive file" if event.get("drive_file_id") else "local file"
-    # A new upload names its farmer by Google account (Spark resolves the
-    # user_id); a re-sent photo already has its user_id.
     farmer = event.get("owner_email") or farmer_label(event.get("user_id"))
     kind = "new photo" if event.get("kind") == "drive_upload" else "photo sent again"
     return (f"p{partition} offset {offset}: {kind} {(event.get('image_id') or '?')[:8]} "
@@ -78,10 +61,7 @@ class TestTopicSummary:
         self.end_offset = max(self.end_offset or 0, offset + 1)
 
     def line(self, consumed_to=None, engine: str = SCALABILITY_ENGINE) -> str | None:
-        """The summary since the last call (None when nothing arrived).
-        The Spark engine keeps its position in its own checkpoint, not in the
-        consumer group, so the group's position is only shown for the python
-        engine."""
+        """The summary since the last call, or None if nothing arrived."""
         if not self.runs:
             return None
         runs = ", ".join(f"{n} for {run}" for run, n in self.runs.items())
@@ -100,8 +80,7 @@ class TestTopicSummary:
 
 
 def test_consumer_position(admin) -> int | None:
-    """Where the scalability test's consumer group has read up to (its
-    committed offset, summed over partitions), or None. Only looked up."""
+    """The test consumer's committed offset (summed), or None."""
     try:
         from confluent_kafka import ConsumerGroupTopicPartitions
         futures = admin.list_consumer_group_offsets([ConsumerGroupTopicPartitions(SCALABILITY_CONSUMER_GROUP)])
@@ -114,12 +93,8 @@ def test_consumer_position(admin) -> int | None:
 
 
 class Assigner:
-    """Reads the watched topics' partitions by direct assignment — no
-    consumer-group membership, so no rebalance delay and no position ever
-    stored. Topics present at start are read from their newest event (or the
-    oldest with from_start); a topic that only appears later (the test's
-    topic, created by its first run) is read from its beginning, since all
-    of it is new."""
+    """Reads the topics by direct partition assignment (no group, no rebalance).
+    A topic created later is read from its beginning."""
 
     def __init__(self, consumer, topics, from_start: bool):
         self.consumer, self.topics, self.from_start = consumer, topics, from_start
@@ -155,12 +130,10 @@ class Assigner:
 def consumer_config(from_start: bool) -> dict:
     return {
         "bootstrap.servers": KAFKA_BOOTSTRAP_SERVERS,
-        # its own group, which never commits a position (so it never inherits one either)
         "group.id": GROUP_ID,
         "enable.auto.commit": False,
         "auto.offset.reset": "earliest" if from_start else "latest",
-        # notice a topic created after we started (the test's topic after a
-        # reset) within seconds instead of the client default of 5 minutes
+        # notice a new topic within seconds
         "topic.metadata.refresh.interval.ms": 5000,
     }
 

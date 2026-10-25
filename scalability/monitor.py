@@ -1,8 +1,5 @@
 """
-Resource sampling during a scalability run's measured stage: whole-machine
-CPU and memory (psutil), the Spark job's own memory (its Python driver plus
-the JVM it starts), and the NVIDIA GPU's utilisation and memory (nvidia-smi,
-when present). One sample per `interval` seconds, all real readings.
+CPU, memory, Spark-job memory and GPU samples while a scalability run is timed.
 """
 
 import shutil
@@ -18,8 +15,7 @@ FIELDS = ["t_seconds", "timestamp_utc", "cpu_percent", "memory_used_mb", "memory
 
 
 def spark_processes() -> list:
-    """The running spark.streaming_job Python process(es) and their child
-    processes (the JVM)."""
+    """The Spark job's processes, including its JVM."""
     found = []
     for p in psutil.process_iter(["cmdline"]):
         try:
@@ -80,18 +76,14 @@ class ResourceMonitor:
         return self
 
     def stop(self):
-        """Stops sampling and takes one last sample, so even a run shorter
-        than `interval` has a real reading."""
+        """Stops sampling (one last sample, so a short run has a reading)."""
         self._stop.set()
         if self._thread:
             self._thread.join(timeout=10)
         return self.samples
 
     def _loop(self, primed):
-        # psutil.cpu_percent(None) measures since the previous call IN THE
-        # SAME THREAD (psutil 7): priming it in start()'s thread left the first
-        # sample here always 0.0 — which made every run's mean CPU too low,
-        # and a run under 2 s report 0.
+        # prime cpu_percent in THIS thread (it measures per thread)
         psutil.cpu_percent(None)
         primed.set()
         self._procs, self._procs_checked = [], 0.0

@@ -1,23 +1,7 @@
 """
-Registering an upload: the first thing spark/streaming_job._process_one
-does with a "drive_upload" event from the Drive watcher (or the dashboard's
-Process button). The watcher has no database; this is where an upload
-becomes a database row:
-
-    resolve the farmer      the Drive owner's Google account (provisioned
-                            on first upload, storage/farmers.py)
-    check the upload        active account, the farmer's own folder, file
-                            name, type, size (the rules the watcher used to
-                            apply before it was made stateless)
-    skip duplicates         an image_id already registered for this Drive
-                            file (the change feed and the safety-net scan
-                            can both report it)
-    insert the row          status INGESTED, before the photo is downloaded
-                            and classified
-
-A refused upload still gets a row: register_upload raises UploadRejected,
-_process_one records it FAILED with the "Upload rejected: " reason and the
-farmer gets that result in Drive, as before.
+Registers a new Drive upload: finds (or creates) the farmer from the Drive
+owner, checks the upload, skips one already registered, and inserts the
+row as INGESTED. A refused upload still gets a row and fails with the reason.
 """
 
 import json
@@ -30,15 +14,11 @@ from storage.database import SessionLocal, Image, RejectedEvent, ProcessingStatu
 from storage.farmers import get_or_create_farmer
 from storage.pipeline_submit import UPLOAD_REJECTED_PREFIX
 from spark.preprocessing import InvalidEvent
-# the watcher's own rules for the app's image_id and Drive's timestamps
 from kafka.drive_watcher import _UUID_RE, _parse_time
 
 
 class UploadRejected(InvalidEvent):
-    """The upload breaks a rule (inactive account, not the farmer's own
-    folder, wrong name/type/size). Its row exists; the message starts with
-    UPLOAD_REJECTED_PREFIX so storage.pipeline_submit.is_upload_rejected
-    keeps it out of Reprocess."""
+    """The upload breaks a rule (inactive account, wrong folder, name, type or size)."""
 
 
 def _float(value):
@@ -49,11 +29,8 @@ def _float(value):
 
 
 def register_upload(event: dict) -> str:
-    """Registers one drive_upload event. Returns "new" (row created as
-    INGESTED, event["user_id"] set: process it), "duplicate" (this Drive
-    file is already registered: skip) or "conflict" (the image_id belongs to
-    another file: recorded in rejected_events, skip). Raises InvalidEvent
-    for a file the app didn't upload, UploadRejected for a refused upload."""
+    """Returns "new" (row created), "duplicate" (already registered) or
+    "conflict" (image_id used by another file). Raises for a refused upload."""
     image_id = event.get("image_id") or ""
     if not _UUID_RE.match(image_id):
         raise InvalidEvent("file has no valid image_id (not uploaded by the Android app)")

@@ -1,15 +1,7 @@
 """
-What the EWS-Spark console window shows for real-time farmer photos, so the
-live pipeline can be watched like the scalability test: one line when a
-micro-batch arrives from Kafka, one per photo when Spark has its result, one
-when that result reaches the farmer's Google Drive, and one when the batch
-commits.
-
-SPARK_LIVE_LOG=false (.env) turns these lines off; errors, skips and
-[ALERT] lines are printed either way. Each line is ONE locked write, so lines
-from the parallel photo threads never interleave, and writing it costs
-microseconds next to the seconds a photo spends in Drive and the CNN —
-nothing about the processing itself changes.
+The live lines in the EWS-Spark console: batch received, each photo's
+result, result delivered to Drive, batch committed. SPARK_LIVE_LOG=false
+turns them off.
 """
 
 import os
@@ -30,13 +22,13 @@ def say(line: str) -> None:
         try:
             sys.stdout.write(text)
             sys.stdout.flush()
-        except (UnicodeEncodeError, OSError):      # a console that can't show a character / is gone
+        except (UnicodeEncodeError, OSError):
             pass
 
 
 @lru_cache(maxsize=4096)
 def farmer_label(user_id: str) -> str:
-    """The farmer's Gmail for display (looked up once per farmer)."""
+    """The farmer's Gmail, for display."""
     if not user_id:
         return "?"
     try:

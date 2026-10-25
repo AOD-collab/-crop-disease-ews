@@ -1,21 +1,7 @@
 """
-"Scalability test" page of the ADMIN dashboard (dashboard/app.py).
-
-Front end for scalability/run.py: choose the photo source, the number of
-photos and the number of iterations, start the test (as a background
-process, like the Model training page), then see for the latest test:
-  * the two averages — execution time per iteration and processing time per
-    photo (scalability/report.series_averages);
-  * "Disease data": where the diseases the CNN found in the test photos are
-    — photos per municipality and disease, a GPS map, HIGH risk per
-    municipality. These are the TEST's own CNN results (scale_test_items),
-    never a farmer's diagnosis;
-  * a gallery of every photo, like Pending Review: before and after
-    preprocessing, with its result (each page's previews are made when it is
-    viewed).
-The test runs in its own worker, isolated from the live pipeline
-(scalability/worker.py); every other measurement is in the CSV files under
-storage/scalability_reports/<run_id>/.
+"Scalability test" page: starts scalability/run.py in the background and
+shows the latest test's averages, disease data and every photo before and
+after preprocessing. The test is isolated from the live pipeline.
 """
 
 import json
@@ -47,11 +33,8 @@ GALLERY_COLUMNS = 4
 
 
 def _launch(args: list, console: bool = False) -> str:
-    """Starts `python -m scalability.run <args>` in the background; returns
-    its log file. `console` (Windows): in its own command prompt window
-    titled EWS-ScalabilityTest, showing the test live like the Spark and
-    Kafka windows, and still writing the same log file. It stays the same
-    separate process either way, on the test's own Kafka topic."""
+    """Starts scalability.run in the background (with `console`: in its own
+    window on Windows); returns its log file."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"{args[0]}_{datetime.now():%Y%m%d_%H%M%S}.log"
     argv = [sys.executable, "-u", "-m", "scalability.run", *args]
@@ -64,8 +47,7 @@ def _launch(args: list, console: bool = False) -> str:
 
 
 def _latest_test() -> list:
-    """The newest test's iterations (ScaleTestRun rows in iteration order),
-    or []. Runs from before iterations existed are a test of one."""
+    """The newest test's iterations, in order, or []."""
     runner.reap_dead_runs()
     with SessionLocal() as s:
         runs = s.query(ScaleTestRun).order_by(ScaleTestRun.started_at).all()
@@ -84,9 +66,7 @@ def _active_panel():
         latest = s.query(ScaleTestRun).order_by(ScaleTestRun.started_at.desc()).first()
         latest_id, latest_status, phase = ((latest.run_id, latest.status, latest.phase or "")
                                            if latest else (None, None, ""))
-    # The whole page refreshes once whenever a test starts, an iteration's
-    # results are saved, or the job ends — not only at the very end, so the
-    # Start button and the Results never stay out of date while a test runs.
+    # rerun the page when a test starts, an iteration finishes or the job ends
     state = (bool(job), latest_id, latest_status)
     previous = st.session_state.get("scale_panel_state")
     st.session_state["scale_panel_state"] = state
@@ -113,9 +93,7 @@ _PICK_FOLDER_SCRIPT = (
 
 
 def _pick_folder():
-    """Opens the Windows "select folder" window on this laptop (the
-    dashboard runs here) and returns the chosen folder, or None. In its own
-    process: tkinter must not run inside Streamlit's script thread."""
+    """Windows "select folder" dialog (own process: tkinter can't run in Streamlit); folder or None."""
     try:
         out = subprocess.run([sys.executable, "-c", _PICK_FOLDER_SCRIPT], capture_output=True, text=True,
                              timeout=600, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -127,8 +105,7 @@ def _pick_folder():
 
 def _setup_section(busy: bool):
     st.subheader("Run a test")
-    # The photos always come from a folder the admin selects on this laptop
-    # (no Google Drive, no farmer photos).
+    # photos come from a local folder (never farmer photos)
     if st.button("Select folder", icon="📁", key="scale_pick_folder"):
         folder = _pick_folder()
         if folder:
@@ -180,8 +157,7 @@ def _setup_section(busy: bool):
 
 
 def _comparison(runs: list):
-    """The test's one before/after pair: files the run saved while it
-    processed that photo (scalability/worker.save_comparison). No labels."""
+    """The test's before/after preprocessing pair."""
     owner, pair = next(((r, c) for r in runs if (c := json.loads(r.summary_json or "{}").get("comparison"))),
                        (None, None))
     if not pair:
@@ -198,9 +174,8 @@ def _comparison(runs: list):
 
 
 def _disease_section(first_run, df):
-    """Where the diseases the CNN found in this test's photos are. Uses the
-    first iteration only: later iterations repeat the same photos, so
-    counting them would multiply every number by the iteration count."""
+    """Where the CNN found diseases in the test photos (first iteration only:
+    later ones repeat the same photos)."""
     st.subheader("Disease data")
     done = df[(df["status"] == "COMPLETED") & df["predicted_class"].notna()]
     if done.empty:
@@ -259,8 +234,7 @@ def _disease_section(first_run, df):
 
 
 def _gallery(first_run, df):
-    """Every photo of the test, like the Pending Review page: before and
-    after preprocessing, with its CNN result. Paged, with filters."""
+    """Every test photo before and after preprocessing, with its result. Paged, filtered."""
     st.subheader("All test photos")
     folder = runner.run_dir(first_run.run_id)
     paths_file = folder / PHOTO_PATHS_FILE
@@ -365,8 +339,7 @@ def _results_section(busy: bool):
 
 
 def _reset_section():
-    """The Delete test button: a complete reset of the scalability test
-    only (scalability/reset.py), then this page back to its defaults."""
+    """Delete test: resets the scalability test only (scalability/reset.py)."""
     st.subheader("Delete test")
     st.caption("Deletes every scalability test: its staged images, previews, results, logs, its records, its "
                "Kafka test events and a running test with its own Spark job. Your original photos, farmer "

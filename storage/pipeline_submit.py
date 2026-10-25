@@ -1,12 +1,6 @@
 """
-Sending a photo that is ALREADY in the database into the streaming pipeline
-again: the dashboard's Reprocess / Retry of a FAILED photo and
-storage/requeue_stuck. It publishes a "submit" event to Kafka and marks the
-row INGESTED.
-
-New photos don't come through here: the Drive watcher (and the dashboard's
-Pending Review in MANUAL mode) publish a "drive_upload" event built from
-the file's Drive metadata, and Spark creates the row (storage/uploads.py).
+Sends a photo that is already in the database through the pipeline again
+(Reprocess / Retry, requeue_stuck): a "submit" event to Kafka, row INGESTED.
 """
 
 from storage.database import ProcessingStatus, now_utc
@@ -16,16 +10,8 @@ from kafka.producer import get_backend
 
 
 def build_upload_event(image) -> dict:
-    """The upload event published to Kafka, built from a stored Image row (storage/requeue_stuck.py re-publishes with it too).
-
-    For a Google Drive upload, image_path is "gdrive:<file id>" and
-    drive_file_id carries the same id explicitly: Kafka transports only
-    this reference + metadata, never the image bytes. drive_file_id is None
-    for legacy local-disk images."""
+    """The Kafka event for a stored Image row (a reference, never the bytes)."""
     return {
-        # A photo already in the database, sent again (Process of a FAILED
-        # row's Reprocess/Retry, requeue_stuck). New photos come from Drive as
-        # "drive_upload" events (kafka/drive_watcher.build_drive_event).
         "kind": "submit",
         "image_id": image.image_id,
         "user_id": image.user_id,
@@ -37,15 +23,12 @@ def build_upload_event(image) -> dict:
     }
 
 
-# error_message prefix Spark's ingestion step (storage/uploads.register_upload)
-# gives an upload it refused (inactive account, not the farmer's own folder,
-# wrong name/type/size).
+# error_message prefix of an upload refused at registration
 UPLOAD_REJECTED_PREFIX = "Upload rejected: "
 
 
 class NotResubmittable(ValueError):
-    """The image was refused at upload time; sending it to the pipeline
-    would analyse a photo the system decided not to accept."""
+    """A refused upload; it must not be analysed."""
 
 
 def is_upload_rejected(image) -> bool:
@@ -54,25 +37,12 @@ def is_upload_rejected(image) -> bool:
 
 
 def submit_image_for_processing(session, image, backend=None) -> None:
-    """Publish `image`'s upload event and mark it INGESTED, committing on
-    `session`. On a publish failure the row is marked FAILED and the
-    exception is re-raised for the caller to report.
-
-    `backend` defaults to kafka.producer.get_backend(KAFKA_TOPIC); callers
-    that already hold a backend (e.g. the Drive watcher's) should pass it.
-
-    Raises NotResubmittable (nothing changed) for an upload the Drive watcher
-    rejected: the dashboard's Reprocess / Retry used to send those through
-    anyway, bypassing the watcher's account and folder checks.
-    """
+    """Marks the image INGESTED, then publishes its event. On a publish error
+    the row is marked FAILED and the error re-raised. Refuses a rejected upload."""
     if is_upload_rejected(image):
         raise NotResubmittable(f"{image.error_message} — this upload can't be processed")
     backend = backend or get_backend(KAFKA_TOPIC)
-    # Mark INGESTED and commit BEFORE publishing: Spark can then never
-    # finish the image before this commit lands and have its COMPLETED/
-    # FAILED stomped back to INGESTED. A FAILED image is reset too — that is
-    # the dashboard's "Reprocess"; before, it stayed FAILED with the old
-    # error while the new event was in flight.
+    # commit INGESTED before publishing, so Spark's result can't be overwritten
     if image.status == ProcessingStatus.FAILED:
         image.status = ProcessingStatus.INGESTED
         image.error_message = None
@@ -88,9 +58,7 @@ def submit_image_for_processing(session, image, backend=None) -> None:
 
 
 def submit_all(session, images, backend=None, log_prefix="[pipeline_submit]") -> int:
-    """submit_image_for_processing for each image, one backend for all; one
-    that can't be sent only logs (its row says why) and the others still go.
-    Returns how many were sent."""
+    """Submits each image; a failure only logs. Returns how many were sent."""
     sent = 0
     for image in images:
         try:

@@ -1,31 +1,8 @@
 """
-Complete reset of the scalability test — the dashboard's "Delete test"
-button and `python -m scalability.run reset`.
-
-Removes everything that belongs ONLY to the scalability test and returns
-the test to its initial state. Each resource is identified by a dedicated
-name, not guessed:
-
-  processes  running test processes: command line `-m scalability.run start|prepare`
-             (their Spark JVM is a child process and stops with them)
-  Kafka      the test's own topic SCALABILITY_KAFKA_TOPIC (its events are
-             deleted, the empty topic is kept) and its own consumer groups
-             (SCALABILITY_CONSUMER_GROUP*)
-  database   scale_test_runs / scale_test_items; legacy rows from before the
-             isolation (images.source = SCALE_TEST_SOURCE and their
-             predictions / processing events / rejected events / reviews);
-             the inactive SCALE_TEST_USERNAME system account
-  files      SCALABILITY_REPORTS_DIR/scale-* (staged hard links, previews,
-             CSV files, Spark checkpoints), logs/, the status and lock files;
-             the legacy staging folder IMAGE_STORAGE_PATH/scalability; the
-             local-queue file of the test topic
-
-Never touched: the production Kafka topic and Spark job, farmer photos and
-their local copies, Google Drive, the model, training/review data, and any
-other folder. Hard links and photos read in place are only directory
-entries or never inside the test folder, so originals are never deleted.
-Every step is checked again afterwards, so the result says "reset" only
-when nothing of the test is left. Running it again is harmless.
+Delete test: removes everything that belongs only to the scalability test
+(its processes, Kafka topic events and groups, database rows and files)
+and checks afterwards that nothing is left. Never touches the live
+pipeline, farmer photos, Drive, the model or training data. Safe to repeat.
 """
 
 import os
@@ -74,9 +51,7 @@ def reports_dir() -> Path:
 
 
 def _remove(path: Path, root: Path, failures: list) -> None:
-    """Deletes `path` (a directory entry inside `root`) without following
-    links: a symlink/junction is removed as a link, a hard link only loses
-    this entry."""
+    """Deletes `path` inside `root` without following links."""
     location = path.parent.resolve() / path.name
     if not location.is_relative_to(root) or location == root:
         raise UnsafeReset(f"{location} is not inside the test folder {root}")
@@ -113,9 +88,7 @@ def test_processes() -> list:
 
 
 def stop_test_processes() -> str:
-    """Stops running scalability-test processes and their children (the
-    test's own Spark JVM). The live Spark job is a different command
-    (spark.streaming_job) and is never matched."""
+    """Stops the test's processes and their children (never the live Spark job)."""
     procs = test_processes()
     targets = []
     for p in procs:
@@ -162,9 +135,7 @@ def _watermarks(topic: str, partitions) -> dict:
 
 
 def clear_kafka(admin=None, watermarks=_watermarks) -> str:
-    """Deletes the events of the test's own topic (the empty topic stays,
-    so the Kafka monitor keeps working) and the test's consumer groups.
-    Refuses anything that is not the test's own."""
+    """Empties the test's own topic and deletes its consumer groups."""
     from confluent_kafka import TopicPartition
     topic = settings.SCALABILITY_KAFKA_TOPIC
     if topic == settings.KAFKA_TOPIC or not topic:
@@ -269,9 +240,8 @@ STEPS = (("Stop test processes (and their Spark job)", stop_test_processes),
 
 
 def reset_all(steps=STEPS, performed_by: str = None) -> dict:
-    """Runs every step even if one fails, then checks what is left, and
-    records the outcome in storage_audit_log like the other destructive
-    storage actions. {"ok": bool, "steps": [{"step", "ok", "detail"}], "left": [...]}"""
+    """Runs every step, checks what is left and logs it.
+    Returns {"ok", "steps": [{"step", "ok", "detail"}], "left"}."""
     try:
         reports_dir()
     except UnsafeReset as e:

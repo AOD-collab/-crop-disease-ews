@@ -1,16 +1,7 @@
 """
-The scalability-test dataset: the original photos farmers uploaded to the
-Google Drive collection (images/<email>/), checked with the same rules the
-Drive watcher applies to a new upload, plus a verified local copy of each in
-DOWNLOADED_PHOTOS_DIR/<user_id>/<image_id>.jpg (the copy Spark itself keeps,
-storage/image_storage.store_downloaded_photo).
-
-Google Drive stays the source: a local copy only counts when its size and
-SHA-256 match what Drive reports for the original. Missing or mismatched
-copies are downloaded again; valid ones never are.
-
-A run can instead take its photos from a custom folder on this computer
-(enumerate_folder): one source per run, never mixed.
+The scalability test's photos: the local farmer photos (default), a custom
+folder, or the Drive collection (a local copy counts only if its SHA-256
+matches Drive's). Checked with the same rules as an upload.
 """
 
 import hashlib
@@ -64,8 +55,7 @@ class Collection:
 
 
 def _problem(meta: dict, folder_email: str, users: dict) -> str | None:
-    """Why this Drive file can't be in the dataset (the upload rules Spark's
-    ingestion step applies, storage/uploads.register_upload), or None."""
+    """Why this Drive file can't be used (the upload rules), or None."""
     props = meta.get("appProperties") or {}
     image_id = props.get("image_id") or ""
     owners = meta.get("owners") or []
@@ -91,10 +81,7 @@ def _size_problem(size: int):
 
 
 def enumerate_collection() -> Collection:
-    """Lists every original photo in every farmer's images/<email>/ folder
-    (oldest first), keeps the valid ones and counts why the rest were left
-    out. A photo is included once: repeated Drive ids, repeated image_ids and
-    repeated content (same SHA-256 uploaded twice) are excluded."""
+    """Every valid farmer photo in Drive, oldest first, each once; counts why others were left out."""
     started = time.monotonic()
     photos = drive_inventory.farmer_photos()
     with SessionLocal() as s:
@@ -143,9 +130,7 @@ def _matches(c: Candidate, data: bytes) -> bool:
     return True     # Drive gave no checksum: the size is all we can compare
 
 
-# A single photo download may not take longer than this in total. Socket
-# timeouts alone don't bound it: a connection that keeps trickling bytes, or
-# a half-closed one, kept one download hanging for over 10 minutes.
+# the longest one photo download may take in total
 DOWNLOAD_DEADLINE_SECONDS = 120
 
 
@@ -204,10 +189,8 @@ def _prepare_one(c: Candidate) -> Candidate:
 
 
 def prepare_local_copies(candidates: list, workers: int = 8, progress=None) -> dict:
-    """Makes sure each candidate has a verified local copy; downloads only
-    the missing/invalid ones (`workers` at a time). `progress(done, total)`
-    is called as they finish. Returns timing and counts; each candidate gets
-    local_path / local_copy_status, or error."""
+    """Gives each candidate a verified local copy (downloads only missing or
+    wrong ones). Returns timing and counts."""
     started = time.monotonic()
     done = 0
     with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
@@ -230,10 +213,7 @@ def prepare_local_copies(candidates: list, workers: int = 8, progress=None) -> d
 
 
 # --------------------------------------------------------------- custom folder
-# The other photo source: any folder on this computer (searched with its
-# subfolders). Nothing needs downloading, so each photo is "ready" as soon as
-# it passes the same type/size rules as an upload. Files are only read: the
-# run hard-links them into its own staging folder.
+# any folder on this computer (with subfolders); files are only read
 FOLDER_SOURCE_PREFIX = "local:"
 _MAGIC = {b"\xff\xd8\xff": "image/jpeg", b"\x89PNG\r\n\x1a\n": "image/png"}
 _FOLDER_SUFFIXES = {".jpg", ".jpeg", ".png"}
@@ -254,9 +234,7 @@ def _folder_candidate(path, root, staging_root):
         return None, "not a JPEG or PNG image"
     sha = hashlib.sha256(data).hexdigest()
     rel = path.relative_to(root).as_posix()
-    # The content hash is the photo's identity: replay finds it again even if
-    # the file was renamed or moved inside the folder. It also stays short
-    # enough for a Drive appProperty when results are published.
+    # the content hash is the photo's identity (survives a rename or move)
     return Candidate(image_id=rel, drive_file_id=FOLDER_SOURCE_PREFIX + sha, user_id=None, name=path.name,
                      mime_type=mime, size=size, sha256=sha, md5=None,
                      created_time=None, location=None, device_gps=None,
@@ -264,9 +242,7 @@ def _folder_candidate(path, root, staging_root):
 
 
 def enumerate_folder(folder, staging_root=None, workers: int = 8) -> Collection:
-    """Every JPEG/PNG photo in `folder` and its subfolders, sorted by path.
-    Each photo is included once (the same content under two names counts
-    once); files that can't be used are counted by reason."""
+    """Every JPEG/PNG in `folder` (and subfolders), each content once; others counted by reason."""
     started = time.monotonic()
     root = Path(folder).expanduser().resolve()
     if not root.is_dir():
@@ -290,18 +266,13 @@ def enumerate_folder(folder, staging_root=None, workers: int = 8) -> Collection:
 
 
 def local_copy_counts(candidates: list) -> dict:
-    """Quick look (no hashing): how many candidates already have a local
-    file. Used by the dashboard preview."""
+    """How many candidates already have a local file (no hashing)."""
     present = sum(downloaded_photo_path(c.user_id, c.image_id) is not None for c in candidates)
     return {"with_local_copy": present, "missing_local_copy": len(candidates) - present}
 
 
 # --------------------------------------------------------------- local photos (default)
-# The default photo source: the farmer photos already on this laptop, i.e. the
-# copies Spark keeps of every Drive upload (DOWNLOADED_PHOTOS_DIR/<user_id>/
-# <image_id>.jpg, storage/image_storage.store_downloaded_photo). Google Drive is
-# never contacted: the photos are read from disk, and where each was taken
-# (municipality, the phone's GPS) comes from its row in the database.
+# default: the local copies of farmer photos (no Drive); location from the database
 LOCAL_SOURCE = "local"
 
 
@@ -311,11 +282,7 @@ def local_photos_dir() -> Path:
 
 
 def enumerate_local_photos(staging_root=None, workers: int = 8) -> Collection:
-    """Every valid photo in local_photos_dir() (same type/size rules and
-    same-content check as a custom folder), oldest upload first. Each keeps
-    the farmer's image_id, user_id, location and device GPS from the images
-    table when it still has a row there (a factory reset removes the rows,
-    not the photos: those photos are kept, without a location)."""
+    """Every valid local farmer photo, oldest first, with its location and GPS if it has a row."""
     from storage.database import Image
     root = local_photos_dir()
     if not root.is_dir():

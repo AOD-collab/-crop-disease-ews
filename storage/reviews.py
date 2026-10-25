@@ -1,8 +1,6 @@
 """
-The administrator's review decisions (table image_reviews): a CONFIRMED
-disease label, or "discarded". Written by the Label photos page
-(dashboard/labelling_page.py) next to its labels_log.csv. A model
-prediction is never written here.
+The admin's label decisions (image_reviews): a confirmed disease or
+"discarded". Never a model prediction.
 """
 
 import csv
@@ -32,9 +30,7 @@ def record(image_id: str, decision: str, confirmed_class: str | None, predicted_
 
 
 def import_labels_log(path: Path | None = None) -> int:
-    """One-way backfill from LABELLED_TRAIN_DIR/labels_log.csv: adds the
-    latest logged decision of every image that has no image_reviews row yet.
-    Existing rows are never changed. Returns how many were added."""
+    """Adds decisions from labels_log.csv for images with no row yet; returns how many."""
     path = Path(path or Path(settings.LABELLED_TRAIN_DIR) / LOG_NAME)
     if not path.exists():
         return 0

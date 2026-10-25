@@ -1,13 +1,6 @@
 """
-Account helpers shared by the dashboard (admin login), the Drive watcher
-(auto-created farmer accounts), the scalability test and storage/init_db.py
-(bootstrap admin): e-mail normalisation and bcrypt password hashing.
-
-Uses the `bcrypt` library directly rather than passlib's CryptContext:
-passlib's bcrypt backend auto-detection (a version-compatibility probe it
-runs on import) throws on recent bcrypt releases that dropped the
-`__about__` attribute it looks for, making CryptContext unusable out of the
-box with current bcrypt wheels.
+E-mail normalisation and bcrypt password hashing (bcrypt directly: passlib
+breaks on current bcrypt releases).
 """
 
 import bcrypt
@@ -16,9 +9,7 @@ import bcrypt
 def normalize_email(email: str) -> str:
     return (email or "").strip().lower()
 
-# bcrypt only hashes the first 72 bytes of a secret — this is a hard limit
-# of the algorithm itself, not a bug, so a very long password is truncated
-# deterministically rather than silently accepted-but-ignored past 72 bytes.
+# bcrypt only uses the first 72 bytes of a password
 _MAX_PASSWORD_BYTES = 72
 
 

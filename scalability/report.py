@@ -1,19 +1,8 @@
 """
-Scalability-test measurements and files. Everything is computed from what a
-run actually recorded (scalability/run.py, scalability/worker.py): the
-runner's monotonic clock per iteration and each photo's perf_counter
-timings in scale_test_items. Nothing is estimated, and a missing value is
-left out, never counted as zero.
-
-Timer boundaries:
-  Execution time (one iteration) — time.monotonic() from right before the
-      first event is published to the test's Kafka topic (every photo is
-      already found, downloaded, verified and staged) until the last photo
-      is COMPLETED or FAILED. Includes the test topic, reading each staged
-      file, preprocessing, CNN inference and recording the measurement.
-  Processing time (one photo) — time.perf_counter() around
-      spark/preprocessing.model_input + ml/inference.predict only. Queue
-      waiting, file reading, Google Drive and database time are excluded.
+Scalability-test results, only from what a run recorded (a missing value is
+left out, never zero).
+  Execution time (iteration): first event sent -> last photo finished.
+  Processing time (photo): preprocessing + CNN only.
 """
 
 import csv
@@ -31,9 +20,7 @@ def summarize_samples(samples: list) -> dict:
 
 
 def processing_seconds(item):
-    """The photo's preprocessing + CNN seconds, or None when it has no
-    valid measurement (failed, not finished, measured while farmer photos
-    were being processed, or a run from before the isolation)."""
+    """The photo's preprocessing + CNN seconds, or None if not validly measured."""
     if item.status != "COMPLETED" or not item.timings_json:
         return None
     t = json.loads(item.timings_json)
@@ -43,8 +30,7 @@ def processing_seconds(item):
 
 
 def valid_iteration(run) -> bool:
-    """An iteration whose execution time counts: it finished, every photo
-    succeeded, and no farmer photo was being processed meanwhile."""
+    """Counts only if it finished, every photo succeeded and no farmer photo ran meanwhile."""
     if run.status != "COMPLETED" or not run.summary_json:
         return False
     s = json.loads(run.summary_json)
@@ -60,24 +46,8 @@ def _total_end_to_end(runs: list):
 
 
 def series_averages(runs: list, items: list) -> dict:
-    """The two results the dashboard shows for a test (one or more
-    iterations, scalability/run.start_series):
-
-      average_execution_s  = sum of the valid iterations' execution times
-                             / number of valid iterations
-      average_processing_s = mean processing time of every validly measured
-                             photo of the test's finished iterations
-      total_end_to_end_s   = the page's Total Execution Time: sum of every
-                             iteration's end_to_end_seconds (from pressing
-                             Start test to the last photo finished); None
-                             unless EVERY iteration is valid and has it
-      total_execution_s    = sum of the valid iterations' execution times
-      total_processing_s   = sum of those photos' processing times (photos run
-                             several at a time, so this is more than the
-                             total execution time)
-
-    `runs`: the iterations' ScaleTestRun rows; `items`: their
-    ScaleTestItem rows. A value is None when nothing valid was measured."""
+    """A test's results: average execution time per valid iteration, average
+    processing time per photo, and the totals (None when nothing valid)."""
     valid = [r for r in runs if valid_iteration(r)]
     durations = [json.loads(r.summary_json)["execution_seconds"] for r in valid]
     finished = {r.run_id for r in runs if r.status == "COMPLETED" and r.summary_json
@@ -104,9 +74,7 @@ UNKNOWN_LOCATION = "Unknown location"
 
 
 def items_frame(items: list):
-    """One row per test photo (pandas DataFrame) with what the disease
-    charts need: status, CNN result, municipality ("Unknown location" when
-    the photo has none, e.g. a custom-folder photo) and GPS."""
+    """One row per test photo for the disease charts."""
     import pandas as pd
     cols = ["image_id", "run_id", "status", "predicted_class", "prediction_confidence", "is_uncertain",
             "risk_level", "location", "gps_latitude", "gps_longitude", "error_message"]
@@ -123,8 +91,7 @@ def _write_csv(path, header: list, rows) -> None:
 
 
 def write_reports(run, items: list, samples: list, summary: dict):
-    """SCALABILITY_REPORTS_DIR/<run_id>/: summary.csv, items.csv (one row per
-    photo, with its timings) and resources.csv (CPU/RAM/GPU every second)."""
+    """Writes summary.csv, items.csv and resources.csv for the run."""
     out = REPORTS_DIR / run.run_id
     out.mkdir(parents=True, exist_ok=True)
     _write_csv(out / "summary.csv", ["metric", "value"],

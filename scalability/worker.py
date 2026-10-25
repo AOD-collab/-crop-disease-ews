@@ -1,26 +1,8 @@
 """
-The scalability test's own processing path, isolated from the live pipeline.
-
-The live pipeline is: Drive watcher -> Kafka topic KAFKA_TOPIC -> the Spark
-streaming job -> images/predictions in PostgreSQL -> the farmer's Drive. The
-test shares none of that path:
-
-  * events go to their own Kafka topic (SCALABILITY_KAFKA_TOPIC) and are read
-    by their own consumer group (SCALABILITY_CONSUMER_GROUP) in the runner's
-    process (scalability/run.py) — never by the Spark job;
-  * each photo is processed here by the SAME functions the Spark job calls,
-    spark/preprocessing.model_input and ml/inference.predict (same CNN
-    checkpoint, same preprocessing), and the result is thrown away: only
-    timings are kept, in scale_test_items;
-  * nothing is written to images, predictions, processing_events or Drive.
-
-What is still shared, honestly: the laptop's CPU, RAM and GPU, and the
-PostgreSQL server (for the test's own tables). The test loads its own copy
-of the CNN, so it uses extra GPU memory while it runs. To give real-time
-processing priority, LiveGate stops the test from starting new photos while
-farmer photos are being processed, the runner process runs at below-normal
-OS priority, and measurements taken while live processing was active are
-marked and left out of the averages (scalability/report.py).
+The scalability test's own processing, isolated from the live pipeline: its
+own Kafka topic, the same preprocessing + CNN code, results kept only in
+scale_test_items. Farmer photos come first: the test waits while they are
+processed and runs at lower OS priority.
 """
 
 import json
@@ -37,9 +19,7 @@ LIVE_STATUSES = (ProcessingStatus.INGESTED, ProcessingStatus.PROCESSING)
 
 # --------------------------------------------------------------- priority to real time
 def live_processing_active() -> bool:
-    """True while a farmer photo is waiting for or in the Spark job: status
-    INGESTED or PROCESSING, ingested in the last
-    SCALABILITY_LIVE_WINDOW_MINUTES (older ones are stuck, not active)."""
+    """True while a farmer photo is INGESTED or PROCESSING (recently; older ones are stuck)."""
     cutoff = now_utc() - timedelta(minutes=settings.SCALABILITY_LIVE_WINDOW_MINUTES)
     with SessionLocal() as s:
         rows = (s.query(Image.ingested_at, Image.uploaded_at)
@@ -50,10 +30,7 @@ def live_processing_active() -> bool:
 
 
 class LiveGate:
-    """Checks for live farmer processing every `interval` seconds. While it
-    is active, wait() blocks, so the test starts no new photo; each such
-    period is recorded (monotonic clock) so measurements that overlap one
-    can be left out of the averages."""
+    """Blocks wait() while farmer photos are processed, and records those pauses."""
 
     def __init__(self, check=live_processing_active, interval: float = 1.0):
         self._check = check
@@ -107,9 +84,7 @@ class LiveGate:
         return self._clear.wait(timeout)
 
     def overlapped(self, t0: float, t1: float) -> bool:
-        """Was live processing active at any moment between t0 and t1? Strict
-        comparisons: on Windows a pause that ended right before t0 can read
-        the same clock tick as t0."""
+        """Was live processing active at any moment between t0 and t1?"""
         with self._lock:
             return any(start < t1 and (end is None or end > t0) for start, end in self.pauses)
 
@@ -119,8 +94,7 @@ class LiveGate:
 
 
 def lower_priority() -> None:
-    """Below-normal OS priority for this process, so the live pipeline gets
-    the CPU first. (GPU time cannot be prioritised this way.)"""
+    """Below-normal OS priority, so the live pipeline gets the CPU first."""
     try:
         import psutil
         p = psutil.Process()
@@ -131,11 +105,8 @@ def lower_priority() -> None:
 
 # --------------------------------------------------------------- the test's own Kafka topic
 class KafkaTestQueue:
-    """Producer + consumer on the test's own topic and consumer group. The
-    consumer is subscribed (partitions assigned) before anything is sent, so
-    no event of this run can be missed; events of other runs are skipped by
-    the caller (run_id). consume=False: producer only (the Spark engine,
-    scalability/spark_engine.py, reads the topic itself)."""
+    """Producer + consumer on the test's own topic (subscribed before sending,
+    so nothing is missed). consume=False: producer only."""
 
     def __init__(self, topic: str = None, group: str = None, consume: bool = True):
         from confluent_kafka import Consumer, KafkaException
@@ -197,10 +168,7 @@ class KafkaTestQueue:
 
 # --------------------------------------------------------------- one photo
 def warm_up() -> None:
-    """Loads the CNN into this process (onto the GPU when there is one) and
-    runs one dummy photo through it BEFORE the timer starts, as the live
-    Spark job does at start-up (spark/streaming_job._warm_up_model): model
-    loading and CUDA start-up are not image processing."""
+    """Loads the CNN and runs one dummy photo before the timer starts."""
     from io import BytesIO
     from PIL import Image as PILImage
     from spark.preprocessing import model_input
@@ -211,14 +179,8 @@ def warm_up() -> None:
 
 
 def process_photo(path) -> tuple:
-    """Reads one staged photo and runs exactly the live pipeline's
-    preprocessing (spark/preprocessing.model_input) and CNN inference
-    (ml/inference.predict) on it. Returns (timings, prediction).
-    The prediction (class, confidence, uncertain flag, rule-based risk
-    level — ml/risk.compute_risk, as the live pipeline) is kept
-    only in scale_test_items, for the test page's disease charts; it never
-    becomes a diagnosis a farmer sees. Only the two stages are timed
-    (time.perf_counter); reading the file and the risk rule are not."""
+    """The live pipeline's preprocessing + CNN on one staged photo. Returns
+    (timings, prediction); only those two steps are timed."""
     from spark.preprocessing import model_input
     from ml.risk import compute_risk
     from ml.inference import predict
@@ -240,11 +202,7 @@ def process_photo(path) -> tuple:
 
 
 def photo_location(path, location=None, device_gps=None) -> dict:
-    """Where a staged photo was taken, read before the timer starts:
-    `location` = the municipality the farmer chose (Drive appProperties);
-    GPS = the photo's own EXIF GPS when it has some, else the phone's
-    position the app sent (`device_gps`) — the same priority as
-    spark/preprocessing.extract_metadata."""
+    """Where a photo was taken: its municipality and GPS (EXIF first, else the phone's)."""
     from storage.exif_utils import extract_image_metadata
     lat = lon = None
     try:
@@ -267,11 +225,7 @@ def preview_paths(out_dir: Path, item_id: str) -> tuple:
 
 
 def model_input_square(original: bytes, img_size: int):
-    """spark/preprocessing.model_input_preview without torch: the same
-    Resize + CenterCrop (torchvision on a PIL image is PIL bilinear), pixel
-    for pixel the same on 200 real photos (2026-10-24). The dashboard can't
-    import torch (WinError 1114 after pyarrow, see dashboard/model_ops.py),
-    so it gets the model's img_size from the run instead of the model."""
+    """model_input_preview without torch (the dashboard can't load torch); same pixels."""
     from PIL import Image as PILImage
     from spark.preprocessing import _prepared_rgb
     img = _prepared_rgb(original)
@@ -283,11 +237,7 @@ def model_input_square(original: bytes, img_size: int):
 
 
 def save_previews(original_path, out_dir: Path, item_id: str, img_size: int) -> None:
-    """The gallery's two small pictures for one photo, made when its page
-    is first viewed: `before` = the original (EXIF-upright, at most
-    PREVIEW_PX), `after` = the centre square the CNN gets
-    (model_input_square) — the picture the CNN received. Display only;
-    nothing here feeds the model."""
+    """The gallery's two small pictures: the original and the square the CNN gets."""
     from io import BytesIO
     from PIL import Image as PILImage, ImageOps
     before_path, after_path = preview_paths(out_dir, item_id)
@@ -302,9 +252,7 @@ def save_previews(original_path, out_dir: Path, item_id: str, img_size: int) -> 
 
 
 def ensure_previews(out_dir: Path, item_id: str, original_path, img_size: int) -> tuple:
-    """The gallery's two pictures for one photo, made the first time its
-    page is viewed and kept in out_dir/previews. Returns (before, after),
-    or (None, None) when the original is gone or can't be read."""
+    """(before, after) previews, made once and kept; (None, None) if the original is gone."""
     before, after = preview_paths(out_dir, item_id)
     if before.is_file() and after.is_file():
         return before, after
@@ -318,12 +266,7 @@ def ensure_previews(out_dir: Path, item_id: str, original_path, img_size: int) -
 
 
 def save_comparison(original_path, original_bytes: bytes, out_dir: Path) -> dict:
-    """The run's one before/after pair, from the photo the run actually
-    processed: `before` = the staged original file, `after` = that photo
-    cut and resized for the model (spark/preprocessing.model_input_preview)
-    — the picture the CNN received. Returns their paths relative to
-    `out_dir`. A photo read in place from another drive (run._stage) is
-    copied here, that one only."""
+    """Saves the run's before/after pair; returns their paths relative to `out_dir`."""
     import shutil
     from spark.preprocessing import model_input_preview
     out_dir.mkdir(parents=True, exist_ok=True)
