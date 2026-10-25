@@ -309,16 +309,14 @@ def _process_one(event: dict):
         result = process_event(event)
         save(result, ProcessingStatus.COMPLETED)
         status = ProcessingStatus.COMPLETED
-    except InvalidEvent as e:
-        print(f"[streaming_job] Invalid event, skipping: {e}")
-        error = str(e)
-        save(None, ProcessingStatus.FAILED, error_message=error)
-    except Exception as e:
-        print(f"[streaming_job] Processing failed for {event.get('image_id')}: {e}")
+    except Exception as e:                     # an InvalidEvent too, only reported differently
+        print(f"[streaming_job] Invalid event, skipping: {e}" if isinstance(e, InvalidEvent)
+              else f"[streaming_job] Processing failed for {event.get('image_id')}: {e}")
         error = str(e)
         try:
             save(None, ProcessingStatus.FAILED, error_message=error)
-        except Exception as db_error:  # noqa: BLE001 - don't take the other photos down with it
+        except Exception as db_error:  # noqa: BLE001 - don't take the other photos (or the job) down with it
+            # The photo stays PROCESSING; storage/requeue_stuck.py sends it again.
             print(f"[streaming_job] Could not record the failure for {image_id}: {db_error}")
 
     live_log.photo_done(event, status.value, result, error, time.monotonic() - photo_started)

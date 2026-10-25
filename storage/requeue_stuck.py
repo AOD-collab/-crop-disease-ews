@@ -214,10 +214,13 @@ def process_inline(images, dry_run: bool) -> int:
                   f"(risk {result['risk_level']} {result['risk_score']})")
             done += 1
         except Exception as e:                     # an InvalidEvent too, only labelled differently
-            persist_result(event, None, ProcessingStatus.FAILED, error_message=str(e))
-            publish_result_to_drive_safely(event, ProcessingStatus.FAILED, str(e))
             print(f"  {'FAILED (invalid)' if isinstance(e, InvalidEvent) else 'FAILED'}  {img.image_id}: {e}")
             failed += 1
+            try:
+                persist_result(event, None, ProcessingStatus.FAILED, error_message=str(e))
+                publish_result_to_drive_safely(event, ProcessingStatus.FAILED, str(e))
+            except Exception as db_error:  # noqa: BLE001 - keep going with the other photos
+                print(f"  could not record the failure of {img.image_id}: {db_error}")
     print(f"\nProcessed inline: {done} completed, {failed} failed.")
     return done
 
