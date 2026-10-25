@@ -334,13 +334,15 @@ def reconcile(catalog_ids: dict | None = None, reviews: set | None = None, train
         if p.suffix.lower() not in IMAGE_SUFFIXES:
             continue
         image_id, owner = p.stem, p.parent.name
+
+        def add(verdict, reason, in_use=False):
+            out.append(FileRecord("original_cache", rel, size, image_id, verdict, reason, in_use, p))
         rec = ids.get(image_id)
         if rec is not None:
             uid, h, status = rec
             in_use = status in ACTIVE_STATUSES
             if uid != owner:
-                out.append(FileRecord("original_cache", rel, size, image_id, "wrong_folder",
-                                      "the record belongs to another farmer's folder", in_use, p))
+                add("wrong_folder", "the record belongs to another farmer's folder", in_use)
                 continue
             if h:
                 try:
@@ -349,13 +351,11 @@ def reconcile(catalog_ids: dict | None = None, reviews: set | None = None, train
                     continue
             present.add(image_id)
             if not h:
-                out.append(FileRecord("original_cache", rel, size, image_id, "unverified",
-                                      "no checksum recorded", in_use, p))
+                add("unverified", "no checksum recorded", in_use)
             elif digest == h:
-                out.append(FileRecord("original_cache", rel, size, image_id, "matched", "", in_use, p))
+                add("matched", "", in_use)
             else:
-                out.append(FileRecord("original_cache", rel, size, image_id, "invalid",
-                                      "SHA-256 differs from the recorded original", in_use, p))
+                add("invalid", "SHA-256 differs from the recorded original", in_use)
             continue
         note = " Also in the training data." if image_id in training else ""
         try:
@@ -363,12 +363,10 @@ def reconcile(catalog_ids: dict | None = None, reviews: set | None = None, train
         except OSError:                      # removed or locked while we looked
             continue
         if same:
-            out.append(FileRecord("original_cache", rel, size, image_id, "orphan_duplicate",
-                                  f"same bytes as registered photo {same}.{note}", False, p))
+            add("orphan_duplicate", f"same bytes as registered photo {same}.{note}")
         else:
-            out.append(FileRecord("original_cache", rel, size, image_id, "orphan",
-                                  "no database record (e.g. from before a factory reset); its Drive "
-                                  f"original may no longer exist.{note}", False, p))
+            add("orphan", "no database record (e.g. from before a factory reset); its Drive "
+                          f"original may no longer exist.{note}")
     misplaced = {r.image_id for r in out if r.verdict == "wrong_folder"}
     for image_id, (uid, _h, status) in ids.items():
         if image_id not in present and image_id not in misplaced:

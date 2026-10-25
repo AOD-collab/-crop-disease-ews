@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from config.settings import MAX_IMAGE_SIZE, ALLOWED_IMAGE_CONTENT_TYPES
-from storage import drive_client
+from storage import drive_client, drive_inventory
 from storage.database import SessionLocal, User
 from storage.auth import normalize_email
 from storage.image_storage import downloaded_photo_path, store_downloaded_photo
@@ -97,17 +97,15 @@ def enumerate_collection() -> Collection:
     out. A photo is included once: repeated Drive ids, repeated image_ids and
     repeated content (same SHA-256 uploaded twice) are excluded."""
     started = time.monotonic()
-    folders = {f["id"]: f["name"] for f in drive_client.list_subfolders(drive_client.images_folder_id())}
-    files = drive_client.list_files_in_folders(list(folders)) if folders else []
+    photos = drive_inventory.farmer_photos()
     with SessionLocal() as s:
         users = {normalize_email(e): uid for uid, e in s.query(User.user_id, User.email).all()}
 
     excluded = Counter()
     seen_files, seen_ids, seen_content = set(), set(), set()
     candidates = []
-    for meta in files:          # list_files_in_folders sorts by createdTime
-        folder = next((p for p in meta.get("parents") or [] if p in folders), None)
-        reason = _problem(meta, folders.get(folder), users)
+    for meta, folder_email in photos:          # oldest upload first
+        reason = _problem(meta, folder_email, users)
         props = meta.get("appProperties") or {}
         sha = meta.get("sha256Checksum")
         if reason is None:
@@ -133,7 +131,7 @@ def enumerate_collection() -> Collection:
             captured_at_client=props.get("captured_at_client"),
             device_gps=_device_gps(props),
         ))
-    return Collection(candidates=candidates, total_files=len(files), excluded=excluded,
+    return Collection(candidates=candidates, total_files=len(photos), excluded=excluded,
                       enumerate_seconds=time.monotonic() - started)
 
 

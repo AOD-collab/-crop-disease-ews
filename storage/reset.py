@@ -73,8 +73,7 @@ def spark_job_running():
     None if that can't be checked. Resetting under a live job corrupts its
     checkpoint: the job keeps writing batch N into the emptied folder, and
     the next start fails with "batch N-1 doesn't exist"."""
-    out = _python_command_lines()
-    return None if out is None else ("spark.streaming_job" in out or "streaming_job.py" in out)
+    return _process_running("spark.streaming_job", "streaming_job.py")
 
 
 def drive_watcher_running():
@@ -83,8 +82,14 @@ def drive_watcher_running():
     new upload after the tables are emptied and publish it just before the
     Kafka topic is cleared — in AUTOMATIC mode that photo then stays
     INGESTED for good."""
+    return _process_running("kafka.drive_watcher", "drive_watcher.py")
+
+
+def _process_running(*names):
+    """True if a Python command line names any of `names`, None if that
+    can't be checked."""
     out = _python_command_lines()
-    return None if out is None else ("kafka.drive_watcher" in out or "drive_watcher.py" in out)
+    return None if out is None else any(n in out for n in names)
 
 
 def _python_command_lines():

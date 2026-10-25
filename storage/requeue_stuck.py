@@ -157,12 +157,17 @@ def rebase_paths(session, images, dry_run: bool) -> int:
     return healed
 
 
-def republish(images, dry_run: bool) -> int:
-    if not images:
-        return 0
+def _listed_only(images, dry_run: bool, verb: str) -> bool:
+    """True when there is nothing to do: no images, or a dry run (which
+    lists what it would `verb`)."""
     if dry_run:
         for img in images:
-            print(f"  would re-publish  {img.image_id}  ({img.status.value})")
+            print(f"  would {verb}  {img.image_id}  ({img.status.value})")
+    return not images or dry_run
+
+
+def republish(images, dry_run: bool) -> int:
+    if _listed_only(images, dry_run, "re-publish"):
         return 0
 
     from kafka.config import KAFKA_TOPIC
@@ -188,11 +193,7 @@ def republish(images, dry_run: bool) -> int:
 
 
 def process_inline(images, dry_run: bool) -> int:
-    if not images:
-        return 0
-    if dry_run:
-        for img in images:
-            print(f"  would process inline  {img.image_id}  ({img.status.value})")
+    if _listed_only(images, dry_run, "process inline"):
         return 0
 
     from spark.preprocessing import (
@@ -212,15 +213,10 @@ def process_inline(images, dry_run: bool) -> int:
             print(f"  processed  {img.image_id}  -> {result['predicted_class']} "
                   f"(risk {result['risk_level']} {result['risk_score']})")
             done += 1
-        except InvalidEvent as e:
+        except Exception as e:                     # an InvalidEvent too, only labelled differently
             persist_result(event, None, ProcessingStatus.FAILED, error_message=str(e))
             publish_result_to_drive_safely(event, ProcessingStatus.FAILED, str(e))
-            print(f"  FAILED (invalid)  {img.image_id}: {e}")
-            failed += 1
-        except Exception as e:
-            persist_result(event, None, ProcessingStatus.FAILED, error_message=str(e))
-            publish_result_to_drive_safely(event, ProcessingStatus.FAILED, str(e))
-            print(f"  FAILED  {img.image_id}: {e}")
+            print(f"  {'FAILED (invalid)' if isinstance(e, InvalidEvent) else 'FAILED'}  {img.image_id}: {e}")
             failed += 1
     print(f"\nProcessed inline: {done} completed, {failed} failed.")
     return done
@@ -275,14 +271,10 @@ def main() -> int:
         return 0
 
     with SessionLocal() as session:
-        stuck = find_stuck(session, args.older_than, args.include_failed, args.all)
-        # detach a lightweight view so we don't hold the session open during processing
-        view = [
-            session.get(Image, s.image_id) for s in stuck
-        ]
+        # a lightweight summary, so the session isn't held open during processing
         summary = [(i.image_id, i.status.value + (" (result not in Drive yet)"
                                                   if i.status == ProcessingStatus.COMPLETED else ""))
-                   for i in view]
+                   for i in find_stuck(session, args.older_than, args.include_failed, args.all)]
 
     if not summary:
         print("No stuck images found. Nothing to do.")

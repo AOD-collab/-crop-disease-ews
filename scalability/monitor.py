@@ -39,33 +39,26 @@ def spark_job_running() -> bool:
     return bool(spark_processes())
 
 
-def gpu_reading():
-    """(util %, memory used MB, memory total MB) of GPU 0, or None."""
+def _nvidia_smi(*args, parse=lambda out: out):
+    """parse(nvidia-smi's stripped output), or None without nvidia-smi or on any error."""
     exe = shutil.which("nvidia-smi")
     if not exe:
         return None
     try:
-        out = subprocess.run(
-            [exe, "--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=5,
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-        ).stdout.strip().splitlines()
-        util, used, total = (float(x) for x in out[0].split(","))
-        return util, used, total
+        return parse(subprocess.run([exe, *args], capture_output=True, text=True, timeout=5,
+                                    creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.strip())
     except Exception:  # noqa: BLE001
         return None
+
+
+def gpu_reading():
+    """(util %, memory used MB, memory total MB) of GPU 0, or None."""
+    return _nvidia_smi("--query-gpu=utilization.gpu,memory.used,memory.total", "--format=csv,noheader,nounits",
+                       parse=lambda out: tuple(float(x) for x in out.splitlines()[0].split(",")))
 
 
 def gpu_name():
-    exe = shutil.which("nvidia-smi")
-    if not exe:
-        return None
-    try:
-        return subprocess.run([exe, "--query-gpu=name", "--format=csv,noheader"], capture_output=True,
-                              text=True, timeout=5,
-                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout.strip() or None
-    except Exception:  # noqa: BLE001
-        return None
+    return _nvidia_smi("--query-gpu=name", "--format=csv,noheader", parse=lambda out: out or None)
 
 
 class ResourceMonitor:
@@ -125,9 +118,7 @@ class ResourceMonitor:
             "memory_used_mb": round((mem.total - mem.available) / 2**20, 1),
             "memory_percent": mem.percent,
             "spark_rss_mb": round(rss / 2**20, 1) if self._procs else None,
-            "gpu_util_percent": gpu[0] if gpu else None,
-            "gpu_memory_used_mb": gpu[1] if gpu else None,
-            "gpu_memory_total_mb": gpu[2] if gpu else None,
+            **dict(zip(("gpu_util_percent", "gpu_memory_used_mb", "gpu_memory_total_mb"), gpu or (None,) * 3)),
         })
 
 
@@ -139,9 +130,7 @@ def summarize(samples: list) -> dict:
         return round(sum(vals) / len(vals), 1), round(max(vals), 1)
 
     out = {"resource_samples": len(samples)}
-    for key, name in (("cpu_percent", "cpu_percent"), ("memory_used_mb", "memory_used_mb"),
-                      ("memory_percent", "memory_percent"), ("spark_rss_mb", "spark_rss_mb"),
-                      ("gpu_util_percent", "gpu_util_percent"), ("gpu_memory_used_mb", "gpu_memory_used_mb")):
-        mean, peak = stat(key)
-        out[f"{name}_mean"], out[f"{name}_peak"] = mean, peak
+    for key in ("cpu_percent", "memory_used_mb", "memory_percent", "spark_rss_mb",
+                "gpu_util_percent", "gpu_memory_used_mb"):
+        out[f"{key}_mean"], out[f"{key}_peak"] = stat(key)
     return out

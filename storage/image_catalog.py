@@ -83,18 +83,20 @@ def _conditions(f: CatalogFilters) -> list:
     if f.statuses:
         out.append(c.status.in_(list(f.statuses)))
     if f.predicted_classes:
-        classes = [x for x in f.predicted_classes if x != NO_PREDICTION]
-        parts = [c.predicted_class.in_(classes)] if classes else []
-        if NO_PREDICTION in f.predicted_classes:
-            parts.append(c.prediction_id.is_(None))
-        out.append(or_(*parts))
+        out.append(_in_or_none(c.predicted_class, f.predicted_classes, NO_PREDICTION, c.prediction_id))
     if f.risk_levels:
-        levels = [x for x in f.risk_levels if x != NO_RISK]
-        parts = [c.risk_level.in_(levels)] if levels else []
-        if NO_RISK in f.risk_levels:
-            parts.append(c.risk_level.is_(None))
-        out.append(or_(*parts))
+        out.append(_in_or_none(c.risk_level, f.risk_levels, NO_RISK, c.risk_level))
     return out
+
+
+def _in_or_none(column, values, none_choice: str, none_column):
+    """column IN values — and, when `none_choice` ("no prediction" / "no
+    risk") is among them, rows whose none_column IS NULL too."""
+    real = [x for x in values if x != none_choice]
+    parts = [column.in_(real)] if real else []
+    if none_choice in values:
+        parts.append(none_column.is_(None))
+    return or_(*parts)
 
 
 def _escape_like(value: str) -> str:

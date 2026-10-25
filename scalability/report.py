@@ -115,25 +115,24 @@ def items_frame(items: list):
     return df
 
 
+def _write_csv(path, header: list, rows) -> None:
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        w.writerows(rows)
+
+
 def write_reports(run, items: list, samples: list, summary: dict):
     """SCALABILITY_REPORTS_DIR/<run_id>/: summary.csv, items.csv (one row per
     photo, with its timings) and resources.csv (CPU/RAM/GPU every second)."""
     out = REPORTS_DIR / run.run_id
     out.mkdir(parents=True, exist_ok=True)
-    with open(out / "summary.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["metric", "value"])
-        for key, value in summary.items():
-            w.writerow([key, json.dumps(value) if isinstance(value, (dict, list)) else value])
-    with open(out / "items.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(ITEM_COLUMNS + TIMING_COLUMNS)
-        for i in items:
-            t = json.loads(i.timings_json) if i.timings_json else {}
-            w.writerow([getattr(i, c) for c in ITEM_COLUMNS] + [t.get(k) for k in TIMING_COLUMNS])
+    _write_csv(out / "summary.csv", ["metric", "value"],
+               ([key, json.dumps(value) if isinstance(value, (dict, list)) else value]
+                for key, value in summary.items()))
+    _write_csv(out / "items.csv", ITEM_COLUMNS + TIMING_COLUMNS,
+               ([getattr(i, c) for c in ITEM_COLUMNS] + [t.get(k) for k in TIMING_COLUMNS]
+                for i in items for t in (json.loads(i.timings_json) if i.timings_json else {},)))
     if samples:
-        with open(out / "resources.csv", "w", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=FIELDS)
-            w.writeheader()
-            w.writerows(samples)
+        _write_csv(out / "resources.csv", FIELDS, ([sample.get(k) for k in FIELDS] for sample in samples))
     return out

@@ -220,9 +220,28 @@ def _source(source_dir=None, from_drive=False) -> str:
     return "folder" if source_dir else "google_drive" if from_drive else dataset.LOCAL_SOURCE
 
 
+# How each photo source is named: in the log (label), the run's config
+# (image_source), its first phase, and the error when it has no valid photo.
+# {dir} = the custom folder, {local} = the farmer photos folder on this laptop.
+_SOURCE_TEXT = {
+    "folder": {"label": "custom folder {dir}", "image_source": "photos in the custom folder {dir}",
+               "phase": "Scanning the folder", "empty": "no valid photos in the folder {dir}"},
+    "google_drive": {"label": "Google Drive", "image_source": "verified local copies of the Google Drive originals",
+                     "phase": "Listing the Drive collection",
+                     "empty": "no valid photos in the Google Drive collection"},
+    "local": {"label": "local photos in {local}",
+              "image_source": "farmer photos stored on this laptop ({local}), no Google Drive",
+              "phase": "Scanning the local photos", "empty": "no valid photos in {local}"},
+}
+
+
+def _source_text(source_dir, from_drive, key: str) -> str:
+    return _SOURCE_TEXT[_source(source_dir, from_drive)][key].format(
+        dir=source_dir, local=dataset.local_photos_dir())
+
+
 def _source_label(source_dir, from_drive=False) -> str:
-    return {"folder": f"custom folder {source_dir}", "google_drive": "Google Drive",
-            "local": f"local photos in {dataset.local_photos_dir()}"}[_source(source_dir, from_drive)]
+    return _source_text(source_dir, from_drive, "label")
 
 
 def _collection(source_dir=None, from_drive=False):
@@ -255,10 +274,7 @@ def _benchmark_config(source_dir=None, series=None, from_drive=False) -> dict:
         "RAM_GB": round(psutil.virtual_memory().total / 2**30, 1),
         "LIVE_OUTPUT": _live_mode,
         "SOURCE": _source(source_dir, from_drive),
-        "IMAGE_SOURCE": {"folder": f"photos in the custom folder {source_dir}",
-                         "google_drive": "verified local copies of the Google Drive originals",
-                         "local": f"farmer photos stored on this laptop ({dataset.local_photos_dir()}), "
-                                  "no Google Drive"}[_source(source_dir, from_drive)],
+        "IMAGE_SOURCE": _source_text(source_dir, from_drive, "image_source"),
         **({"SOURCE_DIR": str(source_dir)} if source_dir else {}),
     }
 
@@ -309,9 +325,23 @@ def _chunks(seq, n=CHUNK):
         yield seq[i:i + n]
 
 
+def _throttled(every_s: float, report):
+    """A progress(done, total) callback that calls report(done, total) at
+    most every `every_s` seconds, and always for the last one."""
+    last = [0.0]
+
+    def progress(done, total):
+        if time.monotonic() - last[0] > every_s or done == total:
+            last[0] = time.monotonic()
+            report(done, total)
+    return progress
+
+
 def _set_phase(run_id: str, phase: str, **fields) -> None:
     with SessionLocal() as s:
         run = s.get(ScaleTestRun, run_id)
+        if run is None:
+            return
         run.phase = phase
         for k, v in fields.items():
             setattr(run, k, v)
@@ -342,13 +372,8 @@ def prepare(size: int, workers: int = 8) -> dict:
         _write_prepare_status(phase="Listing the Drive collection", done=0, total=0)
         col = dataset.enumerate_collection()
         chosen = col.candidates[:size]
-        last = [0.0]
-
-        def progress(done, total):
-            if time.monotonic() - last[0] > 1 or done == total:
-                last[0] = time.monotonic()
-                _write_prepare_status(phase="Preparing local copies", done=done, total=total)
-
+        progress = _throttled(1, lambda done, total: _write_prepare_status(
+            phase="Preparing local copies", done=done, total=total))
         prep = dataset.prepare_local_copies(chosen, workers=workers, progress=progress)
         result = {**col.as_dict(), "selected": len(chosen), **prep}
         _write_prepare_status(phase="Finished", done=len(chosen), total=len(chosen), finished=True, result=result)
@@ -404,8 +429,7 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
         worker.lower_priority()
         with SessionLocal() as s:
             s.add(ScaleTestRun(run_id=run_id, status="PREPARING",
-                               phase={"folder": "Scanning the folder", "google_drive": "Listing the Drive collection",
-                                      "local": "Scanning the local photos"}[_source(source_dir, from_drive)],
+                               phase=_source_text(source_dir, from_drive, "phase"),
                                pid=os.getpid(), requested_size=size, replay_of=replay_of, publish_results=False,
                                config_json=json.dumps(_benchmark_config(source_dir, series, from_drive))))
             s.commit()
@@ -429,21 +453,14 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
             chosen = col.candidates[:size]
         selection.update(requested=size, selected=len(chosen))
         if not chosen:
-            raise RunError({"folder": f"no valid photos in the folder {source_dir}",
-                            "google_drive": "no valid photos in the Google Drive collection",
-                            "local": f"no valid photos in {dataset.local_photos_dir()}"}[
-                               _source(source_dir, from_drive)])
+            raise RunError(_source_text(source_dir, from_drive, "empty"))
 
         # 2. local copies ----------------------------------------------------
-        last = [0.0]
+        def report(done, total):
+            _set_phase(run_id, f"Preparing local copies: {done} of {total}")
+            _emit([f"[prepare]  local copies {done} of {total} ready (before the timer)"])
 
-        def progress(done, total):
-            if time.monotonic() - last[0] > 2 or done == total:
-                last[0] = time.monotonic()
-                _set_phase(run_id, f"Preparing local copies: {done} of {total}")
-                _emit([f"[prepare]  local copies {done} of {total} ready (before the timer)"])
-
-        prep = dataset.prepare_local_copies(chosen, workers=workers, progress=progress)
+        prep = dataset.prepare_local_copies(chosen, workers=workers, progress=_throttled(2, report))
         selection.update(prep)
         ready = [c for c in chosen if c.local_path]
         if not ready:
@@ -649,22 +666,12 @@ def start(size: int = None, replay_of: str = None, workers: int = 8, stall_secon
         return run_id
     except Exception as e:
         log(f"{run_id}: FAILED: {_error_text(e)}")
-        with SessionLocal() as s:
-            run = s.get(ScaleTestRun, run_id)
-            if run is not None:
-                run.status, run.error_message, run.finished_at = "FAILED", _error_text(e)[:2000], now_utc()
-                run.phase = "Failed"
-                s.commit()
+        _set_phase(run_id, "Failed", status="FAILED", error_message=_error_text(e)[:2000], finished_at=now_utc())
         raise
     finally:
-        if monitor is not None:
-            monitor.stop()
-        if gate is not None:
-            gate.stop()
-        if stream is not None:
-            stream.stop()
-        if queue is not None:
-            queue.close()
+        for part, close in ((monitor, "stop"), (gate, "stop"), (stream, "stop"), (queue, "close")):
+            if part is not None:
+                getattr(part, close)()
         shutil.rmtree(run_dir(run_id) / "spark_checkpoint", ignore_errors=True)
         if not _locked:
             _release_lock()
@@ -994,22 +1001,19 @@ def _main(argv=None) -> int:
                 p.error("--replay-of reuses the replayed run's own source; leave out --source-dir/--from-drive")
             if args.source_dir and args.from_drive:
                 p.error("choose one source: --source-dir or --from-drive")
+            common = dict(workers=args.workers, stall_seconds=args.stall_minutes * 60,
+                          source_dir=args.source_dir, from_drive=args.from_drive)
             if args.iterations > 1:
                 if args.replay_of or args.run_id:
                     p.error("--iterations can't be combined with --replay-of")
-                start_series(args.size, args.iterations, workers=args.workers,
-                             stall_seconds=args.stall_minutes * 60, source_dir=args.source_dir,
-                             from_drive=args.from_drive)
+                start_series(args.size, args.iterations, **common)
             else:
-                start(args.size, replay_of=args.replay_of, workers=args.workers,
-                      stall_seconds=args.stall_minutes * 60, run_id=args.run_id, source_dir=args.source_dir,
-                      from_drive=args.from_drive)
+                start(args.size, replay_of=args.replay_of, run_id=args.run_id, **common)
         elif args.cmd == "report":
             print(regenerate_report(args.run_id))
-        elif args.cmd == "cleanup":
-            print(json.dumps(cleanup(args.run_id, args.drive_results), indent=2))
-        elif args.cmd == "delete":
-            print(json.dumps(delete(args.run_id, args.drive_results), indent=2))
+        elif args.cmd in ("cleanup", "delete"):
+            action = cleanup if args.cmd == "cleanup" else delete
+            print(json.dumps(action(args.run_id, args.drive_results), indent=2))
         elif args.cmd == "reset":
             from scalability import reset as test_reset
             result = test_reset.reset_all(performed_by="cli")
@@ -1030,14 +1034,13 @@ def _main(argv=None) -> int:
                           f"execution={sm.get('execution_seconds')}s")
     except RunError as e:
         print(f"ERROR: {e}", file=sys.stderr)
-        _wait_for_enter(args)
         return 1
     except Exception:
         import traceback
         traceback.print_exc()
-        _wait_for_enter(args)
         return 1
-    _wait_for_enter(args)
+    finally:
+        _wait_for_enter(args)
     return 0
 
 

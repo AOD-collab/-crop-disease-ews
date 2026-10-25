@@ -23,15 +23,9 @@ _DATETIME_ORIGINAL_TAG = next(
 )
 
 
-def extract_captured_at(image_bytes: bytes) -> Tuple[Optional[datetime], Optional[str]]:
-    """Returns (captured_at, source) where source is "exif" on success, or
-    (None, None) if no valid EXIF DateTimeOriginal is present."""
-    try:
-        img = Image.open(BytesIO(image_bytes))
-        exif = img.getexif()
-    except Exception:
-        return None, None
-
+def _captured_at(exif) -> Tuple[Optional[datetime], Optional[str]]:
+    """(captured_at, "exif") from a photo's EXIF block, or (None, None) if no
+    valid EXIF DateTimeOriginal is present."""
     if not exif:
         return None, None
 
@@ -40,7 +34,7 @@ def extract_captured_at(image_bytes: bytes) -> Tuple[Optional[datetime], Optiona
     # falling back to the base IFD for cameras/tools that write it flat.
     raw_value = None
     try:
-        sub_ifd = exif.get_ifd(0x8769)
+        sub_ifd = exif.get_ifd(_EXIF_IFD)
         raw_value = sub_ifd.get(_DATETIME_ORIGINAL_TAG)
     except Exception:
         pass
@@ -168,7 +162,7 @@ def extract_image_metadata(image_bytes: bytes) -> dict:
     meta["camera_model"] = _clean_text(exif.get(_TAG_MODEL))
     meta.update(extract_gps(exif))
 
-    captured_at, source = extract_captured_at(image_bytes)
+    captured_at, source = _captured_at(exif)
     if captured_at is not None:
         try:
             offset = _clean_text(exif.get_ifd(_EXIF_IFD).get(_TAG_OFFSET_TIME_ORIGINAL))

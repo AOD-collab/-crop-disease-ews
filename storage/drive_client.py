@@ -79,16 +79,18 @@ def _require_valid_id(value: str, what: str = "Drive file id") -> str:
     return value
 
 
+def _root_folder_id(folder_id: str, setting: str) -> str:
+    if not folder_id:
+        raise DriveNotConfigured(f"{setting} is not set — run scripts/drive_authorize.py")
+    return folder_id
+
+
 def images_folder_id() -> str:
-    if not GOOGLE_DRIVE_IMAGES_FOLDER_ID:
-        raise DriveNotConfigured("GOOGLE_DRIVE_IMAGES_FOLDER_ID is not set — run scripts/drive_authorize.py")
-    return GOOGLE_DRIVE_IMAGES_FOLDER_ID
+    return _root_folder_id(GOOGLE_DRIVE_IMAGES_FOLDER_ID, "GOOGLE_DRIVE_IMAGES_FOLDER_ID")
 
 
 def results_folder_id() -> str:
-    if not GOOGLE_DRIVE_RESULTS_FOLDER_ID:
-        raise DriveNotConfigured("GOOGLE_DRIVE_RESULTS_FOLDER_ID is not set — run scripts/drive_authorize.py")
-    return GOOGLE_DRIVE_RESULTS_FOLDER_ID
+    return _root_folder_id(GOOGLE_DRIVE_RESULTS_FOLDER_ID, "GOOGLE_DRIVE_RESULTS_FOLDER_ID")
 
 
 def is_configured() -> bool:
@@ -189,33 +191,41 @@ def _request(method: str, url: str, **kwargs):
         _sleep(wait)
 
 
-def _get_with_retry(url: str, params: dict):
-    """GET with a timeout and a few retries on transient network drops
-    ("Connection aborted", "IncompleteRead", timeouts). Without this, one
-    flaky mobile/Wi-Fi hiccup during a photo download marked the image
-    FAILED permanently. Only for GETs: a POST whose answer got lost may
-    have been applied, and repeating it would create a second file. Rate
-    limits are retried by _request(); other HTTP errors go to _check()."""
+def _with_network_retry(attempts: int, label: str, call):
+    """call(attempt), tried again after a transient network drop
+    ("Connection aborted", "IncompleteRead", a timeout), waiting 2 s, 4 s ...
+    `label` (may name {attempt}) goes into the log line."""
     import requests
-    for attempt in range(1, _GET_ATTEMPTS + 1):
+    for attempt in range(1, attempts + 1):
         try:
-            resp = _request("GET", url, params=params, timeout=_GET_TIMEOUT)
-            resp.content  # force the full body read inside the retry loop
-            return resp
+            return call(attempt)
         except (requests.exceptions.ConnectionError,
                 requests.exceptions.ChunkedEncodingError,
                 requests.exceptions.Timeout) as e:
-            if attempt == _GET_ATTEMPTS:
+            if attempt == attempts:
                 raise
-            print(f"[drive_client] GET attempt {attempt} failed ({e}); retrying")
+            print(f"[drive_client] {label.format(attempt=attempt)} failed ({e}); retrying")
             _sleep(2 * attempt)
+
+
+def _get_with_retry(url: str, params: dict):
+    """GET with a timeout and a few retries on transient network drops.
+    Without this, one flaky mobile/Wi-Fi hiccup during a photo download
+    marked the image FAILED permanently. Only for GETs: a POST whose answer
+    got lost may have been applied, and repeating it would create a second
+    file. Rate limits are retried by _request(); other HTTP errors go to
+    _check()."""
+    def get(_attempt):
+        resp = _request("GET", url, params=params, timeout=_GET_TIMEOUT)
+        resp.content  # force the full body read inside the retry loop
+        return resp
+    return _with_network_retry(_GET_ATTEMPTS, "GET attempt {attempt}", get)
 
 
 def get_file_metadata(file_id: str) -> dict:
     _require_valid_id(file_id)
-    resp = _get_with_retry(f"{DRIVE_API}/files/{file_id}", {"fields": FILE_METADATA_FIELDS})
-    _check(resp, f"get metadata for {file_id}")
-    return resp.json()
+    return _check(_get_with_retry(f"{DRIVE_API}/files/{file_id}", {"fields": FILE_METADATA_FIELDS}),
+                  f"get metadata for {file_id}").json()
 
 
 def download_file(file_id: str) -> bytes:
@@ -257,8 +267,7 @@ def find_file_in_folder(name: str, parent_id: str) -> Optional[dict]:
             "fields": "files(id,name,appProperties)",
         },
     )
-    _check(resp, f"search for {name}")
-    files = resp.json().get("files", [])
+    files = _check(resp, f"search for {name}").json().get("files", [])
     return files[0] if files else None
 
 
@@ -299,19 +308,10 @@ def upload_bytes(name: str, payload: bytes, mime_type: str, parent_id: str, app_
     may_exist=False skips the "does it exist?" search (a files.list, the
     priciest call per photo in Drive quota) — only for a caller that knows
     the file was never written, e.g. a photo's first processing attempt."""
-    import requests
-    for attempt in range(1, _UPLOAD_ATTEMPTS + 1):
-        try:
-            # A retry always searches first: the timed-out attempt may have
-            # created the file anyway, and must not get a twin.
-            return _upload_once(name, payload, mime_type, parent_id, app_properties,
-                                may_exist or attempt > 1, existing_id)
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
-                requests.exceptions.ChunkedEncodingError) as e:
-            if attempt == _UPLOAD_ATTEMPTS:
-                raise
-            print(f"[drive_client] upload of {name} failed ({e}); retrying")
-            _sleep(2 * attempt)
+    # A retry always searches first: the timed-out attempt may have created
+    # the file anyway, and must not get a twin.
+    return _with_network_retry(_UPLOAD_ATTEMPTS, f"upload of {name}", lambda attempt: _upload_once(
+        name, payload, mime_type, parent_id, app_properties, may_exist or attempt > 1, existing_id))
 
 
 def _upload_once(name, payload, mime_type, parent_id, app_properties, may_exist, existing_id=None):
@@ -328,8 +328,7 @@ def _upload_once(name, payload, mime_type, parent_id, app_properties, may_exist,
             headers={"Content-Type": content_type},
             data=body,
         )
-        _check(resp, f"update {name}")
-        return resp.json()["id"]
+        return _check(resp, f"update {name}").json()["id"]
 
     metadata = {"name": name, "mimeType": mime_type, "parents": [parent_id], "appProperties": props}
     body, content_type = _multipart_body(metadata, payload, mime_type)
@@ -338,8 +337,7 @@ def _upload_once(name, payload, mime_type, parent_id, app_properties, may_exist,
         headers={"Content-Type": content_type},
         data=body,
     )
-    _check(resp, f"create {name}")
-    return resp.json()["id"]
+    return _check(resp, f"create {name}").json()["id"]
 
 
 def upload_json(name: str, data: dict, parent_id: str, app_properties: dict, may_exist: bool = True,
@@ -354,8 +352,7 @@ def get_start_page_token() -> str:
     """Bookmark for "now" in the account's change feed: list_changes() from
     this token returns only what changes afterwards."""
     resp = _request("GET", f"{DRIVE_API}/changes/startPageToken", params={"fields": "startPageToken"})
-    _check(resp, "get changes start token")
-    return resp.json()["startPageToken"]
+    return _check(resp, "get changes start token").json()["startPageToken"]
 
 
 def list_changes(page_token: str) -> tuple:
@@ -371,31 +368,30 @@ def list_changes(page_token: str) -> tuple:
             "pageToken": page_token, "pageSize": 1000, "spaces": "drive", "includeRemoved": "false",
             "fields": f"nextPageToken,newStartPageToken,changes(fileId,removed,file({FILE_METADATA_FIELDS}))",
         })
-        _check(resp, "list changes")
-        body = resp.json()
+        body = _check(resp, "list changes").json()
         changes.extend(body.get("changes", []))
         if body.get("newStartPageToken"):
             return changes, body["newStartPageToken"]
         page_token = body["nextPageToken"]
 
 
+def _list_files(q: str, fields: str, action: str, **extra) -> list:
+    """Every file the files.list query `q` matches, 100 per request."""
+    out, params = [], {"q": q, "spaces": "drive", **extra, "pageSize": 100,
+                       "fields": f"nextPageToken,files({fields})"}
+    while True:
+        body = _check(_request("GET", f"{DRIVE_API}/files", params=params), action).json()
+        out.extend(body.get("files", []))
+        if not body.get("nextPageToken"):
+            return out
+        params = {**params, "pageToken": body["nextPageToken"]}
+
+
 def list_subfolders(parent_id: str) -> list:
     """Folders directly inside `parent_id`: {id, name, appProperties}."""
     _require_valid_id(parent_id, "parent folder id")
     q = f"'{parent_id}' in parents and mimeType = '{FOLDER_MIME_TYPE}' and trashed = false"
-    out, page_token = [], None
-    while True:
-        params = {"q": q, "spaces": "drive", "pageSize": 100,
-                  "fields": "nextPageToken,files(id,name,appProperties)"}
-        if page_token:
-            params["pageToken"] = page_token
-        resp = _request("GET", f"{DRIVE_API}/files", params=params)
-        _check(resp, "list subfolders")
-        body = resp.json()
-        out.extend(body.get("files", []))
-        page_token = body.get("nextPageToken")
-        if not page_token:
-            return out
+    return _list_files(q, "id,name,appProperties", "list subfolders")
 
 
 def list_files_in_folders(parent_ids: list, created_after: Optional[str] = None) -> list:
@@ -408,19 +404,7 @@ def list_files_in_folders(parent_ids: list, created_after: Optional[str] = None)
         q = f"({parents_q}) and mimeType != '{FOLDER_MIME_TYPE}' and trashed = false"
         if created_after:
             q += f" and createdTime > '{_escape_query_value(created_after)}'"
-        page_token = None
-        while True:
-            params = {"q": q, "spaces": "drive", "orderBy": "createdTime", "pageSize": 100,
-                      "fields": f"nextPageToken,files({FILE_METADATA_FIELDS})"}
-            if page_token:
-                params["pageToken"] = page_token
-            resp = _request("GET", f"{DRIVE_API}/files", params=params)
-            _check(resp, "list user folders")
-            body = resp.json()
-            files.extend(body.get("files", []))
-            page_token = body.get("nextPageToken")
-            if not page_token:
-                break
+        files.extend(_list_files(q, FILE_METADATA_FIELDS, "list user folders", orderBy="createdTime"))
     return sorted(files, key=lambda f: f.get("createdTime", ""))
 
 
@@ -488,8 +472,7 @@ def account_info() -> dict:
     resp = _request(
         "GET", f"{DRIVE_API}/about", params={"fields": "user(emailAddress),storageQuota(limit,usage)"}
     )
-    _check(resp, "about")
-    body = resp.json()
+    body = _check(resp, "about").json()
     quota = body.get("storageQuota") or {}
     return {
         "email": (body.get("user") or {}).get("emailAddress"),
@@ -532,8 +515,7 @@ def ensure_folder(name: str, parent_id: Optional[str] = None, app_properties: Op
         _require_valid_id(parent_id, "parent folder id")
         q += f" and '{parent_id}' in parents"
     resp = _request("GET", f"{DRIVE_API}/files", params={"q": q, "fields": "files(id,name)", "pageSize": 1})
-    _check(resp, f"search folder {name}")
-    files = resp.json().get("files", [])
+    files = _check(resp, f"search folder {name}").json().get("files", [])
     if files:
         return files[0]["id"]
     body = {"name": name, "mimeType": FOLDER_MIME_TYPE}
@@ -542,5 +524,4 @@ def ensure_folder(name: str, parent_id: Optional[str] = None, app_properties: Op
     if app_properties:
         body["appProperties"] = _short_app_properties(app_properties)
     resp = _request("POST", f"{DRIVE_API}/files?fields=id", json=body)
-    _check(resp, f"create folder {name}")
-    return resp.json()["id"]
+    return _check(resp, f"create folder {name}").json()["id"]

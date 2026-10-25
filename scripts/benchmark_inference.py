@@ -90,26 +90,39 @@ def agreement(base: list, other: list) -> dict:
     }
 
 
+def _reset_peak():
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
+def _peak_mb():
+    """Peak GPU memory since the last _reset_peak(), in MB (None on a CPU)."""
+    return round(torch.cuda.max_memory_allocated() / 2**20, 1) if torch.cuda.is_available() else None
+
+
+def _forward_all(loaded, tensors, batch_size, precision, pin=None) -> list:
+    """Class probabilities for every tensor, `batch_size` at a time."""
+    probs = []
+    for i in range(0, len(tensors), batch_size):
+        probs.extend(inference._forward(loaded, torch.stack(tensors[i:i + batch_size]), precision, pin))
+    return probs
+
+
 def cnn_only(loaded, tensors, batch_size, precision, repeats, pin=True):
     """Steady-state forward-pass throughput over all tensors."""
-    times, peak = [], None
+    times = []
     for r in range(repeats):
-        if torch.cuda.is_available():
-            torch.cuda.reset_peak_memory_stats()
-        probs = []
+        _reset_peak()
         sync()
         t = time.perf_counter()
-        for i in range(0, len(tensors), batch_size):
-            probs.extend(inference._forward(loaded, torch.stack(tensors[i:i + batch_size]), precision, pin))
+        probs = _forward_all(loaded, tensors, batch_size, precision, pin)
         sync()
         times.append(time.perf_counter() - t)
-        if torch.cuda.is_available():
-            peak = torch.cuda.max_memory_allocated() / 2**20
     best = statistics.median(times)
     return probs, {"seconds_median": round(best, 4), "seconds_all": [round(x, 4) for x in times],
                    "images_per_s": round(len(tensors) / best, 1),
                    "ms_per_image": round(1000 * best / len(tensors), 3),
-                   "peak_gpu_mem_mb": round(peak, 1) if peak is not None else None}
+                   "peak_gpu_mem_mb": _peak_mb()}
 
 
 def spark_like(prepped, threads, batch_size, precision, legacy=False):
@@ -132,8 +145,7 @@ def spark_like(prepped, threads, batch_size, precision, legacy=False):
             return p, time.perf_counter() - t, size
     for x in prepped[:threads * 2]:          # warm the path (and the batcher thread)
         one(x)
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
+    _reset_peak()
     mon = ResourceMonitor(interval=0.5).start()
     t = time.perf_counter()
     with ThreadPoolExecutor(threads) as pool:
@@ -144,7 +156,7 @@ def spark_like(prepped, threads, batch_size, precision, legacy=False):
         "wall_seconds": round(wall, 3), "images_per_s": round(len(prepped) / wall, 1),
         "cnn_call_ms_mean": round(1000 * statistics.fmean(o[1] for o in out), 2),
         "batch_mean": round(statistics.fmean(o[2] for o in out), 2), "batch_max": max(o[2] for o in out),
-        "peak_gpu_mem_mb": round(torch.cuda.max_memory_allocated() / 2**20, 1) if torch.cuda.is_available() else None,
+        "peak_gpu_mem_mb": _peak_mb(),
         "gpu_util_mean": res.get("gpu_util_percent_mean"), "gpu_util_peak": res.get("gpu_util_percent_peak"),
         "cpu_mean": res.get("cpu_percent_mean"), "cpu_peak": res.get("cpu_percent_peak"),
         "ram_peak_mb": res.get("memory_used_mb_peak"), "gpu_mem_used_peak_mb": res.get("gpu_memory_used_mb_peak"),
@@ -163,9 +175,7 @@ def accuracy(loaded, folder: Path, precisions, batch_size) -> dict:
     for f, c in items:
         out["per_class_images"][c] = out["per_class_images"].get(c, 0) + 1
     for prec in precisions:
-        probs = []
-        for i in range(0, len(tensors), batch_size):
-            probs.extend(inference._forward(loaded, torch.stack(tensors[i:i + batch_size]), prec))
+        probs = _forward_all(loaded, tensors, batch_size, prec)
         pred = [loaded["class_names"][int(p.argmax())] for p in probs]      # raw top class
         truth = [c for _, c in items]
         per = {}
@@ -271,8 +281,7 @@ def main(argv=None):
 
     print(f"{len(files)} photos, model_input {prep_ms:.1f} ms, to-tensor {tensor_ms:.1f} ms per photo")
     # 2. original + cnn-only grid
-    if torch.cuda.is_available():
-        torch.cuda.reset_peak_memory_stats()
+    _reset_peak()
     times = []
     for _ in range(args.repeats):
         sync()
@@ -283,7 +292,7 @@ def main(argv=None):
     tb = statistics.median(times)
     original = {"seconds_median": round(tb, 4), "images_per_s": round(len(tensors) / tb, 1),
                 "ms_per_image": round(1000 * tb / len(tensors), 3),
-                "peak_gpu_mem_mb": round(torch.cuda.max_memory_allocated() / 2**20, 1) if torch.cuda.is_available() else None}
+                "peak_gpu_mem_mb": _peak_mb()}
     base = [summarize_result(loaded, p) for p in base_probs]
     print(f"original: {original}")
     configs = []
