@@ -1,5 +1,6 @@
 """Chart colours shared by every dashboard page (dashboard/app.py and the
-pages it imports), so a disease has the same colour everywhere."""
+pages it imports), so a disease has the same colour everywhere — and the
+HIGH-risk-by-municipality table two pages show."""
 
 # Fixed-order categorical hues for open-ended series (disease classes,
 # locations) — assigned in order, never cycled past what a chart actually
@@ -32,3 +33,19 @@ def disease_colors(classes) -> dict:
             out[cls] = CATEGORICAL_HUES[i % len(CATEGORICAL_HUES)]
             i += 1
     return out
+
+
+def high_risk_table(df, summary: list, summary_label: str) -> None:
+    """The per-municipality HIGH-risk table (location, high, total, high_pct)
+    with `summary` ("n of N ...") as its middle column."""
+    import streamlit as st
+    st.dataframe(
+        df.assign(summary=summary),
+        column_order=["location", "summary", "high_pct"],
+        column_config={
+            "location": st.column_config.TextColumn("Municipality"),
+            "summary": st.column_config.TextColumn(summary_label),
+            "high_pct": st.column_config.ProgressColumn("Share HIGH", format="%.2f%%", min_value=0, max_value=100),
+        },
+        hide_index=True, width="stretch",
+    )

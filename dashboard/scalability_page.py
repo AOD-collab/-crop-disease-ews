@@ -37,7 +37,8 @@ from scalability.report import REPORTS_DIR, series_averages, items_frame
 from scalability.worker import PHOTO_PATHS_FILE, ensure_previews
 from spark.analytics_reader import (scale_test_disease_by_location, scale_test_disease_distribution,
                                     scale_test_high_risk_by_location)
-from dashboard.theme import disease_colors, STATUS_BADGE_COLOR
+from dashboard.theme import disease_colors, high_risk_table, STATUS_BADGE_COLOR
+from dashboard.model_ops import detached_popen, utf8_env
 
 LOG_DIR = REPORTS_DIR / "logs"
 SIZES = [100, 500, 1000, 5000, 10000]
@@ -53,25 +54,13 @@ def _launch(args: list, console: bool = False) -> str:
     separate process either way, on the test's own Kafka topic."""
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_path = LOG_DIR / f"{args[0]}_{datetime.now():%Y%m%d_%H%M%S}.log"
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    argv = [sys.executable, "-u", "-m", "scalability.run", *args]
     if console and sys.platform == "win32":
-        subprocess.Popen([sys.executable, "-u", "-m", "scalability.run", *args,
-                          "--log-file", str(log_path), "--keep-open"], cwd=BASE_DIR, env=env,
+        subprocess.Popen(argv + ["--log-file", str(log_path), "--keep-open"], cwd=BASE_DIR, env=utf8_env(),
                          creationflags=subprocess.CREATE_NEW_CONSOLE | subprocess.CREATE_NEW_PROCESS_GROUP)
-        return str(log_path)
-    kwargs = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     else:
-        kwargs["start_new_session"] = True
-    with open(log_path, "wb") as log:
-        subprocess.Popen([sys.executable, "-u", "-m", "scalability.run", *args], cwd=BASE_DIR,
-                         stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=env, **kwargs)
+        detached_popen(argv, log_path, BASE_DIR)
     return str(log_path)
-
-
-def _kafka_up() -> bool:
-    return broker_reachable()
 
 
 def _latest_test() -> list:
@@ -179,11 +168,12 @@ def _setup_section(busy: bool):
         help="Opens an EWS-ScalabilityTest window (like the Spark and Kafka windows) with a line per "
              "Kafka step and per photo, and the speed every 2 seconds. It is still the separate test "
              "process on its own Kafka topic: the live Spark job and farmer photos are not affected.")
-    if st.button("Start test", icon="▶️", type="primary", disabled=busy or not _kafka_up()):
+    kafka_up = broker_reachable()
+    if st.button("Start test", icon="▶️", type="primary", disabled=busy or not kafka_up):
         _launch(["start", "--size", str(size), "--iterations", str(iterations), "--source-dir", source_dir]
                 + (["--live", "progress"] if size * iterations > 2000 else []), console=console)
         st.rerun()
-    if not _kafka_up():
+    if not kafka_up:
         from config.settings import KAFKA_BOOTSTRAP_SERVERS
         st.warning(f"Start test needs the Kafka broker running at {KAFKA_BOOTSTRAP_SERVERS} "
                    "(`python run_all.py`).")
@@ -266,17 +256,7 @@ def _disease_section(first_run, df):
     high = scale_test_high_risk_by_location(first_run.run_id)
     if not high.empty:
         st.markdown("**HIGH risk by municipality**")
-        st.dataframe(
-            high.assign(summary=[f"{h} of {t}" for h, t in zip(high["high"], high["total"])]),
-            column_order=["location", "summary", "high_pct"],
-            column_config={
-                "location": st.column_config.TextColumn("Municipality"),
-                "summary": st.column_config.TextColumn("HIGH risk photos"),
-                "high_pct": st.column_config.ProgressColumn("Share HIGH", format="%.2f%%",
-                                                            min_value=0, max_value=100),
-            },
-            hide_index=True, width="stretch",
-        )
+        high_risk_table(high, [f"{h} of {t}" for h, t in zip(high["high"], high["total"])], "HIGH risk photos")
 
 
 def _gallery(first_run, df):

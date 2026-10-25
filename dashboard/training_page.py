@@ -54,7 +54,8 @@ LOG_DIR = STATE_DIR / "logs"
 DEPLOYED_MODEL = Path(IMAGE_MODEL["weights_path"])
 BACKUP_DIR = DEPLOYED_MODEL.parent / "backups"
 
-from dashboard.model_ops import CLASS_NAME_MAP  # noqa: E402 - model_ops imports torch only inside its functions
+from dashboard.model_ops import (  # noqa: E402 - model_ops imports torch only inside its functions
+    CLASS_NAME_MAP, _test_metrics, detached_popen, swap_in)
 
 COLOR_TRAIN = "#2E7D32"
 COLOR_VAL = "#E0A800"
@@ -112,18 +113,8 @@ def _start_training(resume: bool) -> str | None:
     cfg = {"python": str(TRAINING_PYTHON), "script": str(TRAIN_SCRIPT), "cwd": str(TRAINING_DIR),
            "resume": resume, "log": str(log_path), "best": str(BEST_CHECKPOINT),
            "deployed": str(DEPLOYED_MODEL), "backup_dir": str(BACKUP_DIR)}
-    argv = [sys.executable, "-u", "-m", "dashboard.model_ops", "train", json.dumps(cfg)]
-    # train.py prints "✓"; without UTF-8, Python on Windows writes a
-    # redirected stdout in cp1252 and crashes on that character.
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
-    kwargs = {}
-    if sys.platform == "win32":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
-    else:
-        kwargs["start_new_session"] = True
-    with open(log_path, "wb") as log:
-        proc = subprocess.Popen(argv, cwd=BASE_DIR, stdout=log, stderr=subprocess.STDOUT,
-                                stdin=subprocess.DEVNULL, env=env, **kwargs)
+    proc = detached_popen([sys.executable, "-u", "-m", "dashboard.model_ops", "train", json.dumps(cfg)],
+                          log_path, BASE_DIR)
     _write_run({
         "pid": proc.pid,
         "create_time": psutil.Process(proc.pid).create_time(),
@@ -185,10 +176,7 @@ def _parse_log(text: str) -> dict:
                 epoch[key] = float(v.group(1))
         epoch["best"] = "Best model saved" in block
         out["epochs"].append(epoch)
-    for key, label in (("loss", "Test Loss"), ("accuracy", "Test Accuracy"), ("precision", "Precision"),
-                       ("recall", "Recall"), ("f1", "F1-Score")):
-        if m := re.search(rf"^{label}: {_FLOAT}", text, re.M):
-            out["test"][key] = float(m.group(1))
+    out["test"].update(_test_metrics(text))
     if m := re.search(r"Traceback \(most recent call last\):.*", text, re.S):
         out["error"] = m.group(0)[-3000:]
     out["auto_deploy"] = m.group(1).strip() if (m := re.search(r"^Auto-deploy: (.+)$", text, re.M)) else None
@@ -249,9 +237,7 @@ def _deploy_best(test_metrics: dict) -> str:
 def _restore_backup(backup: Path) -> None:
     tmp = DEPLOYED_MODEL.with_suffix(".pt.tmp")
     shutil.copy2(backup, tmp)
-    if DEPLOYED_MODEL.exists():
-        shutil.copy2(DEPLOYED_MODEL, BACKUP_DIR / f"{DEPLOYED_MODEL.stem}_{datetime.now():%Y%m%d_%H%M%S}.pt")
-    os.replace(tmp, DEPLOYED_MODEL)
+    swap_in(tmp, DEPLOYED_MODEL, BACKUP_DIR)
     _after_model_swap()
 
 

@@ -75,13 +75,37 @@ def deploy(best: str, deployed: str, backup_dir: str, extra: dict) -> dict:
     deployed.parent.mkdir(parents=True, exist_ok=True)
     tmp = deployed.with_suffix(".pt.tmp")
     torch.save(exported, tmp)
+    return {"backup": swap_in(tmp, deployed, backup_dir), "class_names": class_names}
+
+
+def swap_in(tmp: Path, deployed: Path, backup_dir: Path) -> str:
+    """Back up the model in use (if any) into backup_dir, then move the
+    finished `tmp` file over it in one step. Returns the backup path, or ""."""
     backup = ""
     if deployed.exists():
         backup_dir.mkdir(exist_ok=True)
         backup = str(backup_dir / f"{deployed.stem}_{datetime.now():%Y%m%d_%H%M%S}.pt")
         shutil.copy2(deployed, backup)
     os.replace(tmp, deployed)
-    return {"backup": backup, "class_names": class_names}
+    return backup
+
+
+def utf8_env() -> dict:
+    """This environment with UTF-8 stdio: train.py prints "✓", and without
+    it Python on Windows writes a redirected stdout in cp1252 and crashes on
+    that character."""
+    return {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+
+
+def detached_popen(argv: list, log_path, cwd):
+    """Start `argv` in the background, detached from the dashboard (its own
+    process group, no window), with stdout and stderr in `log_path`."""
+    import subprocess
+    kwargs = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+              if sys.platform == "win32" else {"start_new_session": True})
+    with open(log_path, "wb") as log:
+        return subprocess.Popen(argv, cwd=cwd, stdout=log, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, env=utf8_env(), **kwargs)
 
 
 def _test_metrics(log_text: str) -> dict:
@@ -125,8 +149,7 @@ def train_and_deploy(cfg: dict) -> int:
     Killing this process tree (Stop training) means nothing is deployed."""
     import subprocess
     argv = [cfg["python"], "-u", cfg["script"]] + (["--resume"] if cfg["resume"] else [])
-    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
-    code = subprocess.run(argv, cwd=cfg["cwd"], stdin=subprocess.DEVNULL, env=env).returncode
+    code = subprocess.run(argv, cwd=cfg["cwd"], stdin=subprocess.DEVNULL, env=utf8_env()).returncode
     log_text = Path(cfg["log"]).read_text(encoding="utf-8", errors="replace")
     if code != 0 or "Training completed." not in log_text:
         print("\nAuto-deploy: skipped — training did not finish.", flush=True)

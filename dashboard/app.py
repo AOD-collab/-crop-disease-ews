@@ -61,7 +61,9 @@ COLOR_CRITICAL = "#D03B3B"    # HIGH risk / diseased
 
 RISK_COLOR_MAP = {"LOW": COLOR_GOOD, "MEDIUM": COLOR_WARNING, "HIGH": COLOR_CRITICAL}
 # Disease / status colours are shared with the other dashboard pages.
-from dashboard.theme import STATUS_BADGE_COLOR, CATEGORICAL_HUES, DISEASE_COLOR_MAP  # noqa: E402
+from dashboard.theme import (STATUS_BADGE_COLOR, CATEGORICAL_HUES, DISEASE_COLOR_MAP,  # noqa: E402
+                             disease_colors, high_risk_table)
+import importlib  # noqa: E402
 
 
 # The app's own logo (set with scripts/set_app_logo.py), reused here so the
@@ -192,28 +194,34 @@ with st.sidebar:
     st.divider()
 
 # Menu as buttons. The page names below are what every `elif page == "..."`
-# compares against; only the icon + label shown is cosmetic.
-_PAGES = ["Overview", "Real-Time Monitoring", "Pending Review", "Users", "Images",
-          "Risk Alerts", "Analytics", "System Status", "Label Photos", "Model Training",
-          "Scalability Test", "Maintenance"]
-_NAV_ICONS = {
-    "Overview": "📊", "Real-Time Monitoring": "🕒", "Pending Review": "📥",
-    "Users": "👥", "Images": "🖼️",
-    "Risk Alerts": "🚨", "Analytics": "📈",
-    "System Status": "🩺", "Label Photos": "🏷️", "Model Training": "🧠", "Scalability Test": "🧪",
-    "Maintenance": "🛠️",
+# compares against; each has its menu icon, its title (the menu label too)
+# and one line under the title.
+_PAGES = {
+    "Overview": ("📊", "Overview", "How many leaves were checked, what was found, and what is still waiting."),
+    "Real-Time Monitoring": ("🕒", "Recent submissions", "The latest results, as soon as Spark finishes each photo."),
+    "Pending Review": ("📥", "Pending review",
+                       "Farmer photos waiting in Google Drive until you send them for processing."),
+    "Users": ("👥", "Farmer management", "Register farmers, and pause or remove their access."),
+    "Images": ("🖼️", "Image management", "Find, compare and track every farmer photo, and manage the local photo "
+                                          "cache."),
+    "Risk Alerts": ("🚨", "Risk alerts", "Leaves rated high risk, newest first."),
+    "Analytics": ("📈", "Analytics", "Disease trends in every municipality over time, and the overall risk picture."),
+    "System Status": ("🩺", "System status", "Whether every part of the pipeline is running right now."),
+    "Label Photos": ("🏷️", "Label photos",
+                     "Put farmer photos in the right disease class so the next training learns from them."),
+    "Model Training": ("🧠", "Model training",
+                       "Retrain the disease model on this laptop's GPU and choose when the system uses it."),
+    "Scalability Test": ("🧪", "Scalability test", "Run photos from Google Drive or a folder through Kafka → Spark → "
+                                                   "CNN and measure how fast the pipeline is."),
+    "Maintenance": ("🛠️", "System settings", "Reset the dashboard's history."),
 }
-_NAV_LABELS = {
-    "Overview": "Overview", "Real-Time Monitoring": "Recent submissions",
-    "Pending Review": "Pending review", "Users": "Farmer management", "Images": "Image management",
-    "Risk Alerts": "Risk alerts",
-    "System Status": "System status", "Label Photos": "Label photos", "Model Training": "Model training",
-    "Scalability Test": "Scalability test", "Maintenance": "System settings",
-}
+# Pages that live in a module of their own (dashboard/<module>.py, render()).
+_MODULE_PAGES = {"Images": "image_management_page", "Label Photos": "labelling_page",
+                 "Model Training": "training_page", "Scalability Test": "scalability_page"}
 if st.session_state.get("page") not in _PAGES:
     st.session_state["page"] = "Overview"
-for _p in _PAGES:
-    if st.sidebar.button(f"{_NAV_ICONS[_p]}  {_NAV_LABELS.get(_p, _p)}", key=f"nav_{_p}",
+for _p, (_icon, _label, _) in _PAGES.items():
+    if st.sidebar.button(f"{_icon}  {_label}", key=f"nav_{_p}",
                          type="primary" if st.session_state["page"] == _p else "secondary",
                          width="stretch"):
         st.session_state["page"] = _p
@@ -296,23 +304,7 @@ if auto_refresh:
     st.sidebar.caption(f"Real-Time Monitoring auto-refreshes every {_REFRESH_SECONDS}s.")
 
 # One clear title + one line per page, instead of the same long title everywhere.
-_PAGE_HEAD = {
-    "Overview": ("Overview", "How many leaves were checked, what was found, and what is still waiting."),
-    "Real-Time Monitoring": ("Recent submissions", "The latest results, as soon as Spark finishes each photo."),
-    "Pending Review": ("Pending review", "Farmer photos waiting in Google Drive until you send them for processing."),
-    "Users": ("Farmer management", "Register farmers, and pause or remove their access."),
-    "Images": ("Image management", "Find, compare and track every farmer photo, and manage the local photo "
-                                   "cache."),
-    "Risk Alerts": ("Risk alerts", "Leaves rated high risk, newest first."),
-    "Analytics": ("Analytics", "Disease trends in every municipality over time, and the overall risk picture."),
-    "System Status": ("System status", "Whether every part of the pipeline is running right now."),
-    "Label Photos": ("Label photos", "Put farmer photos in the right disease class so the next training learns from them."),
-    "Model Training": ("Model training","Retrain the disease model on this laptop's GPU and choose when the system uses it."),
-    "Scalability Test": ("Scalability test", "Run photos from Google Drive or a folder through Kafka → Spark → "
-                                              "CNN and measure how fast the pipeline is."),
-    "Maintenance": ("System settings", "Reset the dashboard's history."),
-}
-_title, _subtitle = _PAGE_HEAD[page]
+_, _title, _subtitle = _PAGES[page]
 st.markdown(f'<div class="ews-page-head"><h1>{_title}</h1><p>{_subtitle}</p></div>', unsafe_allow_html=True)
 
 
@@ -397,6 +389,12 @@ def _system_status() -> dict:
     out = {"checked_at": now_local()}
     procs = _python_command_lines()
 
+    def process_check(names, running_lines, stopped_lines):
+        """ok / bad by whether a Python command line names one of `names`."""
+        if procs is None:
+            return "unknown", ["Could not check running processes on this computer."]
+        return ("ok", running_lines) if any(n in procs for n in names) else ("bad", stopped_lines)
+
     # Google Drive
     if not drive_client.is_configured():
         out["drive"] = ("bad", ["Not set up on this laptop — run `python scripts\\drive_authorize.py`."])
@@ -420,13 +418,10 @@ def _system_status() -> dict:
                                     "`python scripts\\drive_authorize.py`."])
 
     # Drive watcher
-    if procs is None:
-        out["watcher"] = ("unknown", ["Could not check running processes on this computer."])
-    elif "kafka.drive_watcher" in procs or "drive_watcher.py" in procs:
-        out["watcher"] = ("ok", ["Running — checks every farmer's folder every few seconds."])
-    else:
-        out["watcher"] = ("bad", ["Not running — new uploads are not picked up.",
-                                  "Start it with `python run_all.py` (or `python -m kafka.drive_watcher`)."])
+    out["watcher"] = process_check(
+        ("kafka.drive_watcher", "drive_watcher.py"), ["Running — checks every farmer's folder every few seconds."],
+        ["Not running — new uploads are not picked up.",
+         "Start it with `python run_all.py` (or `python -m kafka.drive_watcher`)."])
 
     # Kafka
     from kafka.config import broker_reachable
@@ -453,14 +448,10 @@ def _system_status() -> dict:
         out["kafka"] = ("bad", lines)
 
     # Spark
-    if procs is None:
-        out["spark"] = ("unknown", ["Could not check running processes on this computer."])
-    elif "spark.streaming_job" in procs or "streaming_job.py" in procs:
-        out["spark"] = ("ok", ["Running — reads Kafka, downloads photos from Drive, "
-                               "writes results and processed images back to Drive."])
-    else:
-        out["spark"] = ("bad", ["Not running — photos wait at INGESTED.",
-                                "Check the EWS-Spark window, or restart with `python run_all.py`."])
+    out["spark"] = process_check(
+        ("spark.streaming_job", "streaming_job.py"),
+        ["Running — reads Kafka, downloads photos from Drive, writes results and processed images back to Drive."],
+        ["Not running — photos wait at INGESTED.", "Check the EWS-Spark window, or restart with `python run_all.py`."])
 
     # Database
     if settings.DATABASE_URL.startswith("postgresql"):
@@ -549,16 +540,9 @@ if page == "Overview":
         # "Healthy" is a verdict (status color), every other class is an
         # open-ended identity (fixed categorical order) — never mix the
         # two into one arbitrary cycling palette.
-        color_map, hue_i = {}, 0
-        for cls in dist["predicted_class"]:
-            if str(cls).lower() in DISEASE_COLOR_MAP:
-                color_map[cls] = DISEASE_COLOR_MAP[str(cls).lower()]
-            else:
-                color_map[cls] = CATEGORICAL_HUES[hue_i % len(CATEGORICAL_HUES)]
-                hue_i += 1
         st.plotly_chart(
             px.pie(dist, names="predicted_class", values="count", hole=0.55,
-                   color="predicted_class", color_discrete_map=color_map),
+                   color="predicted_class", color_discrete_map=disease_colors(dist["predicted_class"])),
             width="stretch",
         )
 
@@ -897,11 +881,11 @@ elif page == "Users":
                         st.success("User deleted (soft delete).")
                         st.rerun()
 
-elif page == "Images":
-    # Image management: PostgreSQL catalog + local cache + Google Drive
-    # (dashboard/image_management_page.py)
-    from dashboard import image_management_page
-    image_management_page.render(processed_image=_processed_image)
+elif page in _MODULE_PAGES:
+    # Pages with a module of their own; Image management (PostgreSQL catalog
+    # + local cache + Google Drive) also shows the marked-up result image.
+    importlib.import_module(f"dashboard.{_MODULE_PAGES[page]}").render(
+        **({"processed_image": _processed_image} if page == "Images" else {}))
 
 
 elif page == "Risk Alerts":
@@ -912,18 +896,8 @@ elif page == "Risk Alerts":
         st.markdown(f"**{n_high} of {n_total}** analysed maize photos are HIGH risk "
                     f"({n_high / n_total * 100:.2f}%), across {len(by_location)} "
                     + ("municipality." if len(by_location) == 1 else "municipalities."))
-        st.dataframe(
-            by_location.assign(summary=[f"{h} of {t} maize photo{'' if t == 1 else 's'}" for h, t in
-                                        zip(by_location["high"], by_location["total"])]),
-            column_order=["location", "summary", "high_pct"],
-            column_config={
-                "location": st.column_config.TextColumn("Municipality"),
-                "summary": st.column_config.TextColumn("HIGH risk"),
-                "high_pct": st.column_config.ProgressColumn("Share HIGH", format="%.2f%%",
-                                                            min_value=0, max_value=100),
-            },
-            hide_index=True, width="stretch",
-        )
+        high_risk_table(by_location, [f"{h} of {t} maize photo{'' if t == 1 else 's'}" for h, t in
+                                      zip(by_location["high"], by_location["total"])], "HIGH risk")
         st.caption("Counts only photos that were analysed (photos rejected as not a leaf or not "
                    "maize are left out). Each photo counts once, with its latest result.")
         st.divider()
@@ -1021,28 +995,14 @@ elif page == "System Status":
             for line in lines:
                 st.caption(line)
 
-    left, right = st.columns(2)
-    with left:
-        _show("Google Drive", *status["drive"])
-        _show("Drive watcher (Drive → Kafka)", *status["watcher"])
-        _show("Kafka", *status["kafka"])
-    with right:
-        _show("Spark streaming job (Kafka → model → Drive)", *status["spark"])
-        _show("Database", *status["database"])
-        _show("Pipeline backlog", *status["backlog"])
+    for column, checks in zip(st.columns(2), (
+            (("Google Drive", "drive"), ("Drive watcher (Drive → Kafka)", "watcher"), ("Kafka", "kafka")),
+            (("Spark streaming job (Kafka → model → Drive)", "spark"), ("Database", "database"),
+             ("Pipeline backlog", "backlog")))):
+        with column:
+            for title, key in checks:
+                _show(title, *status[key])
     st.caption(f"Checked at {format_local(status['checked_at'], with_seconds=True)}.")
-
-elif page == "Label Photos":
-    from dashboard import labelling_page
-    labelling_page.render()
-
-elif page == "Model Training":
-    from dashboard import training_page
-    training_page.render()
-
-elif page == "Scalability Test":
-    from dashboard import scalability_page
-    scalability_page.render()
 
 elif page == "Maintenance":
     st.subheader("⚠️ Factory reset")
@@ -1078,17 +1038,12 @@ elif page == "Maintenance":
     _preview = reset_preview()
     with st.container(border=True):
         st.markdown("**Counted now: what the reset deletes and what it keeps**")
-        _del, _keep = st.columns(2)
-        _del.markdown("Deleted")
-        _del.dataframe(pd.DataFrame(
-            [{"What": f"{k} rows", "Count": v} for k, v in _preview["deleted_rows"].items()]
-            + [{"What": k + " (files)", "Count": v} for k, v in _preview["deleted_files"].items()]),
-            hide_index=True, width="stretch")
-        _keep.markdown("Kept")
-        _keep.dataframe(pd.DataFrame(
-            [{"What": f"{k} rows", "Count": v} for k, v in _preview["kept_rows"].items()]
-            + [{"What": k + " (files)", "Count": v} for k, v in _preview["kept_files"].items()]),
-            hide_index=True, width="stretch")
+        for _col, _kind in zip(st.columns(2), ("deleted", "kept")):
+            _col.markdown(_kind.title())
+            _col.dataframe(pd.DataFrame(
+                [{"What": f"{k} rows", "Count": v} for k, v in _preview[f"{_kind}_rows"].items()]
+                + [{"What": k + " (files)", "Count": v} for k, v in _preview[f"{_kind}_files"].items()]),
+                hide_index=True, width="stretch")
         st.caption(_preview["kept_note"] + " Farmers' Drive photos and results are only deleted if you tick "
                    "that box above.")
     from storage.reset import spark_job_running, drive_watcher_running
