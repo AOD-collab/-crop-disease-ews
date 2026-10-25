@@ -173,7 +173,7 @@ CREATE INDEX IF NOT EXISTS ix_scale_test_items_run_status ON scale_test_items (r
 
 -- Analytics computed by Spark (spark/batch_analytics.py — manual objective
 -- 7's batch-processing half; streaming is spark/streaming_job.py) and read by
--- the dashboard (spark/analytics.py). Spark replaces every table's rows on
+-- the dashboard (spark/analytics_reader.py). Spark replaces every table's rows on
 -- each run. Scalability-test images are left out, each image counts once with
 -- its latest prediction, a blank location is "Unknown location", and days are
 -- Timor-Leste days.
@@ -240,6 +240,34 @@ CREATE TABLE IF NOT EXISTS batch_location_daily_summary (
     high_risk_count                BIGINT NOT NULL,
     generated_at                   TIMESTAMPTZ NOT NULL,
     PRIMARY KEY (location, summary_date)
+);
+
+-- The scalability test page's disease figures, one set per test run, from
+-- the CNN results in scale_test_items (COMPLETED photos only). Kept apart
+-- from the farmer analytics and not shared with Tableau.
+CREATE TABLE IF NOT EXISTS analytics_scale_test_disease_by_location (
+    run_id                         VARCHAR NOT NULL,
+    location                       VARCHAR NOT NULL,
+    predicted_class                VARCHAR NOT NULL,
+    photos                         BIGINT NOT NULL,
+    generated_at                   TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (run_id, location, predicted_class)
+);
+CREATE TABLE IF NOT EXISTS analytics_scale_test_disease_distribution (
+    run_id                         VARCHAR NOT NULL,
+    predicted_class                VARCHAR NOT NULL,
+    photos                         BIGINT NOT NULL,
+    generated_at                   TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (run_id, predicted_class)
+);
+CREATE TABLE IF NOT EXISTS analytics_scale_test_high_risk_by_location (
+    run_id                         VARCHAR NOT NULL,
+    location                       VARCHAR NOT NULL,
+    high                           BIGINT NOT NULL,
+    total                          BIGINT NOT NULL,
+    high_pct                       DOUBLE PRECISION NOT NULL,
+    generated_at                   TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (run_id, location)
 );
 
 -- The administrator's review decision per image (Label photos page): a

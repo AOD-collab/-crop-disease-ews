@@ -35,7 +35,8 @@ from storage.database import SessionLocal, ScaleTestRun, ScaleTestItem
 from scalability import run as runner, reset as test_reset
 from scalability.report import REPORTS_DIR, series_averages, items_frame
 from scalability.worker import PHOTO_PATHS_FILE, ensure_previews
-from spark.analytics import high_risk_by_location
+from spark.analytics_reader import (scale_test_disease_by_location, scale_test_disease_distribution,
+                                    scale_test_high_risk_by_location)
 from dashboard.theme import disease_colors, STATUS_BADGE_COLOR
 
 LOG_DIR = REPORTS_DIR / "logs"
@@ -218,14 +219,18 @@ def _disease_section(first_run, df):
                    else "This test has no CNN results (tests run before this page showed disease data "
                         "did not keep them).")
         return
-    n_places = done["location"].nunique()
-    st.caption(f"The CNN's result for each of the {len(done):,} test photos, by where the farmer took it "
-               f"({n_places} municipalit{'y' if n_places == 1 else 'ies'}). Test results only — no farmer "
-               "receives them.")
-    colors = disease_colors(sorted(done["predicted_class"].unique()))
+    by_place = scale_test_disease_by_location(first_run.run_id)
+    dist = scale_test_disease_distribution(first_run.run_id)
+    if by_place.empty or dist.empty:
+        st.caption("The disease data for this test is being prepared.")
+        return
+    order = list(dict.fromkeys(by_place["location"]))        # most photos first
+    n_places = len(order)
+    st.caption(f"The CNN's result for each of the {int(dist['photos'].sum()):,} test photos, by where the farmer "
+               f"took it ({n_places} municipalit{'y' if n_places == 1 else 'ies'}). Test results only — no "
+               "farmer receives them.")
+    colors = disease_colors(sorted(dist["predicted_class"]))
 
-    by_place = (done.groupby(["location", "predicted_class"]).size().reset_index(name="photos"))
-    order = by_place.groupby("location")["photos"].sum().sort_values(ascending=False).index.tolist()
     fig = px.bar(by_place, x="photos", y="location", color="predicted_class", orientation="h",
                  color_discrete_map=colors, category_orders={"location": order},
                  labels={"photos": "Photos", "location": "Municipality", "predicted_class": "Disease"})
@@ -253,13 +258,12 @@ def _disease_section(first_run, df):
             st.caption(f"{len(gps):,} photo(s) on the map"
                        + (f"; {missing:,} without a GPS position are not shown." if missing else "."))
     with c2:
-        dist = done["predicted_class"].value_counts().rename_axis("predicted_class").reset_index(name="photos")
         fig = px.bar(dist, x="predicted_class", y="photos", color="predicted_class", color_discrete_map=colors,
                      labels={"predicted_class": "Disease", "photos": "Photos"}, height=420)
         fig.update_layout(showlegend=False)
         st.plotly_chart(fig, width="stretch")
 
-    high = high_risk_by_location(done)
+    high = scale_test_high_risk_by_location(first_run.run_id)
     if not high.empty:
         st.markdown("**HIGH risk by municipality**")
         st.dataframe(

@@ -393,7 +393,12 @@ class StorageAuditLog(Base):
 # else writes them. Scalability-test images are left out; each image counts
 # once, with its latest prediction; days are Timor-Leste days.
 # ----------------------------------------------------------------------
-class AnalyticsSummary(Base):
+class _SparkOutput:
+    """When Spark computed the row (every analytics table ends with it)."""
+    generated_at = Column(DateTime(timezone=True), nullable=False)
+
+
+class AnalyticsSummary(_SparkOutput, Base):
     """One row: the headline figures and the pipeline timings."""
     __tablename__ = "analytics_summary"
 
@@ -414,26 +419,23 @@ class AnalyticsSummary(Base):
     avg_capture_to_upload_seconds = Column(Float, nullable=True)
     avg_upload_to_ingestion_seconds = Column(Float, nullable=True)
     avg_end_to_end_latency_seconds = Column(Float, nullable=True)   # uploaded -> predicted
-    generated_at = Column(DateTime(timezone=True), nullable=False)
 
 
-class AnalyticsDiseaseDistribution(Base):
+class AnalyticsDiseaseDistribution(_SparkOutput, Base):
     __tablename__ = "analytics_disease_distribution"
 
     predicted_class = Column(String, primary_key=True)
     photos = Column(BigInteger, nullable=False)
-    generated_at = Column(DateTime(timezone=True), nullable=False)
 
 
-class AnalyticsRiskDistribution(Base):
+class AnalyticsRiskDistribution(_SparkOutput, Base):
     __tablename__ = "analytics_risk_distribution"
 
     risk_level = Column(String, primary_key=True)
     photos = Column(BigInteger, nullable=False)
-    generated_at = Column(DateTime(timezone=True), nullable=False)
 
 
-class AnalyticsHighRiskByLocation(Base):
+class AnalyticsHighRiskByLocation(_SparkOutput, Base):
     """Per municipality: analysed photos and how many are HIGH risk."""
     __tablename__ = "analytics_high_risk_by_location"
 
@@ -441,10 +443,9 @@ class AnalyticsHighRiskByLocation(Base):
     high = Column(BigInteger, nullable=False)
     total = Column(BigInteger, nullable=False)
     high_pct = Column(Float, nullable=False)
-    generated_at = Column(DateTime(timezone=True), nullable=False)
 
 
-class AnalyticsDiseaseTrend(Base):
+class AnalyticsDiseaseTrend(_SparkOutput, Base):
     """Photos classified per municipality, day and disease."""
     __tablename__ = "analytics_disease_trend"
 
@@ -452,20 +453,18 @@ class AnalyticsDiseaseTrend(Base):
     day = Column(Date, primary_key=True)
     predicted_class = Column(String, primary_key=True)
     photos = Column(BigInteger, nullable=False)
-    generated_at = Column(DateTime(timezone=True), nullable=False)
 
 
-class AnalyticsDiseaseDaily(Base):
+class AnalyticsDiseaseDaily(_SparkOutput, Base):
     """Photos classified per day and disease, all municipalities together."""
     __tablename__ = "analytics_disease_daily"
 
     day = Column(Date, primary_key=True)
     predicted_class = Column(String, primary_key=True)
     photos = Column(BigInteger, nullable=False)
-    generated_at = Column(DateTime(timezone=True), nullable=False)
 
 
-class BatchLocationDailySummary(Base):
+class BatchLocationDailySummary(_SparkOutput, Base):
     """Per municipality and upload day: the batch summary for reports/BI."""
     __tablename__ = "batch_location_daily_summary"
 
@@ -476,13 +475,51 @@ class BatchLocationDailySummary(Base):
     total_diseased = Column(BigInteger, nullable=False)
     avg_risk_score = Column(Float, nullable=True)
     high_risk_count = Column(BigInteger, nullable=False)
-    generated_at = Column(DateTime(timezone=True), nullable=False)
 
 
 ANALYTICS_TABLES = (
     "analytics_summary", "analytics_disease_distribution", "analytics_risk_distribution",
     "analytics_high_risk_by_location", "analytics_disease_trend", "analytics_disease_daily",
     "batch_location_daily_summary",
+)
+
+
+# The scalability test page's disease figures, one set per test run, from
+# the CNN results kept in scale_test_items (COMPLETED photos only). Kept
+# apart from the farmer analytics above and not shared with Tableau.
+class AnalyticsScaleTestDiseaseByLocation(_SparkOutput, Base):
+    """Test photos per run, municipality and disease."""
+    __tablename__ = "analytics_scale_test_disease_by_location"
+
+    run_id = Column(String, primary_key=True)
+    location = Column(String, primary_key=True)                     # blank -> "Unknown location"
+    predicted_class = Column(String, primary_key=True)
+    photos = Column(BigInteger, nullable=False)
+
+
+class AnalyticsScaleTestDiseaseDistribution(_SparkOutput, Base):
+    """Test photos per run and disease."""
+    __tablename__ = "analytics_scale_test_disease_distribution"
+
+    run_id = Column(String, primary_key=True)
+    predicted_class = Column(String, primary_key=True)
+    photos = Column(BigInteger, nullable=False)
+
+
+class AnalyticsScaleTestHighRiskByLocation(_SparkOutput, Base):
+    """Per run and municipality: analysed test photos and how many are HIGH risk."""
+    __tablename__ = "analytics_scale_test_high_risk_by_location"
+
+    run_id = Column(String, primary_key=True)
+    location = Column(String, primary_key=True)                     # blank -> "Unknown location"
+    high = Column(BigInteger, nullable=False)
+    total = Column(BigInteger, nullable=False)
+    high_pct = Column(Float, nullable=False)
+
+
+SCALE_TEST_ANALYTICS_TABLES = (
+    "analytics_scale_test_disease_by_location", "analytics_scale_test_disease_distribution",
+    "analytics_scale_test_high_risk_by_location",
 )
 
 
@@ -601,6 +638,16 @@ def _drop_system_settings(conn):
     conn.execute(sql_text("DROP TABLE IF EXISTS system_settings"))
 
 
+# Each image's latest prediction (newest predicted_at, ties broken by the
+# larger prediction_id — the rule of spark/batch_analytics.py) as `latest`,
+# row number rn = 1; used by both views and the dashboard's photo list.
+LATEST_PREDICTION_CTE = """WITH latest AS (
+            SELECT p.*, ROW_NUMBER() OVER (PARTITION BY p.image_id
+                       ORDER BY p.predicted_at DESC NULLS LAST, p.prediction_id DESC) AS rn
+            FROM predictions p
+        )"""
+
+
 TABLEAU_VIEW = "v_tableau_images"
 TABLEAU_TABLES = ("images", "predictions") + ANALYTICS_TABLES
 
@@ -608,7 +655,7 @@ TABLEAU_TABLES = ("images", "predictions") + ANALYTICS_TABLES
 def _create_tableau_view(conn):
     """Read-only view a live Tableau connection reads instead of the raw
     tables: one row per image with its LATEST prediction (mirrors
-    spark/analytics.images_with_predictions, which dedupes replayed
+    spark/analytics_reader.images_with_predictions, which drops replayed
     at-least-once predictions) and timestamps shifted from stored UTC to
     Timor-Leste Time, so Tableau shows the same numbers as the dashboard.
     Dropped and recreated on every init_db() so it tracks schema changes."""
@@ -624,14 +671,7 @@ def _create_tableau_view(conn):
     conn.execute(sql_text(f"DROP VIEW IF EXISTS {TABLEAU_VIEW}"))
     conn.execute(sql_text(f"""
         CREATE VIEW {TABLEAU_VIEW} AS
-        WITH latest AS (
-            SELECT p.*,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY p.image_id
-                       ORDER BY p.predicted_at DESC, p.prediction_id DESC
-                   ) AS rn
-            FROM predictions p
-        )
+        {LATEST_PREDICTION_CTE}
         SELECT
             i.image_id, i.location, i.source, i.status,
             u.username AS farmer_username,
@@ -689,14 +729,7 @@ def _create_admin_catalog_view(conn):
     conn.execute(sql_text(f"DROP VIEW IF EXISTS {ADMIN_CATALOG_VIEW}"))
     conn.execute(sql_text(f"""
         CREATE VIEW {ADMIN_CATALOG_VIEW} AS
-        WITH latest AS (
-            SELECT p.*,
-                   ROW_NUMBER() OVER (
-                       PARTITION BY p.image_id
-                       ORDER BY p.predicted_at DESC, p.prediction_id DESC
-                   ) AS rn
-            FROM predictions p
-        )
+        {LATEST_PREDICTION_CTE}
         SELECT
             i.image_id, i.user_id, i.image_path, i.original_filename, i.location, i.source,
             i.content_hash, CAST(i.status AS VARCHAR(32)) AS status, i.error_message,

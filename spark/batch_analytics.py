@@ -4,7 +4,7 @@ batch half — spark/streaming_job.py is the continuous streaming half). Reads
 images, predictions and users from PostgreSQL with spark.read.jdbc(...),
 computes every figure the dashboard shows with Spark DataFrame operations,
 and writes them to the analytics tables (storage/database.py
-ANALYTICS_TABLES), which the dashboard reads (spark/analytics.py):
+ANALYTICS_TABLES), which the dashboard reads (spark/analytics_reader.py):
 
     analytics_summary                 headline counts, last 24 h, pipeline timings
     analytics_disease_distribution    photos per disease
@@ -13,6 +13,14 @@ ANALYTICS_TABLES), which the dashboard reads (spark/analytics.py):
     analytics_disease_trend           photos per municipality, day and disease
     analytics_disease_daily           photos per day and disease
     batch_location_daily_summary      per municipality and upload day
+
+and, for the scalability test page, one set per test run from the CNN
+results kept in scale_test_items (storage/database.py
+SCALE_TEST_ANALYTICS_TABLES):
+
+    analytics_scale_test_disease_by_location     test photos per municipality and disease
+    analytics_scale_test_disease_distribution    test photos per disease
+    analytics_scale_test_high_risk_by_location   HIGH-risk share per municipality
 
 Definitions (the same as the dashboard always used): scalability-test images
 are left out; each image counts once, with its latest prediction (newest
@@ -94,11 +102,13 @@ _PREDICTIONS_SQL = """(SELECT prediction_id, image_id, predicted_class, risk_sco
                               predicted_at, processing_latency_ms
                        FROM predictions) AS p"""
 _USERS_SQL = "(SELECT user_id, is_deleted FROM users) AS u"
+_SCALE_TEST_ITEMS_SQL = """(SELECT run_id, status, predicted_class, risk_level, location
+                            FROM scale_test_items) AS s"""
 
 
 def read_inputs(spark, jdbc_url, properties) -> tuple:
     return tuple(spark.read.jdbc(jdbc_url, sql, properties=properties)
-                 for sql in (_IMAGES_SQL, _PREDICTIONS_SQL, _USERS_SQL))
+                 for sql in (_IMAGES_SQL, _PREDICTIONS_SQL, _USERS_SQL, _SCALE_TEST_ITEMS_SQL))
 
 
 # ----------------------------------------------------------- computation
@@ -130,86 +140,110 @@ def photos_with_latest_prediction(images, predictions):
     return images.join(latest, "image_id", "left")
 
 
+def _count_if(cond):
+    """How many rows `cond` is true for (SUM of 1/0), as a long."""
+    from pyspark.sql import functions as F
+    return F.sum(F.when(cond, 1).otherwise(0)).cast("long")
+
+
+def _count_photos(df, *keys):
+    """Rows per `keys`, in a column named photos."""
+    from pyspark.sql import functions as F
+    return df.groupBy(*keys).agg(F.count("*").alias("photos"))
+
+
+def _high_risk_by(df, *keys):
+    """Per `keys`: analysed photos (with a risk level) as total, the HIGH
+    ones as high, and high_pct (0-100, one decimal)."""
+    from pyspark.sql import functions as F
+    return (df.filter(F.col("risk_level").isNotNull()).groupBy(*keys)
+            .agg(_count_if(F.col("risk_level") == "HIGH").alias("high"), F.count("*").alias("total"))
+            .withColumn("high_pct", F.bround(F.col("high") / F.col("total") * 100, 1)))
+
+
+def _stamped(tables: dict) -> dict:
+    """Each table with the generated_at column every analytics table ends with."""
+    from pyspark.sql import functions as F
+    now = F.current_timestamp()
+    return {name: df.withColumn("generated_at", now) for name, df in tables.items()}
+
+
 def compute(photos, users) -> dict:
     """{table name: DataFrame} for every analytics table, from
     photos_with_latest_prediction() and the users. Pure DataFrame work, so it
     can be checked against local data without a database."""
     from pyspark.sql import functions as F
 
-    now = F.current_timestamp()
     cls = F.lower(F.col("predicted_class"))
     has_class = F.col("predicted_class").isNotNull()
     is_healthy, is_uncertain = cls == "healthy", cls == "uncertain"
-
-    def count_if(cond):
-        return F.sum(F.when(cond, 1).otherwise(0)).cast("long")
 
     def avg_seconds(later, earlier):
         diff = F.col(later).cast("double") - F.col(earlier).cast("double")
         return F.bround(F.avg(diff), 1)
 
-    distribution = (photos.filter(has_class).groupBy("predicted_class")
-                    .agg(F.count("*").alias("photos")))
+    distribution = _count_photos(photos.filter(has_class), "predicted_class")
     most_detected = (distribution.filter(F.lower(F.col("predicted_class")) != "healthy")
                      .orderBy(F.col("photos").desc(), F.col("predicted_class"))
                      .limit(1).select(F.col("predicted_class").alias("most_detected_disease")))
 
-    recent = F.col("uploaded_at") >= now - F.expr("INTERVAL 24 HOURS")
+    recent = F.col("uploaded_at") >= F.current_timestamp() - F.expr("INTERVAL 24 HOURS")
     totals = photos.agg(
         F.count("*").alias("total_images"),
-        count_if(has_class & is_healthy).alias("total_healthy"),
-        count_if(has_class & ~is_healthy & ~is_uncertain).alias("total_diseased"),
-        count_if(has_class & is_uncertain).alias("total_uncertain"),
-        count_if(~has_class).alias("total_unclassified"),
-        count_if(F.col("risk_level") == "HIGH").alias("total_high_risk"),
-        count_if(F.col("predicted_at").isNotNull()).alias("total_processed"),
-        count_if(F.col("status") == "FAILED").alias("total_failed"),
-        count_if(recent).alias("submissions_24h"),
+        _count_if(has_class & is_healthy).alias("total_healthy"),
+        _count_if(has_class & ~is_healthy & ~is_uncertain).alias("total_diseased"),
+        _count_if(has_class & is_uncertain).alias("total_uncertain"),
+        _count_if(~has_class).alias("total_unclassified"),
+        _count_if(F.col("risk_level") == "HIGH").alias("total_high_risk"),
+        _count_if(F.col("predicted_at").isNotNull()).alias("total_processed"),
+        _count_if(F.col("status") == "FAILED").alias("total_failed"),
+        _count_if(recent).alias("submissions_24h"),
         F.countDistinct(F.when(recent, F.col("user_id"))).alias("active_farmers_24h"),
         F.bround(F.avg("processing_latency_ms"), 1).alias("avg_processing_latency_ms"),
         avg_seconds("uploaded_at", "captured_at").alias("avg_capture_to_upload_seconds"),
         avg_seconds("ingested_at", "uploaded_at").alias("avg_upload_to_ingestion_seconds"),
         avg_seconds("predicted_at", "uploaded_at").alias("avg_end_to_end_latency_seconds"),
     )
-    active_users = users.agg(count_if(~F.coalesce(F.col("is_deleted"), F.lit(False))).alias("total_users"))
+    active_users = users.agg(_count_if(~F.coalesce(F.col("is_deleted"), F.lit(False))).alias("total_users"))
     summary = (totals.crossJoin(active_users)
                .join(most_detected, how="left")               # no rows -> null
                .withColumn("summary_id", F.lit(1)))
 
-    analysed = photos.filter(F.col("risk_level").isNotNull()).withColumn("location", _location())
-    high_by_location = (analysed.groupBy("location")
-                        .agg(count_if(F.col("risk_level") == "HIGH").alias("high"),
-                             F.count("*").alias("total"))
-                        .withColumn("high_pct", F.bround(F.col("high") / F.col("total") * 100, 1)))
-
-    classified = photos.filter(F.col("predicted_at").isNotNull() & has_class).withColumn("day", _local_day("predicted_at"))
-    trend = (classified.withColumn("location", _location())
-             .groupBy("location", "day", "predicted_class").agg(F.count("*").alias("photos")))
-    daily = classified.groupBy("day", "predicted_class").agg(F.count("*").alias("photos"))
-
-    risk = (photos.filter(F.col("risk_level").isNotNull()).groupBy("risk_level")
-            .agg(F.count("*").alias("photos")))
-
-    location_daily = (photos.withColumn("location", _location())
-                      .withColumn("summary_date", _local_day("uploaded_at"))
+    located = photos.withColumn("location", _location())
+    classified = (located.filter(F.col("predicted_at").isNotNull() & has_class)
+                  .withColumn("day", _local_day("predicted_at")))
+    location_daily = (located.withColumn("summary_date", _local_day("uploaded_at"))
                       .groupBy("location", "summary_date")
                       .agg(F.count("*").alias("total_images"),
-                           count_if(F.col("predicted_class") == "healthy").alias("total_healthy"),
-                           count_if(has_class & (F.col("predicted_class") != "healthy")
-                                    & (F.col("predicted_class") != "uncertain")).alias("total_diseased"),
+                           _count_if(F.col("predicted_class") == "healthy").alias("total_healthy"),
+                           _count_if(has_class & (F.col("predicted_class") != "healthy")
+                                     & (F.col("predicted_class") != "uncertain")).alias("total_diseased"),
                            F.avg("risk_score").alias("avg_risk_score"),
-                           count_if(F.col("risk_level") == "HIGH").alias("high_risk_count")))
+                           _count_if(F.col("risk_level") == "HIGH").alias("high_risk_count")))
 
-    tables = {
+    return _stamped({
         "analytics_summary": summary,
         "analytics_disease_distribution": distribution,
-        "analytics_risk_distribution": risk,
-        "analytics_high_risk_by_location": high_by_location,
-        "analytics_disease_trend": trend,
-        "analytics_disease_daily": daily,
+        "analytics_risk_distribution": _count_photos(photos.filter(F.col("risk_level").isNotNull()), "risk_level"),
+        "analytics_high_risk_by_location": _high_risk_by(located, "location"),
+        "analytics_disease_trend": _count_photos(classified, "location", "day", "predicted_class"),
+        "analytics_disease_daily": _count_photos(classified, "day", "predicted_class"),
         "batch_location_daily_summary": location_daily,
-    }
-    return {name: df.withColumn("generated_at", now) for name, df in tables.items()}
+    })
+
+
+def compute_scale_test(items) -> dict:
+    """{table name: DataFrame} for the scalability test page, per run_id,
+    from scale_test_items: only COMPLETED photos with a CNN result count,
+    and HIGH risk is counted like the farmer figures (_high_risk_by)."""
+    from pyspark.sql import functions as F
+    done = (items.filter((F.col("status") == "COMPLETED") & F.col("predicted_class").isNotNull())
+            .withColumn("location", _location()))
+    return _stamped({
+        "analytics_scale_test_disease_by_location": _count_photos(done, "run_id", "location", "predicted_class"),
+        "analytics_scale_test_disease_distribution": _count_photos(done, "run_id", "predicted_class"),
+        "analytics_scale_test_high_risk_by_location": _high_risk_by(done, "run_id", "location"),
+    })
 
 
 # ----------------------------------------------------------------- output
@@ -225,10 +259,11 @@ def refresh(spark) -> float:
     """One full recompute; returns the seconds it took."""
     started = time.monotonic()
     jdbc_url, properties = jdbc_url_and_properties()
-    images, predictions, users = read_inputs(spark, jdbc_url, properties)
+    images, predictions, users, scale_test_items = read_inputs(spark, jdbc_url, properties)
     photos = photos_with_latest_prediction(images, predictions).cache()
     try:
         write_tables(compute(photos, users), jdbc_url, properties)
+        write_tables(compute_scale_test(scale_test_items), jdbc_url, properties)
     finally:
         photos.unpersist()
     return time.monotonic() - started
@@ -251,16 +286,19 @@ def run(spark=None) -> float:
 # ------------------------------------------------------------------ watch
 def data_signature() -> tuple:
     """A cheap fingerprint of everything the analytics depend on: it changes
-    when photos, predictions, statuses or users change."""
+    when photos, predictions, statuses, users or scalability-test results change."""
     from sqlalchemy import func
-    from storage.database import SessionLocal, Image, Prediction, User
+    from storage.database import SessionLocal, Image, Prediction, User, ScaleTestItem
     with SessionLocal() as s:
         images = s.query(func.count(Image.image_id), func.max(Image.created_at),
                          func.max(Image.ingested_at), func.max(Image.processed_at)).one()
         predictions = s.query(func.count(Prediction.prediction_id), func.max(Prediction.predicted_at)).one()
         users = s.query(func.count(User.user_id)).scalar()
         active_users = s.query(func.count(User.user_id)).filter(User.is_deleted.is_(False)).scalar()
-    return tuple(images) + tuple(predictions) + (users, active_users)
+        scale_test = s.query(func.count(ScaleTestItem.image_id), func.max(ScaleTestItem.completed_at)).one()
+        scale_test_done = (s.query(func.count(ScaleTestItem.image_id))
+                           .filter(ScaleTestItem.status == "COMPLETED").scalar())
+    return tuple(images) + tuple(predictions) + (users, active_users) + tuple(scale_test) + (scale_test_done,)
 
 
 def watch() -> int:

@@ -43,7 +43,7 @@ TIME_COLUMNS = {c: _TLT_COL for c in ("captured_at", "uploaded_at", "processed_a
 from storage.auth import verify_password, normalize_email
 from storage.image_storage import is_drive_path, drive_file_id_from_path, resolve_image_path, downloaded_photo_path
 from storage import drive_client
-from spark import analytics
+from spark import analytics_reader
 
 st.set_page_config(page_title="Crop Disease EWS — Admin Dashboard", layout="wide", page_icon="🌽")
 
@@ -320,7 +320,7 @@ st.markdown(f'<div class="ews-page-head"><h1>{_title}</h1><p>{_subtitle}</p></di
 
 
 def load_data():
-    return analytics.images_with_predictions()
+    return analytics_reader.images_with_predictions()
 
 
 
@@ -518,8 +518,8 @@ if page == "Overview":
     # mockup this page's layout follows also shows "Active Remote Devices" —
     # this system has no device registry, so that metric isn't something we
     # can honestly report; it's left out rather than faked.
-    kpi = analytics.kpi_summary()
-    dist = analytics.disease_distribution()
+    kpi = analytics_reader.kpi_summary()
+    dist = analytics_reader.disease_distribution()
 
     st.subheader("📊 System Performance")
     if kpi is not None:
@@ -917,7 +917,7 @@ elif page == "Images":
 
 
 elif page == "Risk Alerts":
-    by_location = analytics.high_risk_locations()
+    by_location = analytics_reader.high_risk_locations()
     if not by_location.empty:
         n_high, n_total = int(by_location["high"].sum()), int(by_location["total"].sum())
         st.subheader("HIGH risk by municipality")
@@ -965,7 +965,7 @@ elif page == "Risk Alerts":
                 )
 
 elif page == "Analytics":
-    dist = analytics.disease_distribution()
+    dist = analytics_reader.disease_distribution()
     if not dist.empty:
         st.subheader("🦠 Disease Distribution")
         st.plotly_chart(
@@ -982,7 +982,7 @@ elif page == "Analytics":
             )
     # Disease trend in every municipality (replaced the risk-score trend):
     # photos per disease per day, one panel per municipality.
-    rt = analytics.disease_trend_by_location()
+    rt = analytics_reader.disease_trend_by_location()
     if not rt.empty:
         st.subheader("📈 Disease Trend by Municipality")
         places = rt.groupby("location")["photos"].sum().sort_values(ascending=False).index.tolist()
@@ -999,7 +999,7 @@ elif page == "Analytics":
         fig.update_xaxes(showticklabels=True, tickformat="%d/%m", dtick="D1")
         fig.update_layout(barmode="stack", legend_title_text="Disease")
         st.plotly_chart(fig, width="stretch")
-    rdist = analytics.risk_distribution()
+    rdist = analytics_reader.risk_distribution()
     if not rdist.empty:
         st.subheader("🥧 Risk Distribution")
         st.plotly_chart(
@@ -1007,7 +1007,7 @@ elif page == "Analytics":
                    color_discrete_map=RISK_COLOR_MAP),
             width="stretch",
         )
-    dt = analytics.disease_daily()
+    dt = analytics_reader.disease_daily()
     if not dt.empty:
         st.subheader("🦠 Disease Trend")
         fig = px.bar(dt, x="day", y="photos", color="predicted_class",
