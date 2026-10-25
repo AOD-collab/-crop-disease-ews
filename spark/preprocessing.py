@@ -131,51 +131,40 @@ def check_duplicate_by_hash(event: dict, original_bytes: bytes) -> None:
     and a photo that already has a prediction (a Reprocess / model re-run)."""
     if not SKIP_DUPLICATE_PHOTOS:
         return
-    session = None
-    _DUPLICATE_LOCK.acquire()
     try:
-        session = SessionLocal()
-        image = session.get(Image, event["image_id"])
-        if image is None:
-            return      # no row to protect; persist_result already handles this case
-        if session.query(Prediction.prediction_id).filter(
-                Prediction.image_id == image.image_id).first() is not None:
-            return      # already diagnosed once (a Reprocess / model re-run): never reject it now
-        # A stored hash (older rows) is reused so every row is compared the same way;
-        # a Drive photo gets its hash here, from the bytes Spark just downloaded.
-        digest = image.content_hash or hashlib.sha256(original_bytes).hexdigest()
-        if not image.content_hash:
-            image.content_hash = digest
-            session.commit()
-        # Same photo, same farmer: already COMPLETED, or accepted by this job and
-        # being processed right now (oldest upload named first).
-        copies = (
-            session.query(Image.image_id, Image.status)
-            .filter(
-                Image.user_id == event["user_id"],
-                Image.content_hash == digest,
-                Image.image_id != event["image_id"],
-                Image.status.in_([ProcessingStatus.COMPLETED, ProcessingStatus.PROCESSING]),
+        with _DUPLICATE_LOCK, SessionLocal() as session:
+            image = session.get(Image, event["image_id"])
+            if image is None:
+                return      # no row to protect; persist_result already handles this case
+            if session.query(Prediction.prediction_id).filter(
+                    Prediction.image_id == image.image_id).first() is not None:
+                return      # already diagnosed once (a Reprocess / model re-run): never reject it now
+            # A stored hash (older rows) is reused so every row is compared the same way;
+            # a Drive photo gets its hash here, from the bytes Spark just downloaded.
+            digest = image.content_hash or hashlib.sha256(original_bytes).hexdigest()
+            if not image.content_hash:
+                image.content_hash = digest
+                session.commit()
+            # Same photo, same farmer: already COMPLETED, or accepted by this job and
+            # being processed right now (oldest upload named first).
+            copies = (
+                session.query(Image.image_id, Image.status)
+                .filter(
+                    Image.user_id == event["user_id"],
+                    Image.content_hash == digest,
+                    Image.image_id != event["image_id"],
+                    Image.status.in_([ProcessingStatus.COMPLETED, ProcessingStatus.PROCESSING]),
+                )
+                .order_by(Image.uploaded_at, Image.image_id)
+                .all()
             )
-            .order_by(Image.uploaded_at, Image.image_id)
-            .all()
-        )
-        earlier = next((c for c in copies if c.status == ProcessingStatus.COMPLETED
-                        or c.image_id in _ACCEPTED_IMAGE_IDS), None)
-        if earlier is None:
-            _ACCEPTED_IMAGE_IDS.add(event["image_id"])
-    except Exception as e:  # noqa: BLE001
+            earlier = next((c for c in copies if c.status == ProcessingStatus.COMPLETED
+                            or c.image_id in _ACCEPTED_IMAGE_IDS), None)
+            if earlier is None:
+                _ACCEPTED_IMAGE_IDS.add(event["image_id"])
+    except Exception as e:  # noqa: BLE001 - closing the session rolls it back
         print(f"[preprocessing] Duplicate check skipped for {event.get('image_id')}: {e}")
-        if session is not None:
-            try:
-                session.rollback()
-            except Exception:  # noqa: BLE001
-                pass
         return
-    finally:
-        if session is not None:
-            session.close()
-        _DUPLICATE_LOCK.release()
     if earlier:
         raise DuplicateImage(f"Duplicate photo: identical to {earlier.image_id}")
 
@@ -200,12 +189,9 @@ def clean_event(event: dict) -> dict:
     event["captured_at"] = captured_at.isoformat() if captured_at else None
     event["location"] = normalize_location(event.get("location"))
 
-    session = SessionLocal()
-    try:
+    with SessionLocal() as session:
         if session.get(User, event["user_id"]) is None:
             raise InvalidEvent(f"Unknown user_id: {event['user_id']}")
-    finally:
-        session.close()
 
     if is_drive_path(event["image_path"]):
         return _clean_drive_event(event)
@@ -267,13 +253,10 @@ def _registered_from_drive(event: dict) -> bool:
     (spark/ingestion.register_upload, from the file's Drive metadata) for
     exactly this Drive file, by this user. An event naming any other file
     gets the full Drive check."""
-    session = SessionLocal()
-    try:
+    with SessionLocal() as session:
         image = session.get(Image, event["image_id"])
         return (image is not None and image.source == "android_drive_upload"
                 and image.image_path == event["image_path"] and image.user_id == event["user_id"])
-    finally:
-        session.close()
 
 
 _GPS_COLUMNS = ("gps_latitude", "gps_longitude", "gps_altitude_m")
@@ -294,8 +277,7 @@ def extract_metadata(event: dict, image_bytes: bytes) -> dict:
     no GPS tags, the phone position the app sent (gps_source "device", set
     by kafka/drive_watcher.py) is kept instead of being blanked."""
     meta = extract_image_metadata(image_bytes)
-    session = SessionLocal()
-    try:
+    with SessionLocal() as session:
         image = session.get(Image, event["image_id"])
         if image is not None:
             for name in _METADATA_COLUMNS:
@@ -313,8 +295,6 @@ def extract_metadata(event: dict, image_bytes: bytes) -> dict:
                 image.captured_at_source = meta["captured_at_source"]
                 event["captured_at"] = meta["captured_at"].isoformat()
             session.commit()
-    finally:
-        session.close()
     return meta
 
 
@@ -549,15 +529,12 @@ def scale_test_run_for(event: dict):
     run_id = event.get("run_id")
     if not run_id:
         return None
-    session = SessionLocal()
-    try:
+    with SessionLocal() as session:
         item = session.get(ScaleTestItem, event.get("image_id")) if event.get("image_id") else None
         run = session.get(ScaleTestRun, run_id) if item is not None and item.run_id == run_id else None
         if run is not None:
             session.expunge(run)
         return run
-    finally:
-        session.close()
 
 
 def save_downloaded_photo(user_id: str, image_id: str, original_bytes: bytes) -> None:
@@ -604,8 +581,7 @@ def replay_state(image_id: str):
       None             - process it."""
     if not image_id:
         return None
-    session = SessionLocal()
-    try:
+    with SessionLocal() as session:
         image = session.get(Image, image_id)
         if image is None:
             return None
@@ -614,8 +590,6 @@ def replay_state(image_id: str):
                 return "result_missing"
             return "completed"
         return None
-    finally:
-        session.close()
 
 
 def mark_processing(image_id: str) -> None:
@@ -623,14 +597,11 @@ def mark_processing(image_id: str) -> None:
     long-running CNN call is visible in the dashboard as in-flight rather
     than silently still showing INGESTED. Best-effort: an unknown image_id
     is a no-op (persist_result's own guard handles that case properly)."""
-    session = SessionLocal()
-    try:
+    with SessionLocal() as session:
         image = session.get(Image, image_id)
         if image is not None:
             image.status = ProcessingStatus.PROCESSING
             session.commit()
-    finally:
-        session.close()
 
 
 def persist_result(
@@ -666,8 +637,7 @@ def persist_result(
     corrupted event, or one referencing a since-deleted image), nothing was
     previously recorded anywhere except a stdout print() — now a
     RejectedEvent row is written instead, so the event leaves a trace."""
-    session = SessionLocal()
-    try:
+    with SessionLocal() as session:
         image_id = event.get("image_id")
         image = session.get(Image, image_id) if image_id else None
         if image is None:
@@ -739,8 +709,6 @@ def persist_result(
             error_message=error_message,
         ))
         session.commit()
-    finally:
-        session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -775,9 +743,8 @@ def publish_result_to_drive(event: dict, status: ProcessingStatus, error_message
     same two files (drive_client.upload_bytes), matching persist_result's
     idempotency."""
     image_id = event.get("image_id")
-    session = SessionLocal()
     test_folder = None
-    try:
+    with SessionLocal() as session:
         image = session.get(Image, image_id) if image_id else None
         if image is None:
             return None
@@ -822,8 +789,6 @@ def publish_result_to_drive(event: dict, status: ProcessingStatus, error_message
             "prediction": _prediction_to_dict(prediction) if (prediction and status == ProcessingStatus.COMPLETED) else None,
             "processed_at": datetime.now(timezone.utc).isoformat(),
         }
-    finally:
-        session.close()
 
     folder = test_folder or drive_client.user_folder_id(
         owner_email, drive_client.USER_RESULTS_KIND, create=True, share_role="reader"
@@ -915,14 +880,11 @@ _RESULT_FILES = _ResultFolderIndex()
 
 def _mark_result_published(image_id: str) -> None:
     """Images.result_published_at = now: this photo's result is in Drive."""
-    session = SessionLocal()
-    try:
+    with SessionLocal() as session:
         image = session.get(Image, image_id)
         if image is not None:
             image.result_published_at = datetime.now(timezone.utc)
             session.commit()
-    finally:
-        session.close()
 
 
 def publish_result_to_drive_safely(event: dict, status: ProcessingStatus, error_message: str = None,

@@ -57,8 +57,7 @@ def register_upload(event: dict) -> str:
     image_id = event.get("image_id") or ""
     if not _UUID_RE.match(image_id):
         raise InvalidEvent("file has no valid image_id (not uploaded by the Android app)")
-    session = SessionLocal()
-    try:
+    with SessionLocal() as session:
         existing = session.get(Image, image_id)
         if existing is not None:
             if existing.image_path == event.get("image_path"):
@@ -119,8 +118,6 @@ def register_upload(event: dict) -> str:
         except IntegrityError:
             session.rollback()
             return "duplicate"      # another copy of the event registered it a moment ago
-    finally:
-        session.close()
 
     if problems:
         raise UploadRejected(UPLOAD_REJECTED_PREFIX + "; ".join(problems))

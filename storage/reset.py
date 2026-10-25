@@ -240,8 +240,8 @@ def factory_reset(clear_kafka: bool = False, clear_drive: bool = False,
     """
     init_db()  # make sure the tables exist before we DELETE from them
 
-    session = SessionLocal()
-    try:
+    # Closing without a commit rolls back, so a failed delete leaves nothing half done.
+    with SessionLocal() as session:
         # Order matters: predictions and processing_events both FK to images.
         predictions_deleted = session.query(Prediction).delete(synchronize_session=False)
         events_deleted = session.query(ProcessingEvent).delete(synchronize_session=False)
@@ -253,11 +253,6 @@ def factory_reset(clear_kafka: bool = False, clear_drive: bool = False,
         session.query(ScaleTestRun).filter(ScaleTestRun.data_cleaned_at.is_(None)).update(
             {ScaleTestRun.data_cleaned_at: now_utc()}, synchronize_session=False)
         session.commit()
-    except Exception:
-        session.rollback()
-        raise
-    finally:
-        session.close()
 
     summary = {
         "predictions_deleted": predictions_deleted,

@@ -90,13 +90,10 @@ def discard_all(admin: str | None = None) -> int:
 
 
 def _ai_predictions(image_ids: list[str]) -> dict[str, Prediction]:
-    session = SessionLocal()
-    try:
+    with SessionLocal() as session:
         rows = session.query(Prediction).filter(Prediction.image_id.in_(image_ids)).all()
         session.expunge_all()
         return {p.image_id: p for p in rows}
-    finally:
-        session.close()
 
 
 def render():

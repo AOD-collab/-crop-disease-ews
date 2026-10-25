@@ -145,8 +145,7 @@ def _login_form():
 
     if submitted:
         init_db()
-        session = SessionLocal()
-        try:
+        with SessionLocal() as session:
             user = session.query(User).filter(User.username == username).first()
             if user is None or not verify_password(password, user.password_hash) or user.is_deleted:
                 st.error("Invalid username or password.")
@@ -159,8 +158,6 @@ def _login_form():
                 return
             st.session_state["admin_user"] = {"user_id": user.user_id, "username": user.username}
             st.rerun()
-        finally:
-            session.close()
 
 
 _inject_style()
@@ -570,8 +567,7 @@ if page == "Overview":
     st.subheader("📋 Analysis Queue")
     st.caption("The most recent submissions, whatever their status — not just the completed ones.")
 
-    session = SessionLocal()
-    try:
+    with SessionLocal() as session:
         recent_rows = (
             session.query(Image, User)
             .join(User, User.user_id == Image.user_id)
@@ -636,8 +632,6 @@ if page == "Overview":
                                 st.rerun()
                             except Exception as e:
                                 st.error(f"Couldn't re-queue: {e}")
-    finally:
-        session.close()
 
 elif page == "Real-Time Monitoring":
     st.subheader("Latest incoming processed results")
@@ -743,8 +737,7 @@ elif page == "Users":
     status_filter = fcol3.selectbox("Status", ["All"] + [s.value for s in UserStatus], key="user_status_filter")
     show_deleted = st.checkbox("Include deleted users", value=False, key="user_show_deleted")
 
-    session = SessionLocal()
-    try:
+    with SessionLocal() as session:
         # the scalability test's system account is not a farmer
         query = session.query(User).filter(User.username != SCALE_TEST_USERNAME)
         if not show_deleted:
@@ -776,8 +769,6 @@ elif page == "Users":
         } for u in users]), width="stretch")
         st.caption(f"{total} user(s) total — page {page_num} of {max_page}")
         user_choices = {f"{u.full_name or u.username} ({u.email})": u.user_id for u in users}
-    finally:
-        session.close()
 
     st.divider()
 
@@ -852,8 +843,7 @@ elif page == "Users":
             selected_label = st.selectbox("Select a user", list(user_choices.keys()), key="user_edit_select")
             selected_id = user_choices[selected_label]
 
-            session = SessionLocal()
-            try:
+            with SessionLocal() as session:
                 target = session.get(User, selected_id)
                 is_self = target.user_id == st.session_state["admin_user"]["user_id"]
 
@@ -906,8 +896,6 @@ elif page == "Users":
                         session.commit()
                         st.success("User deleted (soft delete).")
                         st.rerun()
-            finally:
-                session.close()
 
 elif page == "Images":
     # Image management: PostgreSQL catalog + local cache + Google Drive

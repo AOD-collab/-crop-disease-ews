@@ -19,8 +19,7 @@ from storage.auth import hash_password
 
 def run():
     init_db()
-    session = SessionLocal()
-    try:
+    with SessionLocal() as session:
         existing = session.query(User).count()
         if existing > 0:
             print(f"[init_db] {existing} user(s) already exist — skipping admin bootstrap.")
@@ -51,8 +50,6 @@ def run():
         session.add(admin)
         session.commit()
         print(f"[init_db] Tables created. Bootstrapped ADMIN account '{BOOTSTRAP_ADMIN_USERNAME}'.")
-    finally:
-        session.close()
 
 
 if __name__ == "__main__":
