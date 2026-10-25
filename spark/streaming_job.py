@@ -44,24 +44,13 @@ first time it runs.
 Runs in Spark **local mode** on this laptop; an actual multi-node cluster
 has not been exercised.
 """
-import os
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Windows-only workaround (winutils.exe location for Hadoop's local
-# filesystem shim) — only set if not already configured, and never on a
-# non-Windows deployment box, where C:\hadoop doesn't exist and shouldn't be
-# assumed.
-if os.name == "nt" and "HADOOP_HOME" not in os.environ:
-    os.environ["HADOOP_HOME"] = r"C:\hadoop"
-    _hadoop_bin = r"C:\hadoop\bin"
-    if _hadoop_bin not in os.environ.get("PATH", ""):
-        os.environ["PATH"] += os.pathsep + _hadoop_bin
-
-from pyspark.sql import SparkSession
+from spark.session import kafka_session    # before pyspark: the Windows Hadoop workaround
 from pyspark.sql.functions import (
     coalesce, col, concat, current_timestamp, from_json, initcap, lit, regexp_replace, to_timestamp, trim, when,
 )
@@ -116,21 +105,7 @@ DRIVE_UPLOAD = "drive_upload"
 
 
 def build_spark():
-    return (
-        SparkSession.builder
-        .appName("ImageSystem-CropDiseaseEWS")
-        .config("spark.jars.packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0")
-        # Spark 3.x defaults to FileContextBasedCheckpointFileManager, whose
-        # atomic temp-file + rename against a Windows *local* filesystem
-        # intermittently fails with
-        #   FileNotFoundException: .../<checkpoint>/offsets does not exist
-        # and terminates the streaming query (STREAM_FAILED). The older
-        # FileSystem-based manager uses FileSystem.create + rename, which
-        # works correctly on Windows local disk. Harmless on Linux/HDFS.
-        .config("spark.sql.streaming.checkpointFileManagerClass",
-                "org.apache.spark.sql.execution.streaming.FileSystemBasedCheckpointFileManager")
-        .getOrCreate()
-    )
+    return kafka_session("ImageSystem-CropDiseaseEWS")
 
 
 def parse_events(raw):

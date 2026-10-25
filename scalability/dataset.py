@@ -42,7 +42,6 @@ class Candidate:
     md5: str | None
     created_time: str
     location: str | None
-    captured_at_client: str | None
     device_gps: tuple | None
     # filled by prepare_local_copies()
     local_path: str | None = None
@@ -128,7 +127,6 @@ def enumerate_collection() -> Collection:
             name=meta.get("name"), mime_type=meta.get("mimeType"), size=int(meta["size"]),
             sha256=sha, md5=meta.get("md5Checksum"), created_time=meta.get("createdTime"),
             location=normalize_location(props.get("location")),
-            captured_at_client=props.get("captured_at_client"),
             device_gps=_device_gps(props),
         ))
     return Collection(candidates=candidates, total_files=len(photos), excluded=excluded,
@@ -264,7 +262,7 @@ def _folder_candidate(path, root, staging_root):
     # enough for a Drive appProperty when results are published.
     return Candidate(image_id=rel, drive_file_id=FOLDER_SOURCE_PREFIX + sha, user_id=None, name=path.name,
                      mime_type=mime, size=size, sha256=sha, md5=None,
-                     created_time=None, location=None, captured_at_client=None, device_gps=None,
+                     created_time=None, location=None, device_gps=None,
                      local_path=str(path), local_copy_status="local folder"), None
 
 

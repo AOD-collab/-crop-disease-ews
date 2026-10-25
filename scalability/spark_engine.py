@@ -23,22 +23,14 @@ overhead (Kafka read, parse, dedupe, commit) is inside the timer.
 """
 
 import json
-import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-# Same Windows-only winutils workaround as spark/streaming_job.py.
-if os.name == "nt" and "HADOOP_HOME" not in os.environ:
-    os.environ["HADOOP_HOME"] = r"C:\hadoop"
-    _hadoop_bin = r"C:\hadoop\bin"
-    if _hadoop_bin not in os.environ.get("PATH", ""):
-        os.environ["PATH"] += os.pathsep + _hadoop_bin
+from spark.session import kafka_session    # before pyspark: the Windows Hadoop workaround
+from config import settings
+from storage.database import now_utc
 
-from config import settings  # noqa: E402
-from storage.database import now_utc  # noqa: E402
-
-KAFKA_PACKAGE = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"     # same as the live job
 START_TIMEOUT_S = 180
 WARM_UP_ID = "__spark-warm-up__"     # never a staged item id (those are uuids)
 
@@ -49,18 +41,9 @@ def event_schema():
 
 
 def build_spark():
-    """The test's SparkSession: the live job's settings (Kafka package,
-    Windows-safe checkpoint manager), its own application name."""
-    from pyspark.sql import SparkSession
-    spark = (
-        SparkSession.builder
-        .appName("ImageSystem-ScalabilityTest")
-        .config("spark.jars.packages", KAFKA_PACKAGE)
-        .config("spark.sql.streaming.checkpointFileManagerClass",
-                "org.apache.spark.sql.execution.streaming.FileSystemBasedCheckpointFileManager")
-        .config("spark.ui.showConsoleProgress", "false")
-        .getOrCreate()
-    )
+    """The test's SparkSession: the live job's settings (spark/session.py),
+    its own application name."""
+    spark = kafka_session("ImageSystem-ScalabilityTest", console_progress=False)
     spark.sparkContext.setLogLevel("WARN")
     return spark
 

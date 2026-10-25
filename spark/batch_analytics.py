@@ -15,8 +15,7 @@ ANALYTICS_TABLES), which the dashboard reads (spark/analytics_reader.py):
     batch_location_daily_summary      per municipality and upload day
 
 and, for the scalability test page, one set per test run from the CNN
-results kept in scale_test_items (storage/database.py
-SCALE_TEST_ANALYTICS_TABLES):
+results kept in scale_test_items (storage/database.py AnalyticsScaleTest*):
 
     analytics_scale_test_disease_by_location     test photos per municipality and disease
     analytics_scale_test_disease_distribution    test photos per disease

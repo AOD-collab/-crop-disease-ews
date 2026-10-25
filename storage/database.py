@@ -517,12 +517,6 @@ class AnalyticsScaleTestHighRiskByLocation(_SparkOutput, Base):
     high_pct = Column(Float, nullable=False)
 
 
-SCALE_TEST_ANALYTICS_TABLES = (
-    "analytics_scale_test_disease_by_location", "analytics_scale_test_disease_distribution",
-    "analytics_scale_test_high_risk_by_location",
-)
-
-
 # ----------------------------------------------------------------------
 # Engine / session
 # ----------------------------------------------------------------------
