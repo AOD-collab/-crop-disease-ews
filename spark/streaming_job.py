@@ -74,7 +74,7 @@ from config.settings import (
 )
 from spark.preprocessing import (
     process_event, persist_result, mark_processing, InvalidEvent, publish_result_to_drive_safely,
-    replay_state,
+    replay_state, resend_duplicates_of,
 )
 from storage.database import ProcessingStatus, init_db
 from storage.image_storage import is_drive_path
@@ -227,6 +227,10 @@ def foreach_batch_sink(batch_df, batch_id):
     # COMPLETED with result_published_at empty, which System Status counts
     # and `python -m storage.requeue_stuck` re-sends.
     statuses = [upload.result() if upload is not None else None for upload in uploads]
+    # Copies rejected as duplicates of a photo that has now FAILED get their own turn.
+    failed = [e.get("image_id") for e, s in zip(events, statuses) if s == ProcessingStatus.FAILED and e.get("image_id")]
+    if resent := resend_duplicates_of(failed):
+        live_log.say(f"[dup]    {resent} copy/copies of a photo that failed sent again, for their own result")
     live_log.batch_committed(batch_id, ok=statuses.count(ProcessingStatus.COMPLETED),
                              failed=statuses.count(ProcessingStatus.FAILED), skipped=statuses.count(None),
                              seconds=time.monotonic() - started)

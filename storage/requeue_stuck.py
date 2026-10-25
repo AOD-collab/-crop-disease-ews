@@ -197,7 +197,7 @@ def process_inline(images, dry_run: bool) -> int:
         return 0
 
     from spark.preprocessing import (
-        process_event, persist_result, InvalidEvent, publish_result_to_drive_safely,
+        process_event, persist_result, InvalidEvent, publish_result_to_drive_safely, resend_duplicates_of,
     )
 
     done = 0
@@ -222,6 +222,11 @@ def process_inline(images, dry_run: bool) -> int:
             except Exception as db_error:  # noqa: BLE001 - keep going with the other photos
                 print(f"  could not record the failure of {img.image_id}: {db_error}")
     print(f"\nProcessed inline: {done} completed, {failed} failed.")
+    with SessionLocal() as s:
+        ids = [img.image_id for img in images
+               if (row := s.get(Image, img.image_id)) is not None and row.status == ProcessingStatus.FAILED]
+    if resent := resend_duplicates_of(ids):
+        print(f"Sent {resent} copy/copies of failed photo(s) to Kafka for their own result.")
     return done
 
 

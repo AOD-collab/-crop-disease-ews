@@ -105,6 +105,7 @@ class DuplicateImage(InvalidEvent):
 
 # Set to False to switch the duplicate check off without touching anything else.
 SKIP_DUPLICATE_PHOTOS = True
+DUPLICATE_OF = "Duplicate photo: identical to "      # + the kept photo's image_id
 
 # The Spark job checks several photos of a micro-batch at once (streaming_job's
 # thread pool). The lock makes "store the fingerprint + look for a copy" one step,
@@ -165,7 +166,37 @@ def check_duplicate_by_hash(event: dict, original_bytes: bytes) -> None:
         print(f"[preprocessing] Duplicate check skipped for {event.get('image_id')}: {e}")
         return
     if earlier:
-        raise DuplicateImage(f"Duplicate photo: identical to {earlier.image_id}")
+        raise DuplicateImage(f"{DUPLICATE_OF}{earlier.image_id}")
+
+
+def resend_duplicates_of(failed_ids: list, backend=None) -> int:
+    """A copy is rejected as a duplicate of a photo that was still being
+    processed. If that photo then FAILED (a model error, say), the copy
+    would stay FAILED as a "duplicate" of a photo without a result — so it
+    is sent through the pipeline again: its duplicate check runs again and
+    keeps one copy (the others become its duplicates). A copy whose send
+    fails is left FAILED with "Kafka publish failed", which
+    requeue_stuck --include-failed retries. Returns how many were sent."""
+    if not failed_ids:
+        return 0
+    from kafka.config import KAFKA_TOPIC
+    from kafka.producer import get_backend
+    from storage.pipeline_submit import submit_image_for_processing
+    sent = 0
+    with SessionLocal() as session:
+        failed = [i for (i,) in session.query(Image.image_id).filter(
+            Image.image_id.in_(failed_ids), Image.status == ProcessingStatus.FAILED)]
+        copies = session.query(Image).filter(
+            Image.status == ProcessingStatus.FAILED,
+            Image.error_message.in_([DUPLICATE_OF + i for i in failed])).order_by(Image.uploaded_at).all()
+        for img in copies:
+            try:
+                backend = backend or get_backend(KAFKA_TOPIC)
+                submit_image_for_processing(session, img, backend)
+                sent += 1
+            except Exception as e:  # noqa: BLE001 - recorded on the row; the others still go
+                print(f"[preprocessing] Could not send {img.image_id} again: {e}")
+    return sent
 
 
 def clean_event(event: dict) -> dict:
