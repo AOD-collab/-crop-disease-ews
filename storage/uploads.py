@@ -1,5 +1,5 @@
 """
-Spark's ingestion step: the first thing spark/streaming_job._process_one
+Registering an upload: the first thing spark/streaming_job._process_one
 does with a "drive_upload" event from the Drive watcher (or the dashboard's
 Process button). The watcher has no database; this is where an upload
 becomes a database row:

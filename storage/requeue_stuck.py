@@ -20,7 +20,7 @@ This tool finds those rows and gets them unstuck. Two modes:
                back on the topic and Spark processes it normally.
 
     --inline   process the image here and now, in-process, using the exact
-               same spark/preprocessing.process_event + persist_result the
+               same spark/streaming_job.process_event + persist_result the
                Spark foreachBatch sink calls. No broker, no Spark JVM, no
                checkpoint involved. Use this for a one-shot backfill of
                events that are genuinely gone from Kafka.
@@ -42,7 +42,7 @@ Examples
     python -m storage.requeue_stuck --all --include-failed  # also retry Kafka-publish failures
     python -m storage.requeue_stuck --from-drive            # Drive photos Spark never registered
 
-The database only has a row for a photo Spark registered (spark/ingestion.py),
+The database only has a row for a photo Spark registered (storage/uploads.py),
 so a photo whose drive_upload event never reached Spark is found by
 --from-drive (Drive minus database, storage/drive_inventory.py), not by the
 row-based modes above.
@@ -197,7 +197,9 @@ def process_inline(images, dry_run: bool) -> int:
     if _listed_only(images, dry_run, "process inline"):
         return 0
 
-    from spark.preprocessing import process_and_persist, publish_result_to_drive_safely, resend_duplicates_of
+    from spark.streaming_job import process_and_persist
+    from storage.results import publish_result_to_drive_safely
+    from storage.duplicates import resend_duplicates_of
 
     done = 0
     for img in images:

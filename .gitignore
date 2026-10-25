@@ -16,6 +16,8 @@ storage/local_queue/
 storage/spark_checkpoints/
 # kept for good on this laptop, ~1.3 MB per photo — never in git
 storage/downloaded_photos/
+# Spark's processed image of every photo (the CNN's input square)
+storage/processed_images/
 storage/scalability_reports/
 
 # Model weights: binary (43 MB) — kept on disk, not in git, so the repository

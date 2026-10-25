@@ -215,11 +215,12 @@ def process_photo(path) -> tuple:
     preprocessing (spark/preprocessing.model_input) and CNN inference
     (ml/inference.predict) on it. Returns (timings, prediction).
     The prediction (class, confidence, uncertain flag, rule-based risk
-    level — spark/preprocessing.compute_risk, as the live pipeline) is kept
+    level — ml/risk.compute_risk, as the live pipeline) is kept
     only in scale_test_items, for the test page's disease charts; it never
     becomes a diagnosis a farmer sees. Only the two stages are timed
     (time.perf_counter); reading the file and the risk rule are not."""
-    from spark.preprocessing import model_input, compute_risk
+    from spark.preprocessing import model_input
+    from ml.risk import compute_risk
     from ml.inference import predict
     original = Path(path).read_bytes()
     t0 = time.perf_counter()

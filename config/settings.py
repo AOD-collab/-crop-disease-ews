@@ -118,6 +118,10 @@ SAVE_PHOTOS_FOR_REVIEW = os.getenv("SAVE_PHOTOS_FOR_REVIEW", "true").lower() == 
 DOWNLOADED_PHOTOS_DIR = Path(os.getenv("DOWNLOADED_PHOTOS_DIR", str(BASE_DIR / "storage" / "downloaded_photos")))
 SAVE_DOWNLOADED_PHOTOS = os.getenv("SAVE_DOWNLOADED_PHOTOS", "true").lower() == "true"
 
+# Spark's processed image of every farmer photo: the picture the CNN receives
+# (spark/preprocessing.store_processed_image): PROCESSED_IMAGES_DIR/<image_id>.png.
+PROCESSED_IMAGES_DIR = Path(os.getenv("PROCESSED_IMAGES_DIR", str(BASE_DIR / "storage" / "processed_images")))
+
 # Scalability test reports, logs and the one-job-at-a-time lock (scalability/).
 SCALABILITY_REPORTS_DIR = Path(os.getenv("SCALABILITY_REPORTS_DIR",
                                          str(BASE_DIR / "storage" / "scalability_reports")))

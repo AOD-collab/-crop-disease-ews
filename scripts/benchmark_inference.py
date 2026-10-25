@@ -46,7 +46,8 @@ from config.settings import (  # noqa: E402
     DOWNLOADED_PHOTOS_DIR, IMAGE_MODEL, SCALABILITY_REPORTS_DIR,
 )
 from ml import inference  # noqa: E402
-from spark.preprocessing import model_input, compute_risk  # noqa: E402
+from spark.preprocessing import model_input  # noqa: E402
+from ml.risk import compute_risk  # noqa: E402
 
 FOLDER_ALIASES = {"blight": "northern_leaf_blight", "northern_leaf_blight": "northern_leaf_blight",
                   "common_rust": "common_rust", "gray_leaf_spot": "gray_leaf_spot", "healthy": "healthy"}

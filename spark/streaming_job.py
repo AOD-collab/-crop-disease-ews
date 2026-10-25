@@ -7,25 +7,30 @@ Pipeline:
       -> Read Stream
       -> Parse JSON
       -> Register a new upload: farmer, upload checks, duplicate skip,
-         first database row         (spark/ingestion.register_upload)
+         first database row         (storage/uploads.register_upload)
       -> Validate / Data Cleaning   (spark/preprocessing.clean_event)
       -> Retrieve Image             (Google Drive, or the local copy)
+      -> Duplicate photo check      (storage/duplicates)
       -> Metadata Extraction: EXIF GPS location, capture time, camera
                                      (spark/preprocessing.extract_metadata)
       -> Image Preprocessing: upright, resize, centre crop to the model's
-         size, normalise — the CNN only classifies
-                                     (spark/preprocessing.model_input)
-      -> CNN Inference (ml/inference.predict) + Risk Assessment
-                                     (spark/preprocessing.process_event)
+         size, normalise, and store the processed image
+                                     (spark/preprocessing.model_input,
+                                      store_processed_image)
+      -> CNN classifies the image   (ml/inference.predict)
+      -> Risk level                 (ml/risk.compute_risk)
       -> Write predictions + update image status to PostgreSQL
+                                     (storage/results.persist_result)
       -> Result to the farmer's Google Drive folder
+                                     (storage/results.publish_result_to_drive)
+process_event below runs these steps for one photo.
 
 Checkpointing: this job writes to CHECKPOINT_DIR (below) so a restart
 resumes from the last committed Kafka offset instead of silently skipping
 whatever was uploaded while it was down. One honest caveat that comes with
 that: Structured Streaming's checkpoint gives *at-least-once* delivery to
 foreachBatch, not exactly-once — if Spark crashes mid-batch and replays it
-after restart, the same event can reach spark/preprocessing.persist_result()
+after restart, the same event can reach storage/results.persist_result()
 twice. persist_result() copes with this by deleting any existing Prediction
 row for the image_id before inserting the new one (delete-then-insert), so a
 replay overwrites rather than duplicates — see its docstring. ProcessingEvent
@@ -62,19 +67,26 @@ from config.settings import (
     SPARK_DRIVE_UPLOAD_WORKERS, SPARK_AUTO_RESEND_SECONDS, SPARK_AUTO_RESEND_AFTER_SECONDS, SPARK_AUTO_RESEND_MAX,
 )
 from spark.preprocessing import (
-    process_and_persist, mark_processing, InvalidEvent, publish_result_to_drive_safely,
-    replay_state, resend_duplicates_of,
+    InvalidEvent, clean_event, extract_metadata, prepare_image, model_input, store_processed_image,
+    save_for_review, save_downloaded_photo, scale_test_run_for,
 )
+from ml.inference import predict as run_model, model_version as get_model_version, disease_heatmap
+from ml.risk import compute_risk
+from ml.render import render_processed_image, heatmap_on_photo
 from storage.database import ProcessingStatus, init_db
-from storage.image_storage import is_drive_path
+from storage.duplicates import check_duplicate_by_hash, resend_duplicates_of
+from storage.image_storage import is_drive_path, load_image_bytes, downloaded_photo_path
+from storage.results import (
+    FEATURE_FIELDS, persist_result, mark_processing, replay_state, publish_result_to_drive_safely,
+)
+from storage.uploads import register_upload
 from spark import live_log
-from spark.ingestion import register_upload
 
 CHECKPOINT_DIR = str(SPARK_CHECKPOINT_ROOT / KAFKA_TOPIC)
 
 EVENT_SCHEMA = StructType([
     # "drive_upload": a new photo, from its Drive metadata (kafka/drive_watcher.
-    # build_drive_event) — spark/ingestion registers it. "submit" (or no kind,
+    # build_drive_event) — storage/uploads registers it. "submit" (or no kind,
     # older events): a photo already in the database is sent again
     # (storage/pipeline_submit.build_upload_event).
     StructField("kind", StringType()),
@@ -172,6 +184,140 @@ def parse_events(raw):
     )
 
 
+# Photo downloads running alongside their metadata check (process_event).
+# Network waits only, so a few more than SPARK_PARALLEL_PHOTOS is fine.
+_DOWNLOADS = ThreadPoolExecutor(max_workers=16, thread_name_prefix="drive-download")
+
+
+def process_event(event: dict) -> dict:
+    """One photo, each step by the part that owns it:
+        Spark   check the event, get the photo, EXIF, preprocess it and
+                store the processed image          (spark/preprocessing.py)
+        CNN     classify it                        (ml/inference.predict)
+        risk    from the CNN's output              (ml/risk.compute_risk)
+    Returns a dict ready to persist as a Prediction row (storage/results.py).
+    Raises InvalidEvent / whatever ml.inference raises (e.g.
+    ModelNotAvailable) on failure — callers must NOT substitute a fake
+    prediction, per section 24/43."""
+    # A Drive photo's download (~2 s) starts now, alongside clean_event's
+    # Drive metadata check (~0.7 s) instead of after it. The bytes are only
+    # used once that check has passed.
+    # A photo already saved locally (save_downloaded_photo) is read from
+    # disk instead of being downloaded again — e.g. a Reprocess, or a demo.
+    # Seconds spent in each step (result["timings"]), for the scalability
+    # test report (scalability/report.py). Measuring changes nothing else.
+    timings = {}
+    clock = time.perf_counter()
+
+    def lap(name):
+        nonlocal clock
+        now = time.perf_counter()
+        timings[name] = round(now - clock, 4)
+        clock = now
+
+    download = None
+    local_copy = None
+    if is_drive_path(event.get("image_path") or ""):
+        local_copy = downloaded_photo_path(event.get("user_id"), event.get("image_id"))
+        if local_copy is None:
+            download = _DOWNLOADS.submit(load_image_bytes, event["image_path"])
+    try:
+        event = clean_event(event)
+    except Exception:
+        if download is not None:
+            download.cancel()
+        raise
+    lap("validate_s")
+    # A scalability-test photo (scalability/run.py): no copy for labelling,
+    # and the marked-up image only when that run publishes results to Drive.
+    scale_run = scale_test_run_for(event)
+
+    prediction_started_at = datetime.now(timezone.utc)
+    if local_copy is not None:
+        original_bytes = local_copy.read_bytes()                 # the local copy of the Drive photo
+    elif download is not None:
+        original_bytes = download.result()                       # download from Google Drive
+        save_downloaded_photo(event["user_id"], event["image_id"], original_bytes)
+    else:
+        original_bytes = Path(event["image_path"]).read_bytes()
+    lap("read_s")
+    if scale_run is None:                         # scalability tests deliberately reuse the same photo
+        check_duplicate_by_hash(event, original_bytes)
+    extract_metadata(event, original_bytes)       # EXIF: GPS, capture time, camera — needs the original
+    lap("metadata_s")
+    image_bytes = prepare_image(original_bytes)
+    cnn_input = model_input(original_bytes, image_bytes)   # Spark's preprocessing for the CNN
+    if scale_run is None:
+        store_processed_image(event["image_id"], original_bytes, image_bytes)
+    lap("preprocess_s")
+    features = run_model(cnn_input)
+    lap("cnn_s")
+    # The batch this photo ran in, its precision, checking the prepared input
+    # (inside cnn_s), and waiting for + running the forward pass.
+    used = features.get("inference") or {}
+    timings.update({f"cnn_{k}": used.get(k) for k in ("batch_size", "precision", "input_s", "forward_s")})
+    if scale_run is None:
+        save_for_review(event["image_id"], image_bytes)
+
+    is_uncertain = features.get("is_uncertain", False)
+    risk_score, risk_level = compute_risk(features, is_uncertain=is_uncertain)
+
+    predicted_at = datetime.now(timezone.utc)
+
+    result = {
+        "image_id": event["image_id"],
+        "predicted_class": features.get("predicted_class"),
+        "prediction_confidence": features.get("predicted_class_confidence"),
+        **{k: features.get(k) for k in FEATURE_FIELDS},
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "is_uncertain": is_uncertain,
+        "model_version": get_model_version(),
+        "predicted_at": predicted_at,
+        "prediction_started_at": prediction_started_at,
+        "timings": timings,
+    }
+    lap("risk_s")
+    wants_processed_image = (scale_run.publish_results if scale_run is not None
+                             else is_drive_path(event["image_path"]))
+    if wants_processed_image:
+        # The marked-up leaf the farmer sees (publish_result_to_drive puts it
+        # in Drive next to the result). A drawing problem never fails the
+        # diagnosis itself.
+        try:
+            heatmap = heatmap_on_photo(disease_heatmap(cnn_input), image_bytes) if not is_uncertain else None
+            result["processed_image_jpeg"] = render_processed_image(image_bytes, result, heatmap)
+        except Exception as e:
+            print(f"[streaming_job] Could not draw processed image for {event['image_id']}: {e}")
+        lap("render_s")
+    return result
+
+
+def process_and_persist(event: dict, rejected_reason: str = None, **stamps) -> tuple:
+    """process_event + persist_result for one photo (the Spark sink and
+    storage.requeue_stuck --inline): COMPLETED with its result, or FAILED
+    with the error — an InvalidEvent too, e.g. `rejected_reason` from
+    parse_events. Never raises: if even the failure can't be saved, the
+    photo stays PROCESSING and storage/requeue_stuck.py sends it again.
+    `stamps`: persist_result's kafka_received_at / spark_started_at.
+    Returns (result, status, error)."""
+    result = None
+    try:
+        if rejected_reason:
+            raise InvalidEvent(rejected_reason)
+        result = process_event(event)
+        persist_result(event, result, ProcessingStatus.COMPLETED, **stamps)
+        return result, ProcessingStatus.COMPLETED, None
+    except Exception as e:                     # an InvalidEvent too, only reported differently
+        print(f"[streaming_job] Invalid event, skipping: {e}" if isinstance(e, InvalidEvent)
+              else f"[streaming_job] Processing failed for {event.get('image_id')}: {e}")
+        try:
+            persist_result(event, None, ProcessingStatus.FAILED, error_message=str(e), **stamps)
+        except Exception as db_error:  # noqa: BLE001 - don't take the other photos (or the job) down with it
+            print(f"[streaming_job] Could not record the failure for {event.get('image_id')}: {db_error}")
+        return result, ProcessingStatus.FAILED, str(e)
+
+
 def foreach_batch_sink(batch_df, batch_id):
     # DataFrame.isEmpty() (Spark 3.3+) is a JVM-only check. batch_df.rdd
     # would force an RDD conversion that spawns an executor-side Python
@@ -246,7 +392,7 @@ def _process_one(event: dict):
     if (event.get("kind") == DRIVE_UPLOAD
             and all(event.get(f) for f in ("image_id", "image_path", "owner_email"))):
         # A new photo from Drive: farmer, upload checks, duplicate skip and its
-        # first database row (spark/ingestion.py). A refused upload gets its
+        # first database row (storage/uploads.py). A refused upload gets its
         # row and fails below with the reason, like any invalid event — also
         # one parse_events refused for its content (captured_at in the
         # future): without a row it would stay in Pending Review and

@@ -1,7 +1,7 @@
 """
 Which farmer photos in Google Drive have not been sent for processing yet.
 
-The database only holds photos Spark has registered (spark/ingestion.py), so
+The database only holds photos Spark has registered (storage/uploads.py), so
 "pending" is simply: every photo in a farmer's images/<email>/ folder whose
 image_id has no `images` row. Used by
 

@@ -16,7 +16,7 @@ It is the system's only way in for photos: the phone never talks to a
 server of ours — only to Google Drive.
 
 Stateless: no database. The watcher only reads Drive and publishes. Spark's
-ingestion step (spark/ingestion.register_upload) resolves the farmer,
+ingestion step (storage/uploads.register_upload) resolves the farmer,
 checks the upload, skips duplicates and writes the first database row.
 In MANUAL mode (storage/processing_mode.json) nothing is published: the
 dashboard's Pending Review page lists the Drive photos that have no

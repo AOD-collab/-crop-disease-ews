@@ -6,7 +6,7 @@ row INGESTED.
 
 New photos don't come through here: the Drive watcher (and the dashboard's
 Pending Review in MANUAL mode) publish a "drive_upload" event built from
-the file's Drive metadata, and Spark creates the row (spark/ingestion.py).
+the file's Drive metadata, and Spark creates the row (storage/uploads.py).
 """
 
 from storage.database import ProcessingStatus, now_utc
@@ -37,7 +37,7 @@ def build_upload_event(image) -> dict:
     }
 
 
-# error_message prefix Spark's ingestion step (spark/ingestion.register_upload)
+# error_message prefix Spark's ingestion step (storage/uploads.register_upload)
 # gives an upload it refused (inactive account, not the farmer's own folder,
 # wrong name/type/size).
 UPLOAD_REJECTED_PREFIX = "Upload rejected: "

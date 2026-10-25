@@ -78,7 +78,7 @@ class RiskLevel(str, enum.Enum):
 
 class ProcessingStatus(str, enum.Enum):
     # A row only exists once Spark has registered the photo
-    # (spark/ingestion.register_upload); a photo waiting in MANUAL mode is
+    # (storage/uploads.register_upload); a photo waiting in MANUAL mode is
     # still only a file in Drive. (The PostgreSQL enum type also keeps the
     # old UPLOADED / PENDING_REVIEW labels; no row uses them.)
     INGESTED = "INGESTED"          # registered by Spark (or sent again by Reprocess)

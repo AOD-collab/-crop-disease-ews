@@ -2,7 +2,7 @@
 Farmer accounts made from Google Drive identities. A farmer never registers
 with a password: the Google account that owns an upload (Drive's `owners`
 field) is the identity. Used by Spark's ingestion step
-(spark/ingestion.register_upload) and the dashboard's "Register farmer"
+(storage/uploads.register_upload) and the dashboard's "Register farmer"
 button, so both create the account the same way.
 """
 

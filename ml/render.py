@@ -64,3 +64,25 @@ def render_processed_image(image_bytes: bytes, prediction: dict, heatmap=None) -
     buf = BytesIO()
     canvas.save(buf, format="JPEG", quality=75)
     return buf.getvalue()
+
+
+def heatmap_on_photo(cam, prepared_bytes: bytes):
+    """Places the CNN's Grad-CAM (ml.inference.disease_heatmap: the map of
+    the S x S square spark/preprocessing.model_input() cut out) on the photo itself: an (H, W)
+    float array in [0, 1] at the photo's size, the map stretched over the
+    centre square the CNN saw and 0 on the cropped-off edges. None stays
+    None (the model saw no disease)."""
+    if cam is None:
+        return None
+    import numpy as np
+    import torch
+    import torch.nn.functional as F
+    w, h = ImageOps.exif_transpose(Image.open(BytesIO(prepared_bytes))).size
+    side = min(w, h)
+    cam = torch.as_tensor(cam, dtype=torch.float32)[None, None]
+    cam = F.interpolate(cam, size=(side, side), mode="bilinear", align_corners=False)[0, 0]
+    cam = (cam / cam.max()).numpy()
+    heat = np.zeros((h, w), dtype=np.float32)
+    top, left = (h - side) // 2, (w - side) // 2
+    heat[top:top + side, left:left + side] = cam
+    return heat

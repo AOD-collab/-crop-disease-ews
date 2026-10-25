@@ -409,7 +409,7 @@ def disease_heatmap(model_input):
     when there is nothing honest to show — the model's top class is healthy
     (a "healthy" heatmap would just highlight healthy tissue and read as
     disease on the processed image). Spark places it on the photo
-    (spark/preprocessing.heatmap_on_photo), since only Spark knows which
+    (ml/render.heatmap_on_photo), since only Spark knows which
     part of the photo the input was cut from.
 
     Grad-CAM is computed by running the ResNet stages by hand and asking

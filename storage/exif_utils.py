@@ -95,6 +95,10 @@ def _clean_text(value) -> Optional[str]:
     return text[:100] or None
 
 
+# The Image columns the photo's EXIF GPS fills (extract_gps).
+GPS_COLUMNS = ("gps_latitude", "gps_longitude", "gps_altitude_m")
+
+
 def extract_gps(exif) -> dict:
     """(latitude, longitude, altitude_m) from the EXIF GPS block, or Nones.
     Android redacts a photo's location for apps without
