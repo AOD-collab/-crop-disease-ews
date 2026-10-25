@@ -257,9 +257,9 @@ def find_file_in_folder(name: str, parent_id: str) -> Optional[dict]:
         f"name = '{_escape_query_value(name)}' and "
         f"'{parent_id}' in parents and trashed = false"
     )
-    resp = _request(
-        "GET", f"{DRIVE_API}/files",
-        params={
+    resp = _get_with_retry(
+        f"{DRIVE_API}/files",
+        {
             "q": q,
             "spaces": "drive",
             "orderBy": "modifiedTime desc",
@@ -351,7 +351,7 @@ def upload_json(name: str, data: dict, parent_id: str, app_properties: dict, may
 def get_start_page_token() -> str:
     """Bookmark for "now" in the account's change feed: list_changes() from
     this token returns only what changes afterwards."""
-    resp = _request("GET", f"{DRIVE_API}/changes/startPageToken", params={"fields": "startPageToken"})
+    resp = _get_with_retry(f"{DRIVE_API}/changes/startPageToken", {"fields": "startPageToken"})
     return _check(resp, "get changes start token").json()["startPageToken"]
 
 
@@ -364,7 +364,7 @@ def list_changes(page_token: str) -> tuple:
     Used by kafka/drive_watcher.py instead of searching every folder."""
     changes = []
     while True:
-        resp = _request("GET", f"{DRIVE_API}/changes", params={
+        resp = _get_with_retry(f"{DRIVE_API}/changes", {
             "pageToken": page_token, "pageSize": 1000, "spaces": "drive", "includeRemoved": "false",
             "fields": f"nextPageToken,newStartPageToken,changes(fileId,removed,file({FILE_METADATA_FIELDS}))",
         })
@@ -380,7 +380,7 @@ def _list_files(q: str, fields: str, action: str, **extra) -> list:
     out, params = [], {"q": q, "spaces": "drive", **extra, "pageSize": 100,
                        "fields": f"nextPageToken,files({fields})"}
     while True:
-        body = _check(_request("GET", f"{DRIVE_API}/files", params=params), action).json()
+        body = _check(_get_with_retry(f"{DRIVE_API}/files", params), action).json()
         out.extend(body.get("files", []))
         if not body.get("nextPageToken"):
             return out
@@ -469,9 +469,7 @@ def register_farmer(email: str) -> dict:
 def account_info() -> dict:
     """Which Google account the laptop is connected as, and its storage use
     (bytes; limit is None for unlimited accounts)."""
-    resp = _request(
-        "GET", f"{DRIVE_API}/about", params={"fields": "user(emailAddress),storageQuota(limit,usage)"}
-    )
+    resp = _get_with_retry(f"{DRIVE_API}/about", {"fields": "user(emailAddress),storageQuota(limit,usage)"})
     body = _check(resp, "about").json()
     quota = body.get("storageQuota") or {}
     return {
@@ -497,16 +495,25 @@ def share_with(file_id: str, email: str, role: str) -> None:
     _require_valid_id(file_id, "folder id")
     if role not in ("reader", "writer"):
         raise DriveError(f"Invalid role: {role}")
-    resp = _request(
+    # Sharing the same role with the same person again changes nothing, so
+    # a request whose answer got lost is simply sent again.
+    resp = _with_network_retry(_UPLOAD_ATTEMPTS, f"share {file_id}", lambda _attempt: _request(
         "POST", f"{DRIVE_API}/files/{file_id}/permissions",
         params={"sendNotificationEmail": "false", "fields": "id"},
         json={"type": "user", "role": role, "emailAddress": email},
-    )
+    ))
     _check(resp, f"share {file_id} with {email}")
 
 
 def ensure_folder(name: str, parent_id: Optional[str] = None, app_properties: Optional[dict] = None) -> str:
-    """Finds or creates a folder (used once by scripts/drive_authorize.py)."""
+    """Finds or creates a folder (scripts/drive_authorize.py, a new farmer's
+    folders). After a dropped connection it searches again before creating,
+    so a folder the lost request did create is found, not made twice."""
+    return _with_network_retry(_UPLOAD_ATTEMPTS, f"create folder {name}",
+                               lambda _attempt: _find_or_create_folder(name, parent_id, app_properties))
+
+
+def _find_or_create_folder(name, parent_id, app_properties) -> str:
     q = (
         f"name = '{_escape_query_value(name)}' and mimeType = '{FOLDER_MIME_TYPE}' "
         f"and trashed = false"
@@ -514,7 +521,7 @@ def ensure_folder(name: str, parent_id: Optional[str] = None, app_properties: Op
     if parent_id:
         _require_valid_id(parent_id, "parent folder id")
         q += f" and '{parent_id}' in parents"
-    resp = _request("GET", f"{DRIVE_API}/files", params={"q": q, "fields": "files(id,name)", "pageSize": 1})
+    resp = _get_with_retry(f"{DRIVE_API}/files", {"q": q, "fields": "files(id,name)", "pageSize": 1})
     files = _check(resp, f"search folder {name}").json().get("files", [])
     if files:
         return files[0]["id"]

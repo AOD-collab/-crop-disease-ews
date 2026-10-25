@@ -104,7 +104,8 @@ def find_stuck(session, older_than_seconds: int, include_failed: bool, ignore_ag
     for img in rows:
         if not ignore_age:
             if img.status == ProcessingStatus.COMPLETED:
-                stamp = img.processed_at or img.ingested_at   # its Drive upload may still be running
+                # its Drive upload may still be running, or it was just sent again
+                stamp = max((t for t in (img.processed_at, img.ingested_at) if t), default=None)
             else:
                 stamp = img.ingested_at or img.uploaded_at or img.created_at
             # stored naive-UTC in SQLite; compare on the same basis
@@ -228,6 +229,38 @@ def process_inline(images, dry_run: bool) -> int:
     if resent := resend_duplicates_of(ids):
         print(f"Sent {resent} copy/copies of failed photo(s) to Kafka for their own result.")
     return done
+
+
+def resend_owed(older_than_seconds: int, limit: int, backend=None) -> int:
+    """What `requeue_stuck --all` would do, for the Spark job to run by
+    itself (spark/streaming_job.py): the photos owed a result for at least
+    `older_than_seconds` — stuck INGESTED/PROCESSING, or COMPLETED with the
+    result not in Drive — sent through the pipeline again, at most `limit`,
+    oldest first. Sending marks each one ingested now, so it waits another
+    `older_than_seconds` before it can be sent again. While Google Drive
+    can't be reached, undelivered results are left for a later round (they
+    would only fail at the upload again). Returns how many were sent."""
+    from kafka.config import KAFKA_TOPIC
+    from kafka.producer import get_backend
+    from storage.pipeline_submit import submit_image_for_processing
+    from storage import drive_client
+    with SessionLocal() as session:
+        owed = find_stuck(session, older_than_seconds, include_failed=False, ignore_age=False)
+        owed.sort(key=lambda i: i.ingested_at or i.uploaded_at)        # uploaded_at is never empty
+        if any(i.status == ProcessingStatus.COMPLETED for i in owed):
+            try:
+                drive_client.account_info()
+            except Exception:  # noqa: BLE001 - Drive down: deliver those later
+                owed = [i for i in owed if i.status != ProcessingStatus.COMPLETED]
+        sent = 0
+        for img in owed[:limit]:
+            try:
+                backend = backend or get_backend(KAFKA_TOPIC)
+                submit_image_for_processing(session, img, backend)
+                sent += 1
+            except Exception as e:  # noqa: BLE001 - recorded on the row; the others still go
+                print(f"[requeue_stuck] Could not re-send {img.image_id}: {e}")
+    return sent
 
 
 def republish_from_drive(dry_run: bool) -> int:

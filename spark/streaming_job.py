@@ -44,6 +44,7 @@ first time it runs.
 Runs in Spark **local mode** on this laptop; an actual multi-node cluster
 has not been exercised.
 """
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
@@ -59,7 +60,7 @@ from pyspark.sql.types import StructType, StructField, StringType
 from kafka.config import KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC
 from config.settings import (
     SPARK_CHECKPOINT_ROOT, SPARK_MAX_EVENTS_PER_BATCH, SPARK_TRIGGER_SECONDS, SPARK_PARALLEL_PHOTOS,
-    SPARK_DRIVE_UPLOAD_WORKERS,
+    SPARK_DRIVE_UPLOAD_WORKERS, SPARK_AUTO_RESEND_SECONDS, SPARK_AUTO_RESEND_AFTER_SECONDS, SPARK_AUTO_RESEND_MAX,
 )
 from spark.preprocessing import (
     process_event, persist_result, mark_processing, InvalidEvent, publish_result_to_drive_safely,
@@ -320,6 +321,21 @@ def _warm_up_model() -> None:
     inference.disease_heatmap(x)
 
 
+def _auto_resend() -> None:
+    """Background thread: every SPARK_AUTO_RESEND_SECONDS, send the photos
+    still owed a result through the pipeline again (storage/requeue_stuck.
+    resend_owed) — a lost Kafka event, a photo left PROCESSING, a result
+    that didn't reach Drive — so nobody has to run requeue_stuck by hand."""
+    from storage.requeue_stuck import resend_owed
+    while True:
+        time.sleep(SPARK_AUTO_RESEND_SECONDS)
+        try:
+            if sent := resend_owed(SPARK_AUTO_RESEND_AFTER_SECONDS, SPARK_AUTO_RESEND_MAX):
+                live_log.say(f"[resend] {sent} photo(s) still owed a result sent through the pipeline again")
+        except Exception as e:  # noqa: BLE001 - database or Kafka hiccup: next round
+            print(f"[streaming_job] Automatic re-send failed, trying again later: {e}")
+
+
 def run():
     # Make sure the checkpoint root exists before the query starts — the
     # metadata subdirs (offsets/, commits/, sources/) are created lazily by
@@ -351,6 +367,8 @@ def run():
         .option("checkpointLocation", CHECKPOINT_DIR)
         .start()
     )
+    if SPARK_AUTO_RESEND_SECONDS > 0:
+        threading.Thread(target=_auto_resend, name="auto-resend", daemon=True).start()
     query.awaitTermination()
 
 

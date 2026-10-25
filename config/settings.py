@@ -183,6 +183,14 @@ SPARK_DRIVE_UPLOAD_WORKERS = int(os.getenv("SPARK_DRIVE_UPLOAD_WORKERS", "16"))
 # registered and doesn't ask Drive about the file again. true: re-check every
 # photo's Drive metadata in Spark too (0.5 s+ per photo).
 SPARK_RECHECK_DRIVE_FILE = os.getenv("SPARK_RECHECK_DRIVE_FILE", "false").lower() == "true"
+# The Spark job re-sends what storage/requeue_stuck.py would, by itself:
+# every SPARK_AUTO_RESEND_SECONDS (0 = off) it sends the photos owed a result
+# for at least SPARK_AUTO_RESEND_AFTER_SECONDS (stuck INGESTED/PROCESSING, or
+# a result that didn't reach Drive) through the pipeline again, at most
+# SPARK_AUTO_RESEND_MAX per round, oldest first.
+SPARK_AUTO_RESEND_SECONDS = float(os.getenv("SPARK_AUTO_RESEND_SECONDS", "300"))
+SPARK_AUTO_RESEND_AFTER_SECONDS = int(os.getenv("SPARK_AUTO_RESEND_AFTER_SECONDS", "600"))
+SPARK_AUTO_RESEND_MAX = int(os.getenv("SPARK_AUTO_RESEND_MAX", "50"))
 # Longer side, in pixels, of the copy of a photo that Spark analyses
 # (spark/preprocessing.prepare_image). Every step already works at <= 600 px.
 ANALYSIS_MAX_PX = int(os.getenv("ANALYSIS_MAX_PX", "1280"))

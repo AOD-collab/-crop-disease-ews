@@ -490,7 +490,8 @@ def _system_status() -> dict:
                  f"{rejected} unreadable Kafka event(s) in the last 24 hours (table rejected_events)"]
         stuck += undelivered
         if stuck:
-            lines.append("To re-send them: `python -m storage.requeue_stuck --all`")
+            lines.append("They are re-sent automatically every few minutes; "
+                         "to do it now: `python -m storage.requeue_stuck --all`")
         out["backlog"] = ("warn" if stuck else "ok", lines)
     except Exception as e:  # noqa: BLE001
         out["backlog"] = ("unknown", [str(e)[:160]])
