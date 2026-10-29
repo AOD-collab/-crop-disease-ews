@@ -1,195 +1,227 @@
-# README — Dokumentasaun Téknika Crop Disease EWS
+# README — Dokumentasaun Téknika Sistema EWS
 
-*Sistema Crop Disease Early Warning System (EWS) — vizaun jerál, objetivu kada modulu no relasaun entre modulu sira. Fonte úniku: kódigu iha repozitóriu (commit `9ed46d4` + ajusta deep test, 2026-10-24). Kódigu iha dokumentu ne'e mak kópia husi arkivu loloos, ho númeru liña.*
+*Crop Disease Early Warning System (EWS) ba moras tahan batar iha Timor-Leste. Dokumentu ne'e mak pontu hahú: hatudu sistema tomak, modulu 6, no relasaun entre sira, ba estudante Enjeñaria Informátika ne'ebé foin hahú aprende Python. Fonte úniku: kódigu iha repozitóriu (branch `main`, commit `302818f`) no projetu treinu `crop_disease_ews`.*
+
+{{coverage run_all.py 1-13}}
+
+> **Etiketa iha dokumentu hotu:** *Implementadu* (kódigu halo duni), *Inferidu* (dedús husi kódigu), *Teoria* (esplikasaun jerál), *Ezemplu ilustrativu* (valór hili atu esplika). Bainhira funsionalidade la iha: "Not implemented in the current codebase."
 
 ## A. Introdusaun no Objetivu
 
-**Problema.** Agrikultór batar (*maize*) iha Timor-Leste presiza hatene lalais se tahan batar iha moras, molok moras ne'e habelar ba to'os tomak. Espesialista la iha besik tempu hotu.
+### A.1 Saida mak sistema EWS
 
-**Solusaun.** Agrikultór foti fotografia tahan ho aplikasaun Android. Fotografia ba Google Drive. Iha laptop, sistema deteta fotografia foun, haruka eventu liu Kafka, no Spark prosesa: kontrola, prepara imajen, CNN **SEResNet-18** klasifika ba klase 4 (`healthy`, `common_rust`, `gray_leaf_spot`, `northern_leaf_blight`), kalkula nível risku (LOW / MEDIUM / HIGH), rai iha PostgreSQL no haruka rezultadu fali ba Drive. Aplikasaun lee rezultadu husi Drive. Administradór haree buat hotu iha dashboard Streamlit.
+Agrikultór foti fotografia tahan batar ho telemóvel Android. Aplikasaun haruka fotografia ba Google Drive. Iha laptop, sistema deteta fotografia foun, Apache Kafka lori eventu, Apache Spark prepara imajen, CNN **SE-ResNet-18** klasifika (healthy, northern leaf blight, common rust, gray leaf spot), regra kalkula risku (LOW/MEDIUM/HIGH), PostgreSQL rai rezultadu, no rezultadu ho imajen *heatmap* fila ba telemóvel liuhusi Drive. Dashboard (Streamlit) no Tableau hatudu analítika ne'ebé Spark kalkula.
 
-**Dokumentu ne'e.** README mak pontu hahú. Nia esplika sistema tomak iha pájina uitoan no hatudu modulu ida-idak (01–06) ko'alia kona-ba saida, oinsá modulu sira liga malu, no ordem lee. Modulu ida-idak *independente*: kódigu ne'ebé modulu rua uza, esplika iha rua hotu, husi nia parte rasik.
+### A.2 Problema ne'ebé sistema rezolve
 
-| Dokumentu | Pájina | Ko'alia kona-ba |
-|---|---|---|
-| `README.pdf` | — | Vizaun jerál, mapa modulu, relasaun |
-| `01_spark_module.pdf` | 65 | Spark Structured Streaming, parse JSON, limpeza, *ingestion*, preprocessing, analítika batch JDBC |
-| `02_kafka_module.pdf` | 40 | Broker, produtór, serializasaun, partisaun, *consumer group*, payload, fila lokál |
-| `03_google_drive_module.pdf` | 60 | OAuth, kliente API Drive, watcher, upload/rezultadu, kódigu Android Drive |
-| `04_database_erd_dfd_module.pdf` | 38 | Skema PostgreSQL, ERD Mermaid, DFD Kontestu no Nível 1 |
-| `05_machine_learning_model_module.pdf` | 83 | SEResNet-18, Albumentations, normalizasaun, matemátika (Softmax, Loss, métrika), treinu, inferénsia, risku |
-| `06_end_to_end_integration_module.pdf` | 38 | Fluxu tomak, ciclu vida status, sequence diagram, kolaborasaun objetu |
+- Agrikultór iha área rurál la iha espesialista moras besik → diagnóstiku automátiku iha segundu balun.
+- Rede la estável → fila upload iha telemóvel, retry iha nível hotu, Kafka + fila lokál.
+- Autoridade presiza haree situasaun moras tuir fatin no tempu → analítika Spark (risku aas tuir fatin, tendénsia loron-loron).
+- Modelu tenke di'ak liu ho tempu → admin label fotografia → treinu foun → auto-deploy.
 
-## B. Arkivu Fonte Loloos
+### A.3 Dokumentu sira
 
-Repozitóriu `crop_disease_image_system` (Python, 13 561 liña iha arkivu `.py` ne'ebé git rastreia) no aplikasaun `android_app/` (Kotlin). Projetu treinu modelu mak repozitóriu seluk, `crop_disease_ews` (Modulu 05).
-
-| Pasta | Arkivu prinsipál (liña) | Papél | Modulu |
+| # | Dokumentu | Tópiku | Kódigu prinsipál |
 |---|---|---|---|
-| `kafka/` | `drive_watcher.py` (320), `producer.py` (275), `monitor.py` (240), `config.py` | Deteta upload Drive; publika eventu; haree topic | 02, 03 |
-| `spark/` | `streaming_job.py` (387), `ingestion.py` (127), `preprocessing.py` (937), `batch_analytics.py` (308), `analytics.py` (163), `live_log.py` (89) | Rejista no prosesa fotografia; kalkula analítika | 01 |
-| `ml/` | `inference.py` (461), `se_resnet.py` (69), `render.py` (66) | Karrega modelu, predisaun, heatmap, imajen marka | 05 |
-| `storage/` | `database.py` (744), `drive_client.py` (546), `pipeline_submit.py` (87), `requeue_stuck.py` (315), `reset.py` (336), `processing_mode.py` (48), `farmers.py` | Base de dadus, kliente Drive, haruka fali, rekuperasaun, modu | 02, 03, 04 |
-| `dashboard/` | `app.py` (1 140), `image_management_page.py` (336), `training_page.py` (502), `labelling_page.py` (157), `model_ops.py` (168) | Dashboard administradór (Streamlit) | 05, 06 |
-| `config/` | `settings.py` (240), `localtime.py` (47) | Konfigurasaun hotu (husi `.env`), oras Timor | hotu |
-| `scripts/` | `drive_authorize.py` (80), seluk | OAuth dala ida, ferramenta | 03 |
-| `scalability/` | `run.py` (1 054), seluk | Teste eskala (izoladu, topic rasik) | — |
-| `android_app/` | `DriveAuth.kt`, `DriveUploader.kt`, `DriveRest.kt`, `UploadQueue.kt`, `UploadWorker.kt` | Aplikasaun agrikultór | 03, 06 |
-| raiz | `run_all.py` (374), `docker-compose.yml` | Hahú sistema tomak; Kafka + PostgreSQL | 02, 04, 06 |
+| 0 | `README.pdf` | Vizaun jerál (dokumentu ne'e) | `run_all.py` 1–13 |
+| 1 | `01_spark_module.pdf` | Apache Spark: streaming (Kafka → parsing JSON → validasaun → preprocessing → CNN → rai), analítika batch (JDBC read/write, agregasaun) | `spark/*.py` |
+| 2 | `02_kafka_module.pdf` | Apache Kafka: serializasaun/deserializasaun JSON, produtór, fila lokál, partition, consumer group, payload, monitor | `kafka/*.py`, `storage/pipeline_submit.py`, `docker-compose.yml` |
+| 3 | `03_google_drive_module.pdf` | Google Drive: OAuth, cliente API, retry, pasta agrikultór, download, entrega rezultadu, reset, aplikasaun Android (Kotlin) | `storage/drive_client.py`, `kafka/drive_watcher.py`, `storage/results.py`, `DriveAuth/DriveUploader/DriveRest.kt` |
+| 4 | `04_database_erd_dfd_module.pdf` | PostgreSQL: modelu ORM, esquema SQL, view, Tableau, ERD, DFD kontestu + nível 1 | `storage/database.py`, `storage/schema.sql` |
+| 5 | `05_machine_learning_model_module.pdf` | SE-ResNet-18: dadus, Albumentations, ekuasaun (softmax, cross-entropy, métrika), treinu, avaliasaun, inferénsia, Grad-CAM, regra risku | projetu treinu + `ml/*.py` |
+| 6 | `06_end_to_end_integration_module.pdf` | Fluxu tomak: `run_all.py`, fila upload Android, dashboard (MANUAL/Process/Reprocess/Retry), diagrama sekuénsia | `run_all.py`, `UploadQueue/UploadWorker.kt`, `dashboard/app.py` |
 
-**Teknolojia (husi `requirements.txt` no `docker-compose.yml`):** Python, `confluent-kafka`, `pyspark`, `sqlalchemy` + `psycopg2-binary`, `torch` + `torchvision`, `Pillow`, `numpy`, `pandas`, `streamlit`, `plotly`, `bcrypt`, `google-auth` + `google-auth-oauthlib`; imajen Docker `apache/kafka:3.7.0` (KRaft, la iha Zookeeper) no `postgres:16`.
+Kada modulu iha estrutura hanesan: **A** Introdusaun · **B** Arkivu fonte · **C** Arkitetura no fluxu (diagrama Mermaid) · **D** Kódigu-ba-kódigu (kada bloku tuir pasu 9) · **E** Analize OOP · **F** Integrasaun · **G** Tratamentu erru · **H** Sumáriu no pergunta akadémiku.
 
-`scalability/` (teste eskala) la parte husi fluxu prinsipál no la iha modulu rasik: nia uza topic Kafka seluk (`maize-disease-images-scalability-test`) no la muda dadus sistema.
+### A.4 Orden lee ba principiante
+
+1. **README** (ne'e) — vizaun jerál.
+2. **Modulu 01 (Spark)** — seksaun A.3 hanorin fundamentu Python hotu (variavel, tipu, dict, funsaun, klase, `self`, `__init__`, exception, `with`, thread, decorator...). Lee uluk.
+3. **Modulu 02 (Kafka)** — JSON, arkivu, atributu klase, duck typing, closure factory.
+4. **Modulu 03 (Drive)** — HTTP, OAuth, `global`, `super()`, Kotlin báziku.
+5. **Modulu 04 (Base de dadus)** — ORM, SQL, mixin, ERD/DFD.
+6. **Modulu 05 (ML)** — NumPy, tensor, `nn.Module`, Dataset, matemátika.
+7. **Modulu 06 (Fim-ba-fim)** — Streamlit, WorkManager, oinsá hotu liga.
+
+Kada modulu mós lee mesak: konseitu ne'ebé hanorin iha modulu anterior hetan lembransa badak.
+
+## B. Arkivu Fonte Loloos (mapa repozitóriu)
+
+| Pasta / arkivu | Konteúdu | Modulu |
+|---|---|---|
+| `run_all.py` | Lansadór sistema | 06 |
+| `config/settings.py` | Konfigurasaun hotu (variavel ambiente) | hotu |
+| `kafka/` | `producer.py`, `config.py`, `drive_watcher.py`, `monitor.py` | 02, 03 |
+| `spark/` | `streaming_job.py`, `preprocessing.py`, `batch_analytics.py`, `live_log.py`, `analytics_reader.py`, `session.py` | 01 |
+| `ml/` | `inference.py`, `se_resnet.py`, `risk.py`, `render.py` | 05 |
+| `storage/` | `database.py`, `schema.sql`, `init_db.py`, `drive_client.py`, `image_storage.py`, `results.py`, `uploads.py`, `pipeline_submit.py`, `processing_mode.py`, `drive_inventory.py`, `farmers.py`, `reset.py`... | 03, 04 |
+| `dashboard/` | `app.py`, `model_ops.py`, `image_management_page.py`... | 05, 06 |
+| `scripts/` | `drive_authorize.py`, `drive_share_user.py` | 03 |
+| `android_app/.../app/` | `DriveAuth.kt`, `DriveUploader.kt`, `DriveRest.kt`, `UploadQueue.kt`, `UploadWorker.kt`... | 03, 06 |
+| `docker-compose.yml` | Kafka 3.7.0 (KRaft) + PostgreSQL 16 | 02, 04 |
+| `crop_disease_ews/` (projetu separadu) | `dataset.py`, `augment.py`, `model.py`, `train.py`, `predict.py`, `gradcam.py` | 05 |
+
+**Teknolojia:** Python 3, Apache Spark 3.5 (PySpark), Apache Kafka 3.7 (confluent-kafka), PostgreSQL 16 (SQLAlchemy, JDBC), PyTorch + torchvision, Albumentations, OpenCV, Pillow, Streamlit, Google Drive REST API v3, Android (Kotlin, WorkManager, OkHttp), Docker.
 
 ## C. Arkitetura no Fluxu Ezekusaun
 
-### C.1 Sistema tomak
+### C.1 Diagrama sistema
 
 ```mermaid
 flowchart TD
-    subgraph Telefone
-      APP[Aplikasaun Android<br/>UploadQueue + UploadWorker]
-    end
-    subgraph Google_Drive[Google Drive]
-      IMG[(images/EMAIL/ID.jpg)]
-      RES[(results/EMAIL/ID.json<br/>+ ID_processed.jpg)]
-    end
-    subgraph Laptop
-      W[kafka/drive_watcher.py<br/>la iha base de dadus]
-      K[[Kafka topic<br/>maize-disease-images]]
-      S[spark/streaming_job.py<br/>ingestion + preprocessing + CNN]
-      PG[(PostgreSQL)]
-      BA[spark/batch_analytics.py]
-      D[dashboard/app.py]
-    end
-    APP -- "upload" --> IMG
-    IMG -- "changes feed" --> W
-    W -- "drive_upload (AUTOMATIC)" --> K
-    D -- "Process / Reprocess / Retry" --> K
-    K -- "micro-batch 1 s" --> S
-    S -- "download" --> IMG
-    S -- "users, images, predictions,<br/>processing_events" --> PG
-    S -- "rezultadu" --> RES
-    RES -- "lee" --> APP
-    PG --> BA -- "analytics_*" --> PG
-    PG --> D
+    F["Agrikultór<br/>Android app"] -- "fotografia + location + GPS" --> G1["Google Drive<br/>images/email/"]
+    G1 -- "change feed" --> W["drive_watcher<br/>(Modulu 02/03)"]
+    W -- "eventu JSON" --> K["Kafka topic<br/>(Modulu 02)"]
+    K --> S["Spark Structured Streaming<br/>(Modulu 01)"]
+    S -- "download bytes" --> G1
+    S -- "tensor" --> C["CNN SE-ResNet-18<br/>+ risku (Modulu 05)"]
+    C -- "klase, konfiansa, risku" --> S
+    S -- "ORM" --> P[("PostgreSQL<br/>(Modulu 04)")]
+    S -- "JSON + heatmap" --> G2["Google Drive<br/>results/email/"]
+    G2 -- "rezultadu" --> F
+    P -- "JDBC" --> SA["Spark analítika<br/>(Modulu 01)"]
+    SA -- "JDBC" --> P
+    P --> D["Dashboard Streamlit<br/>(Modulu 06)"]
+    P --> T["Tableau (read-only)"]
+    D -- "Process / Reprocess" --> K
+    D -- "Label photos" --> TR["Treinu + auto-deploy<br/>(Modulu 05)"]
+    TR -- "saved_model_cnn.pt" --> C
 ```
 
-### C.2 Pasu fotografia ida (rezumu)
+### C.2 Relasaun entre modulu
 
-1. **Telefone** (Modulu 03, 06): `UploadQueue` rai fotografia ho `image_id` (UUID); `UploadWorker` haruka ba `images/<email>/<image_id>.jpg` iha Drive ho `appProperties` (GPS, oras).
-2. **Drive watcher** (Modulu 03, 02): `list_changes` kada 1–3 s; arkivu foun → `build_drive_event` → eventu `drive_upload` ba Kafka. Watcher **la ko'alia ho PostgreSQL**. Iha modu MANUAL nia la publika buat ida; dashboard *Pending Review* lista "fotografia Drive menus row base de dadus" no botaun Process publika eventu hanesan.
-3. **Kafka** (Modulu 02): transporta eventu JSON. Se broker mate, `ResilientBackend` rai eventu iha `storage/local_queue/` no haruka fali depois.
-4. **Spark** (Modulu 01): `parse_events` (`from_json`, *Invalid Message Channel* ba eventu aat) → `foreach_batch_sink` → `register_upload` (agrikultór, kontrola upload, duplikadu, row `INGESTED`) → `process_event`: download, `clean_event`, duplikadu SHA-256, EXIF, `model_input`, CNN, risku, `persist_result` (`COMPLETED`/`FAILED`), rezultadu ba Drive.
-5. **Modelu** (Modulu 05): SEResNet-18 ho input 224 × 224, normalizasaun ImageNet, Softmax; risku husi $1 - P(\text{healthy})$: HIGH ≥ 0.6, MEDIUM ≥ 0.3.
-6. **Base de dadus** (Modulu 04): sistema rejistu; `batch_analytics --watch` kalkula númeru dashboard ba tabela `analytics_*`.
-7. **Telefone fali**: `DriveRest.resultsSince` lee `results/<email>/` no hatudu iha ekran History.
+| Husi | Ba | Saida mak liga | Dokumentu |
+|---|---|---|---|
+| 03 Drive (watcher) | 02 Kafka | Eventu `drive_upload` | 02 C.3, 03 D.5 |
+| 02 Kafka | 01 Spark | `value` JSON → `EVENT_SCHEMA` | 01 D.2.3–D.2.4 |
+| 01 Spark | 03 Drive | Download fotografia, entrega rezultadu | 03 D.4, D.7 |
+| 01 Spark | 05 ML | `model_input` → `predict`, `compute_risk` | 05 D.10–D.13 |
+| 01 Spark | 04 BD | `register_upload`, `persist_result`, JDBC analítika | 04 C.6 |
+| 04 BD | 06 Dashboard | View, `analytics_*` | 04 D.2.15–16 |
+| 06 Dashboard | 02 Kafka | Eventu `submit`, Process | 06 D.4–D.5 |
+| 06 Dashboard | 05 ML | Label → treinu → deploy | 05 D.8 |
 
-## D. Esplikasaun Kódigu: Ponte Hahú Sistema
+### C.3 Oinsá hahú sistema
 
-Kódigu detalladu iha modulu 01–06. README hatudu de'it pontu entrada ida — `run_all.py` — tanba nia hatudu komponente hotu no ordem hahú. (Esplikasaun kompletu `run_all.py` iha Modulu 06, D.1.)
+**1. Kódigu orijinál**
 
-{{code run_all.py 1-31}}
+{{code run_all.py 1-13}}
 
-- Liña 1–2: *docstring* modulu — "launcher" ida ba sistema tomak.
-- Liña 4–10: komponente 5 ne'ebé nia hahú, kada ida iha janela konsola rasik: broker Kafka (Docker, `localhost:9092`), Spark streaming, Spark analítika (`--watch`), dashboard Streamlit (`http://localhost:8501`) no Drive watcher. PostgreSQL mós hahú husi `docker compose`. Antes hotu, nia inisializa base de dadus.
-- Liña 12–14: telefone ko'alia ho Google Drive de'it; watcher mak lori upload ba Kafka. Watcher la hahú se `scripts/drive_authorize.py` seidauk halai dala ida (OAuth, Modulu 03).
-- Liña 16–17: la iha servidór ida husi projetu ne'e ne'ebé telefone tenke to'o, entaun la presiza enderesu públiku, ngrok ka *port forwarding*. Ne'e mós razaun seguransa: Kafka no PostgreSQL loke ba `127.0.0.1` de'it.
-- Liña 19–20: konfigurasaun (ezemplu `BOOTSTRAP_ADMIN_PASSWORD`, `PYSPARK_PYTHON`) mai husi arkivu `.env`, lee husi `config/settings.py`. Segredu la hakerek iha kódigu.
-- Liña 22–31: ezemplu komandu — sistema tomak, hahú la ho komponente ida (`--no-kafka`, `--no-spark`, `--no-analytics`, `--no-drive`), *factory reset* uluk (`--reset`, rai utilizadór no admin) no hapara buat hotu (`--stop`).
+**2. Objetivu**
 
-## E. Análize OOP (Vizaun Jerál)
+Docstring `run_all.py` esplika oinsá hahú no hapara sistema tomak ho komando ida.
 
-Sistema ne'e mistura OOP no funsaun. Modulu ida-idak iha análize OOP kompletu iha nia seksaun E; tabela ne'e hatudu pontu prinsipál de'it.
+**3. Fundamentu Python**
+
+Docstring modulu (`"""..."""`) mak testu dokumentasaun iha arkivu nia leten; Python rai nia iha `__doc__`. `run_all.py` uza nia hanesan testu ajuda `--help` (`argparse.ArgumentParser(description=__doc__)`).
+
+**4. Esplikasaun liña-ba-liña**
+
+- **Liña 1–3** — Hahú sistema imajen tomak, kada parte iha janela rasik: Kafka (Docker), Spark streaming, Spark analítika, dashboard no Drive watcher.
+- **Liña 4** — Konfigurasaun mai husi `.env`.
+- **Liña 5** — Liña mamuk iha docstring.
+- **Liña 6** — `python run_all.py` — hahú hotu.
+- **Liña 7** — `--no-kafka` — broker halai ona iha fatin seluk.
+- **Liña 8** — `--no-spark` — salta Spark (no analítika).
+- **Liña 9** — `--no-analytics` — salta analítika Spark de'it.
+- **Liña 10** — `--no-drive` — salta Drive watcher.
+- **Liña 11** — `--reset` — factory reset uluk (mantein utilizadór).
+- **Liña 12** — `--stop` — hapara buat hotu ne'ebé nia hahú.
+- **Liña 13** — Remata docstring.
+
+**5. Walkthrough ezekusaun**
+
+`python run_all.py` → Docker Kafka + PostgreSQL → `init_db` → janela `EWS-Spark`, `EWS-SparkAnalytics`, `EWS-KafkaMonitor`, `EWS-Dashboard`, `EWS-DriveWatcher` → "Up. Open: Dashboard http://localhost:8501". `python run_all.py --stop` → hapara hotu.
+
+**6. Tipu dadus**
+
+`__doc__`: `str`.
+
+**7. Ligasaun OOP**
+
+Not implemented in the current codebase (docstring).
+
+**8. Impaktu integrasaun**
+
+Komando ida ne'e hahú komponente husi Modulu 01, 02, 03 no 06 (detallu: Modulu 06 D.1).
+
+**9. Checkpoint ba principiante**
+
+**P:** Komando saida mak hapara sistema?
+**R:** `python run_all.py --stop`.
+
+### C.4 Trasu badak: fotografia ida
+
+1. Telemóvel: `UploadQueue.enqueue` → `UploadWorker` → `DriveUploader` → Drive `images/<email>/<image_id>.jpg` (Modulu 06, 03).
+2. Laptop: `drive_watcher.scan_changes` → `build_drive_event` → Kafka (Modulu 02/03).
+3. Spark: `parse_events` → `foreach_batch_sink` → `_process_one` → `register_upload` → `mark_processing` (Modulu 01, 04).
+4. Spark: download → `extract_metadata` → `prepare_image` → `model_input` (Modulu 01, 03).
+5. CNN: `predict` → klase + `lesion_score`; `compute_risk` → LOW/MEDIUM/HIGH; Grad-CAM (Modulu 05).
+6. `persist_result` (PostgreSQL) → `publish_result_to_drive` (Drive `results/<email>/`) (Modulu 04, 03).
+7. Telemóvel `resultsSince`/`myHistory` → agrikultór haree rezultadu (Modulu 03).
+8. `batch_analytics.watch` → `analytics_*` → dashboard/Tableau (Modulu 01, 04).
+
+## D. Kódigu-ba-Kódigu
+
+README ne'e iha bloku kódigu ida (`run_all.py` 1–13, haree C.3). Esplikasaun kódigu hotu iha Modulu 01–06 seksaun D.
+
+## E. Analize OOP (vizaun jerál)
 
 | Konseitu | Iha ne'ebé (ezemplu) | Modulu |
 |---|---|---|
-| Klase / objetu / `__init__` | `KafkaBackend`, `LocalFileBackend`, `ResilientBackend` iha `kafka/producer.py` | 02 |
-| Herança | `DuplicateImage(InvalidEvent)`, `UploadRejected(InvalidEvent)`; klase ORM hotu husi `Base` (SQLAlchemy) | 01, 04 |
-| Polimorfizmu | Backend tolu ho métodu `send` hanesan; `get_backend` hili ida | 02 |
-| Enkapsulamentu | Métodu privadu `_connect`, `_lost_kafka`, `_claim_files` iha `ResilientBackend` | 02 |
-| Kompozisaun | `ResilientBackend` iha `KafkaBackend` + `LocalFileBackend` laran; `SEResNet18` uza `SEBlock` | 02, 05 |
-| Abstrasaun | `storage/drive_client.py` subar API Drive REST; ORM subar SQL | 03, 04 |
-| Padraun dezeñu | *Strategy* + *Factory* (`get_backend`), *Invalid Message Channel* no *Idempotent Receiver* (Spark) | 01, 02 |
-| Kotlin (telefone) | `UploadWorker : CoroutineWorker`, `object DriveRest`, `data class` | 03, 06 |
+| Klase + `__init__` + `self` | `SparkTable`, `KafkaBackend`, `ResilientBackend`, `_ResultFolderIndex`, `PlantDiseaseDataset`, `DiseasePredictor`, `GradCAM`, `_GpuBatcher` | 01, 02, 03, 05 |
+| Herança | `InvalidEvent(Exception)`, `DriveError(Exception)`, modelu ORM `(Base)`, `SEResNet18(nn.Module)`, `UploadQueue : SQLiteOpenHelper`, `UploadWorker : Worker` | 01–06 |
+| Herança múltipla / mixin | `AnalyticsSummary(_SparkOutput, Base)`; enum `(str, Enum)` | 04 |
+| Polimorfizmu | `forward` override; backend `send` (duck typing); `sealed class Outcome` + `when` | 02, 03, 05 |
+| Enkapsulamentu | konvensaun `_` (Python), `private` (Kotlin) | hotu |
+| Komposisaun | `ResilientBackend` na'in `LocalFileBackend`; `Image` cascade `Prediction`; `SEResNet18` na'in `SEBlock` | 02, 04, 05 |
+| Atributu klase | `ResilientBackend.RETRY_SECONDS`, `__tablename__`, membru enum | 02, 04 |
+| Singleton | `object` Kotlin, `UploadQueue.get`, `_session`, `getOrCreate()` | 01, 03, 06 |
+| Padraun seluk | Builder, Factory, Observer/hook, Producer–Consumer, Retry/backoff, Upsert idempotent | 01–06 |
+| Klase abstrata/interface rasik | Not implemented in the current codebase. | — |
 
-Spark rasik (`streaming_job.py`, `preprocessing.py`) liuliu funsaun: DataFrame no *closure* `foreachBatch`, la'ós hierarkia klase.
+## F. Integrasaun
 
-## F. Integrasaun: Relasaun Entre Modulu
+Haree C.1–C.2 no kada modulu seksaun F. Kontratu dadus importante:
 
-### F.1 Mapa dependénsia modulu
+- **Eventu Kafka**: naran chave `build_drive_event`/`build_upload_event` = `EVENT_SCHEMA` Spark (Modulu 01/02).
+- **Drive**: naran arkivu `<image_id>.jpg/.json/_processed.jpg`, chave `appProperties` (Modulu 03).
+- **Modelu**: `state_dict` + `architecture` + `class_names` + `img_size/mean/std` (Modulu 05).
+- **BD**: modelu ORM = tabela; `LATEST_PREDICTION_CTE` (Modulu 04).
 
-```mermaid
-flowchart TD
-    M03[03 Google Drive<br/>telefone + watcher + kliente] -- "eventu drive_upload" --> M02[02 Kafka]
-    M02 -- "micro-batch" --> M01[01 Spark]
-    M01 -- "tensor 224×224" --> M05[05 Modelu ML]
-    M05 -- "klase, konfiansa, risku" --> M01
-    M01 -- "row + analytics_*" --> M04[04 Base de dadus]
-    M01 -- "download + rezultadu" --> M03
-    M04 -- "pending = Drive menus DB" --> M03
-    M06[06 End-to-End] -.-> M01
-    M06 -.-> M02
-    M06 -.-> M03
-    M06 -.-> M04
-    M06 -.-> M05
-```
+## G. Tratamentu Erru no Konfiabilidade (vizaun jerál)
 
-### F.2 Kontratu entre modulu
-
-| Husi → Ba | Kontratu (saida mak liu) | Iha ne'ebé esplika |
+| Kamada | Mekanizmu | Modulu |
 |---|---|---|
-| Telefone → Drive | `images/<email>/<image_id>.jpg` + `appProperties` | 03 D.10 |
-| Drive watcher → Kafka | JSON `kind: drive_upload` (`image_id`, `image_path`, `owner_email`, oras, GPS) | 02 D.5, 03 D.6 |
-| Dashboard → Kafka | `drive_upload` (Pending Review) ka `submit` (Reprocess/Retry) | 02 D.4, 06 D.5 |
-| Kafka → Spark | `readStream.format("kafka")`, `from_json` ho skema string | 01 D.1, 02 D.6 |
-| Spark → Modelu | tensor `[1, 3, 224, 224]` normalizadu | 01 D.2, 05 D.10–D.12 |
-| Spark → PostgreSQL | `users`, `images`, `predictions`, `processing_events`, `rejected_events`; JDBC ba `analytics_*` | 01 D.2–D.3, 04 D.2 |
-| Spark → Drive | `results/<email>/<image_id>.json` + `_processed.jpg` | 01 D.2, 03 D.7 |
-| Drive → Telefone | `resultsSince` / `findResults` | 03 D.11 |
+| Telemóvel | Fila SQLite, WorkManager, retry 4, `findImage` | 03, 06 |
+| Drive | Backoff 429/5xx, network retry, upsert | 03 |
+| Kafka | Ack + `flush`, fila lokál, `drain`, lock troka naran | 02 |
+| Spark | Checkpoint, `rejected_reason`, `replay_state`, commit depois upload, `_auto_resend` | 01 |
+| CNN | `ModelNotAvailable`, uncertain, OOM → batch ki'ik, hot-reload | 05 |
+| BD | FK/UNIQUE/CHECK, `pool_pre_ping`, staging + transasaun | 04 |
+| Operasaun | `run_all` guarda PID, saúde Spark, fotografia hein | 06 |
 
-### F.3 Ordem lee rekomendada
+Limitasaun prinsipál: komputadór ida (Spark driver-side), konta Drive sentrál ida, nó Kafka ida, la iha autentikasaun Kafka (port localhost de'it), preprocessing treinu vs sistema la hanesan kompletu (squeeze vs crop), dokumentasaun Tetun presiza revizaun falante nativu.
 
-1. **README** (ida ne'e) — mapa.
-2. **06 End-to-End** — haree fluxu tomak uluk.
-3. **03 Google Drive** → **02 Kafka** → **01 Spark** — tuir dalan fotografia.
-4. **05 Modelu ML** — oinsá klasifikasaun no risku servisu.
-5. **04 Base de dadus** — ERD no DFD ba dadus hotu.
+## H. Sumáriu no Pergunta Akadémiku
 
-## G. Tratamentu Erru no Konfiabilidade (Vizaun Jerál)
+### H.1 Sumáriu
 
-| Falla | Resposta sistema | Modulu |
-|---|---|---|
-| Kafka mate | Eventu ba fila lokál `storage/local_queue/*.jsonl`; `drain()` haruka fali | 02 |
-| Spark mate iha klaran batch | *Checkpoint* halai fali batch; `replay_state` skip fotografia COMPLETED (*idempotent*) | 01 |
-| Eventu JSON aat | *Invalid Message Channel* → tabela `rejected_events`; batch kontinua | 01, 02 |
-| Fotografia dala rua | `register_upload` (`image_id`) no SHA-256 → FAILED "Duplicate photo" | 01 |
-| Agrikultór foun ho fotografia barak dala ida | `get_or_create_farmer` kaer `IntegrityError` no lee konta ne'ebé thread seluk kria | 01, 04 |
-| Drive la to'o | Erru rejista; `requeue_stuck` haruka fali; rezultadu ho `result_published_at` mamuk haruka fali | 03, 06 |
-| Laptop la iha internet | Telefone rai iha `UploadQueue` no koko fali (WorkManager) | 06 |
+EWS mak pipeline dadus distribuidu: Android → Google Drive → watcher → Kafka → Spark (preprocessing) → CNN SE-ResNet-18 (klasifikasaun) → regra risku → PostgreSQL + Drive → Android; Spark batch → analítika → dashboard/Tableau; label admin → treinu → auto-deploy. Komponente kada ida iha responsabilidade rasik no konfiabilidade iha nível hotu.
 
-**Limitasaun ne'ebé dokumentu hatudu loloos:** sistema halai iha laptop ida (broker Kafka ida, partisaun ida); modelu treinu ho fotografia dataset (akurásia teste 94.58 %), maibé fotografia to'os real hatudu akurásia ki'ik liu; nível risku mak regra (*rule*), la'ós output modelu ida. Detalle iha seksaun G kada modulu.
+### H.2 Pergunta no resposta
 
-**Seguransa:** Kafka no PostgreSQL loke ba `127.0.0.1` de'it; segredu iha `.env`; dokumentu hotu redaktá *password*/*token* (`***`) iha kódigu ne'ebé hatudu.
+**P1. Tanba sá sistema uza Kafka entre Drive no Spark?**
+R: Separa produtór (watcher, dashboard) husi konsumidór (Spark); eventu la lakon (disku + checkpoint); fila lokál bainhira Kafka mate (Modulu 02).
 
-## H. Rezumu no Pergunta Akadémiku
+**P2. Komponente ida ne'ebé mak halo preprocessing imajen?**
+R: Spark (`spark/preprocessing.py`: `prepare_image`, `model_input`); CNN só klasifika (Modulu 01, 05).
 
-**Rezumu.** EWS mak *pipeline* streaming: telefone → Google Drive → watcher *stateless* → Kafka → Spark (gatekeeper ida de'it ne'ebé hakerek base de dadus) → CNN SEResNet-18 → PostgreSQL + rezultadu iha Drive → telefone. Modulu 01–06 esplika kada parte ho kódigu loloos no númeru liña.
+**P3. Oinsá Spark hakerek ba PostgreSQL?**
+R: Streaming: SQLAlchemy ORM (`persist_result`). Analítika: JDBC `spark.read.jdbc` no `df.write.mode("append").jdbc` ba tabela `_staging`, depois transasaun troka (Modulu 01 D.4.7).
 
-**P1. Tanba sa telefone la ko'alia direta ho servidór?**
-> Projetu la iha servidór públiku. Google Drive mak "kaixa korreiu": telefone hakerek iha `images/`, lee husi `results/`. Ne'e evita enderesu públiku no loke porta, no fotografia iha kópia durável iha Drive (Modulu 03).
+**P4. Saida mak rezultadu teste modelu?**
+R: `results/classification_report.txt` (2026-10-03): akurásia 0.95, weighted F1 0.95, imajen teste 646; Gray_Leaf_Spot F1 0.86 (Modulu 05 B).
 
-**P2. Tanba sa uza Kafka entre watcher no Spark?**
-> Kafka separa produtór no konsumidór: se Spark mate, eventu hela iha topic no Spark kontinua husi nia *checkpoint*. Watcher no dashboard publika iha formatu hanesan (Modulu 02).
-
-**P3. Tanba sa watcher la iha base de dadus?**
-> Dezeñu 2026-10-24: Spark mak hakerek-na'in ida de'it ba `images`. Kópia durável fotografia iha Drive, entaun "pending" mak Drive menus base de dadus — la presiza row antes Spark (Modulu 01 D.6, 06 A).
-
-**P4. Oinsá sistema garante fotografia ida la prosesa dala rua?**
-> Nível tolu: `register_upload` haree `image_id`/`image_path`; `replay_state` skip row COMPLETED bainhira batch halai fali; SHA-256 husi konteúdu deteta fotografia hanesan ho naran seluk (Modulu 01 G).
-
-**P5. Saida mak Spark halo ne'ebé Python simples la halo?**
-> Structured Streaming fó *micro-batch*, *offset checkpoint* ho Kafka no `from_json` ho skema; job batch analítika uza DataFrame no JDBC ba PostgreSQL (Modulu 01 D.1, D.3).
-
-**P6. Tanba sa SEResNet-18?**
-> ResNet-18 ho bloku *Squeeze-and-Excitation* ne'ebé fó pezu ba kanál. Modelu ki'ik (halai iha laptop, GPU RTX 3050 ka CPU) no akurásia teste 94.58 % (Modulu 05).
+**P5. Oinsá telemóvel no laptop ko'alia la ho server publiku?**
+R: Liuhusi pasta Google Drive partilla: telemóvel upload ba `images/<email>/` no lee `results/<email>/`; laptop uza change feed no API Drive (Modulu 03).
