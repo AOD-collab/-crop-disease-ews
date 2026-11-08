@@ -4,14 +4,6 @@ A real-time / near-real-time Big Data pipeline that turns real maize leaf
 photos into disease classifications and risk alerts, built for the DIT
 Capstone Project (Big Data, S1 Siencia Komputador, 2026).
 
-**Simulation has been completely removed.** There is no `data_source/`
-package, no synthetic feature generator, no fake predictions. Every value
-that reaches the database comes from a real uploaded photo, a real EXIF
-tag, a real CNN analysis, or a server-generated timestamp. If a
-component is unavailable (no trained model, no Kafka broker, a corrupted
-photo), the system reports that clearly instead of inventing an answer.
-
----
 
 
 > **Architecture update — Google Drive.** The Android app now talks only to
